@@ -236,7 +236,8 @@ class ReasoningService:
                 parameters["query"] = str(q)
             if pid := raw.get("product_id"):
                 parameters["product_id"] = str(pid)
-
+            if vid := raw.get("variant_id"):
+                parameters["variant_id"] = str(vid)
             if code := raw.get("code"):
                 parameters["code"] = str(code).upper()
             if (qty := raw.get("quantity")) and isinstance(qty, int) and qty > 0:

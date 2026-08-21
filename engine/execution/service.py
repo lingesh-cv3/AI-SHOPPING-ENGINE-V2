@@ -89,6 +89,12 @@ class Executed:
     error_code: str | None = None
     latency_ms: int | None = None
     final_state: str = str(CaseState.OUTCOME)
+        #: Set when the action could not proceed because the shopper has not said enough
+    #: yet - which size, which grind. Not a failure: asking is the correct outcome,
+    #: and guessing a size on their behalf is how a shop ends up with a returns
+    #: problem.
+    needs_choice: bool = False
+    choices: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ExecutionService:
@@ -337,7 +343,6 @@ class ExecutionService:
                         "quantity_available": stock.quantity_available,
                     },
                 )
-
             case ActionType.ADD_TO_CART:
                 product_id = params.get("product_id")
                 if not (product_id and case.cart_id):
@@ -348,13 +353,69 @@ class ExecutionService:
                         error_code="VALIDATION_ERROR",
                         final_state=str(CaseState.FAILED),
                     )
+
+                variant_id = params.get("variant_id")
+
+                # A product with options cannot be added without choosing one. The
+                # platform would accept it - Northfield happily adds a shoe with no
+                # size - and the shopper would discover the problem at delivery.
+                # Asking costs one turn; guessing costs a return.
+                product = await adapter.get_product(product_id)
+                buyable = [
+                    v for v in product.variants if str(v.availability) != "OUT_OF_STOCK"
+                ]
+
+                if product.variants and not variant_id:
+                    if not buyable:
+                        return Executed(
+                            succeeded=False,
+                            action_type=str(action_type),
+                            summary=f"Every option of {product.title} is sold out.",
+                            error_code="INVENTORY_INSUFFICIENT",
+                            final_state=str(CaseState.FAILED),
+                        )
+                    if len(buyable) == 1:
+                        # Only one thing they could mean. Asking would be pedantic.
+                        variant_id = buyable[0].variant_id
+                    else:
+                        return Executed(
+                            succeeded=False,
+                            action_type=str(action_type),
+                            summary=(
+                                f"{product.title} comes in "
+                                f"{len(buyable)} options - asked which one."
+                            ),
+                            needs_choice=True,
+                            choices=[
+                                {
+                                    "variant_id": v.variant_id,
+                                    "label": v.title or v.variant_id,
+                                    "product_id": product_id,
+                                    "product_title": product.title,
+                                    "left": v.quantity_available,
+                                }
+                                for v in buyable
+                            ],
+                            payload={"product_id": product_id},
+                            final_state=str(CaseState.DIAGNOSED),
+                        )
+
+                cart = await adapter.add_to_cart(
+                    case.cart_id, product_id, variant_id=variant_id
+                )
                 cart = await adapter.add_to_cart(case.cart_id, product_id)
+                chosen = next(
+                    (v.title for v in product.variants if v.variant_id == variant_id),
+                    None,
+                )
                 return Executed(
                     succeeded=True,
                     action_type=str(action_type),
                     summary=(
-                        f"Added {product_id}. Cart now holds {cart.item_count} "
-                        f"item(s), {cart.grand_total}."
+                        f"Added {product.title}"
+                        + (f" ({chosen})" if chosen else "")
+                        + f". Cart now holds {cart.item_count} item(s), "
+                        f"{cart.grand_total}."
                     ),
                     payload={
                         "cart_id": cart.cart_id,

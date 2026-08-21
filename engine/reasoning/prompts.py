@@ -131,6 +131,16 @@ def propose_tool() -> dict[str, Any]:
                                         "in the context."
                                     ),
                                 },
+                                "variant_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "For ADD_TO_CART, when the shopper named a "
+                                        "size, weight or grind. Use the exact "
+                                        "variant id from the context. Leave it out "
+                                        "if they did not say - the system will ask "
+                                        "them rather than guess."
+                                    ),
+                                },
                                 "quantity": {
                                     "type": "integer",
                                     "minimum": 1,
