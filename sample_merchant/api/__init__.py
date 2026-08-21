@@ -1,0 +1,1 @@
+"""Deliberately awkward REST API."""

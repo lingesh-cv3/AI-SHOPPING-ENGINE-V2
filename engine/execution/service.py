@@ -1,0 +1,577 @@
+"""Execution.
+
+Runs an action that has already been decided, gated, and (where required)
+approved. It answers no questions - by the time anything reaches here, what to do
+and whether it is allowed have both been settled.
+
+Three things this service is responsible for that nothing else can do:
+
+Re-checking capability at execution time. The Decision Engine filtered against a
+cached capability declaration, which may be up to five minutes old. A token can
+expire and a scope can be revoked in that window. Checking again here is the
+difference between a stale cache causing a wasted decision and a stale cache
+causing a failed execution against a live merchant.
+
+Idempotency derived from the case. The key is the case id, not a random value, so a
+retried execution of the same case cannot charge a shopper twice. A random key per
+attempt would defeat the entire purpose of having one.
+
+Recording what happened. Every execution writes an outcome, including the failures.
+A recovery system that only records its successes cannot tell you whether it works.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from engine import db
+from engine.decision import CapabilityRegistry
+from shared.models import (
+    ActionType,
+    CapabilityUnsupported,
+    CaseState,
+    CommerceError,
+    Operation,
+)
+
+from shared.models import (
+    ActionType,
+    CapabilityUnsupported,
+    CaseState,
+    CommerceError,
+    Operation,
+    PaymentRecoveryMethod,
+)
+
+#: Which recovery mechanism each action asks for.
+#:
+#: RETRY_PAYMENT maps to retrying the same method, which is the one least likely to
+#: work - a bank that just declined a card declines it again. It stays available
+#: because some declines are transient (an issuer timeout), but the ranking table
+#: puts it last for exactly this reason.
+_RECOVERY_METHOD = {
+    ActionType.RETRY_PAYMENT: PaymentRecoveryMethod.RETRY_SAME_METHOD,
+    ActionType.OFFER_ALTERNATE_PAYMENT: PaymentRecoveryMethod.ALTERNATE_METHOD,
+    ActionType.SPLIT_PAYMENT: PaymentRecoveryMethod.SPLIT_PAYMENT,
+}
+
+logger = logging.getLogger(__name__)
+
+#: Actions that finish without touching the merchant's backend. Answering a
+#: question and handing a case to a colleague are both real outcomes; neither is a
+#: commerce operation, and treating them as failures because no API was called
+#: would misreport the thing that actually happened.
+NO_EXECUTION: frozenset[ActionType] = frozenset(
+    {
+        ActionType.ANSWER_PRODUCT_QUESTION,
+        ActionType.ESCALATE_TO_HUMAN,
+        ActionType.NO_ACTION,
+        ActionType.NOTIFY_BACK_IN_STOCK,
+    }
+)
+
+
+@dataclass
+class Executed:
+    """What happened when an action ran.
+
+    summary is written for a person reading the queue, not for a log. An operator
+    who approved something wants to know what it did, in a sentence.
+    """
+
+    succeeded: bool
+    action_type: str
+    summary: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    error_code: str | None = None
+    latency_ms: int | None = None
+    final_state: str = str(CaseState.OUTCOME)
+
+
+class ExecutionService:
+    """Carries out approved actions. Makes no decisions."""
+
+    def __init__(self, registry: CapabilityRegistry) -> None:
+        self._registry = registry
+
+    async def execute_case(self, connection_id: str, case_id: str) -> Executed:
+        """Run the action a case selected, then record the outcome.
+
+        Loads the case from the database rather than taking the action as an
+        argument. That is deliberate: the thing executed must be the thing that was
+        approved, and reading it back from storage is the only way to be sure
+        nothing was substituted in between.
+        """
+        case = await db.get_case(connection_id, case_id)
+        if case is None:
+            return Executed(
+                succeeded=False,
+                action_type="UNKNOWN",
+                summary="That case does not exist on this connection.",
+                error_code="CASE_NOT_FOUND",
+                final_state=str(CaseState.FAILED),
+            )
+
+        try:
+            action_type = ActionType(case.selected_action or "")
+        except ValueError:
+            return Executed(
+                succeeded=False,
+                action_type=case.selected_action or "UNKNOWN",
+                summary="The recorded action is not one the engine recognises.",
+                error_code="VALIDATION_ERROR",
+                final_state=str(CaseState.FAILED),
+            )
+
+        # Idempotency, for actions where a repeat has a cost. The key is derived
+        # from the case, so a retry carries the same key as the first attempt and is
+        # recognisable as a retry - a fresh random key per attempt would defeat the
+        # whole mechanism.
+        key = None
+        if db.idempotency.guarded(action_type):
+            params = self._params_for(case, action_type)
+            key = db.idempotency.key_for(case.case_id, str(action_type), params)
+            prior = await db.idempotency.claim(
+                connection_id=connection_id,
+                case_id=case.case_id,
+                action_type=str(action_type),
+                idempotency_key=key,
+            )
+            if prior is not None:
+                # Already attempted. Return what happened the first time rather than
+                # doing it again.
+                if prior["state"] == "IN_FLIGHT":
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=(
+                            "An earlier attempt is unresolved - the platform may or "
+                            "may not have acted. A person should check before this "
+                            "is retried."
+                        ),
+                        error_code="IDEMPOTENCY_CONFLICT",
+                        final_state=str(CaseState.FAILED),
+                    )
+                return Executed(
+                    succeeded=bool(prior.get("succeeded")),
+                    action_type=str(action_type),
+                    summary=f"Already done: {prior.get('summary')}",
+                    payload=prior.get("result") or {},
+                    final_state=str(CaseState.OUTCOME),
+                )
+
+        result = await self._run(connection_id, case, action_type)
+
+        if key is not None:
+            await db.idempotency.complete(
+                key,
+                succeeded=result.succeeded,
+                summary=result.summary,
+                result=result.payload,
+            )
+        # Revenue recovered, where there is any. Only counted when money actually
+        # moved - a successful search recovers a sale in spirit and nothing in fact,
+        # and reporting it as revenue would inflate every number we quote.
+        await db.record_outcome(
+            connection_id=connection_id,
+            case_id=case_id,
+            resolved=result.succeeded,
+            final_state=result.final_state,
+            friction_type=case.friction_type,
+            amount=result.payload.get("recovered_amount"),
+            currency=result.payload.get("recovered_currency"),
+            required_human=case.risk_outcome != "AUTO",
+        )
+        return result
+
+    @staticmethod
+    def _params_for(case, action_type: ActionType) -> dict:
+        """Parameters of the selected proposal, for the idempotency key."""
+        for row in case.proposed or []:
+            if isinstance(row, dict) and row.get("action_type") == str(action_type):
+                return dict(row.get("parameters") or {})
+        return {}
+
+    # -- dispatch ----------------------------------------------------------
+
+    async def _run(self, connection_id: str, case, action_type: ActionType) -> Executed:
+        if action_type in NO_EXECUTION:
+            return self._terminal(action_type, case)
+
+        adapter = self._registry.adapter_for(connection_id)
+        if adapter is None:
+            return Executed(
+                succeeded=False,
+                action_type=str(action_type),
+                summary="No adapter is connected for this merchant.",
+                error_code="AUTH_FAILED",
+                final_state=str(CaseState.FAILED),
+            )
+
+        # The capability re-check promised above. The decision was made against a
+        # cache; this is the authoritative read.
+        operation = self._operation_for(action_type)
+        if operation is not None:
+            caps = await self._registry.get(connection_id, force=True)
+            if caps is None or not caps.supports(operation):
+                self._registry.invalidate(connection_id)
+                return Executed(
+                    succeeded=False,
+                    action_type=str(action_type),
+                    summary=(
+                        "This merchant's platform no longer supports that operation. "
+                        "It did when the action was chosen, so the connection may "
+                        "have changed."
+                    ),
+                    error_code="CAPABILITY_UNSUPPORTED",
+                    final_state=str(CaseState.UNSUPPORTED),
+                )
+
+        started = time.perf_counter()
+        try:
+            result = await self._dispatch(adapter, case, action_type)
+        except CapabilityUnsupported as exc:
+            self._registry.invalidate(connection_id)
+            return Executed(
+                succeeded=False,
+                action_type=str(action_type),
+                summary="The platform refused: it cannot perform that operation.",
+                error_code=str(exc.code),
+                final_state=str(CaseState.UNSUPPORTED),
+            )
+        except CommerceError as exc:
+            return Executed(
+                succeeded=False,
+                action_type=str(action_type),
+                summary=f"The platform reported a problem: {exc.message}",
+                error_code=str(exc.code),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                final_state=str(CaseState.FAILED),
+            )
+
+        result.latency_ms = int((time.perf_counter() - started) * 1000)
+        return result
+
+    async def _dispatch(self, adapter, case, action_type: ActionType) -> Executed:
+        """Map an action onto a commerce call.
+
+        Note that the search-based actions execute by fetching the alternatives
+        rather than by showing them. Execution's job is to produce the result; what
+        the shopper sees is the storefront's job.
+        """
+               # Parameters from the *selected* action, not merged across all proposals.
+        # Merging them would let a rejected proposal's search term leak into the
+        # chosen one, and two proposals can legitimately carry different terms.
+        params: dict[str, Any] = {}
+        for row in case.proposed or []:
+            if isinstance(row, dict) and row.get("action_type") == str(action_type):
+                params = dict(row.get("parameters") or {})
+                break
+
+        match action_type:
+            case ActionType.SUGGEST_ALTERNATIVE | ActionType.RECOMMEND_PRODUCTS:
+                # The model's suggested term, or the shopper's original if it did
+                # not supply one. Falling back to the original is not much use, but
+                # it is honest - better than inventing a term.
+                query = params.get("query") or case.query or ""
+                found = await adapter.search_products(query, limit=6)
+                titles = [p.title for p in found.products]
+                if not titles:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=f'Searched for "{query}" and still found nothing.',
+                        payload={"query": query, "products": []},
+                        final_state=str(CaseState.FAILED),
+                    )
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f'Searched "{query}" and found {len(titles)}: '
+                        + ", ".join(titles[:3])
+                        + ("…" if len(titles) > 3 else "")
+                    ),
+                    payload={
+                        "query": query,
+                        "products": [
+                            {
+                                "product_id": p.product_id,
+                                "title": p.title,
+                                "price": str(p.price) if p.price else None,
+                                "availability": str(p.availability),
+                            }
+                            for p in found.products
+                        ],
+                    },
+                )
+
+            case ActionType.CHECK_AVAILABILITY:
+                product_id = params.get("product_id")
+                if not product_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="No product was named, so there was nothing to check.",
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+                stock = await adapter.check_inventory(product_id)
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f"{product_id} is {stock.availability}"
+                        + (
+                            f", {stock.quantity_available} left"
+                            if stock.quantity_available is not None
+                            else ""
+                        )
+                    ),
+                    payload={
+                        "product_id": product_id,
+                        "availability": str(stock.availability),
+                        "quantity_available": stock.quantity_available,
+                    },
+                )
+
+            case ActionType.ADD_TO_CART:
+                product_id = params.get("product_id")
+                if not (product_id and case.cart_id):
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="A cart and a product are both needed to add a line.",
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+                cart = await adapter.add_to_cart(case.cart_id, product_id)
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f"Added {product_id}. Cart now holds {cart.item_count} "
+                        f"item(s), {cart.grand_total}."
+                    ),
+                    payload={
+                        "cart_id": cart.cart_id,
+                        "item_count": cart.item_count,
+                        "grand_total": str(cart.grand_total),
+                    },
+                )
+            case ActionType.REMOVE_CART_LINE | ActionType.UPDATE_CART_QUANTITY:
+                # The model names a product; the platform wants a line id. Reading
+                # the cart to translate is the adapter boundary working as intended -
+                # a shopper says "remove the racing shoe", not "remove LN00042".
+                if not case.cart_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="There is no cart to change.",
+                        error_code="CART_NOT_FOUND",
+                        final_state=str(CaseState.FAILED),
+                    )
+
+                cart = await adapter.get_cart(case.cart_id)
+                wanted = str(params.get("product_id") or "").lower()
+                title_hint = str(params.get("query") or "").lower()
+
+                line = None
+                for candidate in cart.lines:
+                    if wanted and candidate.product_id.lower() == wanted:
+                        line = candidate
+                        break
+                    if title_hint and title_hint in candidate.title.lower():
+                        line = candidate
+                        break
+                # One item in the cart and no usable hint - there is only one thing
+                # they can mean, and refusing on a technicality would be obtuse.
+                if line is None and len(cart.lines) == 1:
+                    line = cart.lines[0]
+
+                if line is None:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=(
+                            "Could not tell which item they meant. Asking is better "
+                            "than removing the wrong one."
+                        ),
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+
+                if action_type is ActionType.REMOVE_CART_LINE:
+                    quantity = 0
+                else:
+                    raw_qty = params.get("quantity")
+                    quantity = int(raw_qty) if str(raw_qty).isdigit() else 1
+
+                updated = await adapter.update_cart(
+                    case.cart_id, line.line_id, quantity=quantity
+                )
+                verb = "Removed" if quantity == 0 else f"Set to {quantity}:"
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f"{verb} {line.title}. Cart now holds "
+                        f"{updated.item_count} item(s), {updated.grand_total}."
+                    ),
+                    payload={
+                        "cart_id": updated.cart_id,
+                        "item_count": updated.item_count,
+                        "grand_total": str(updated.grand_total),
+                        "removed": line.title if quantity == 0 else None,
+                    },
+                )
+            case ActionType.APPLY_PROMOTION:
+                code = params.get("code") or params.get("query")
+                if not (code and case.cart_id):
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=(
+                            "No coupon code was recorded, so nothing could be "
+                            "applied. A discount is not something to guess at."
+                        ),
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+                # Idempotency comes from the case id, so approving twice cannot
+                # discount twice.
+                await adapter.apply_promotion(case.cart_id, str(code))
+                cart = await adapter.get_cart(case.cart_id)
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f"Applied {code}. Discount {cart.discount_total}, "
+                        f"new total {cart.grand_total}."
+                    ),
+                    payload={
+                        "code": str(code),
+                        "discount": str(cart.discount_total),
+                        "grand_total": str(cart.grand_total),
+                    },
+                )
+
+            case (
+                ActionType.RETRY_PAYMENT
+                | ActionType.OFFER_ALTERNATE_PAYMENT
+                | ActionType.SPLIT_PAYMENT
+            ):
+                # Only reachable on a platform that declared recovery supported.
+                # Northfield raises CapabilityUnsupported long before this runs.
+                if not case.order_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="No order was recorded, so there is nothing to recover.",
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+
+                method = _RECOVERY_METHOD[action_type]
+                key = db.idempotency.key_for(
+                    case.case_id, str(action_type), {"order": case.order_id}
+                )
+                outcome = await adapter.recover_payment(
+                    case.order_id, method=method, idempotency_key=key
+                )
+
+                if not outcome.succeeded:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=(
+                            f"Recovery did not work: "
+                            f"{outcome.reason or 'the platform declined'}."
+                        ),
+                        payload={"method": str(method), "order_id": case.order_id},
+                        error_code="PAYMENT_RECOVERY_FAILED",
+                        final_state=str(CaseState.FAILED),
+                    )
+
+                amount = outcome.amount_recovered
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f"Recovered {amount} on {case.order_id}"
+                        + (f" - {outcome.reason}." if outcome.reason else ".")
+                    ),
+                    payload={
+                        "method": str(method),
+                        "order_id": case.order_id,
+                        # Read by record_outcome. This is the first place in the
+                        # system where a real recovered amount exists.
+                        "recovered_amount": str(amount.amount) if amount else None,
+                        "recovered_currency": amount.currency if amount else None,
+                    },
+                )
+
+        return Executed(
+            succeeded=False,
+            action_type=str(action_type),
+            summary="The engine has no execution path for that action yet.",
+            error_code="CAPABILITY_UNSUPPORTED",
+            final_state=str(CaseState.UNSUPPORTED),
+        )
+
+    def _terminal(self, action_type: ActionType, case) -> Executed:
+        """Actions that complete without a backend call."""
+        if action_type is ActionType.ESCALATE_TO_HUMAN:
+            return Executed(
+                succeeded=True,
+                action_type=str(action_type),
+                summary=(
+                    "Handed to a person. Nothing was attempted automatically, "
+                    "which was the correct outcome here."
+                ),
+                final_state=str(CaseState.ESCALATED),
+            )
+        if action_type is ActionType.NOTIFY_BACK_IN_STOCK:
+            return Executed(
+                succeeded=False,
+                action_type=str(action_type),
+                summary=(
+                    "Back-in-stock alerts need an email service, which is not "
+                    "built. Recorded rather than pretended."
+                ),
+                error_code="CAPABILITY_UNSUPPORTED",
+                final_state=str(CaseState.UNSUPPORTED),
+            )
+        # The shopper_reply is deliberately not used here. When an action was held
+        # for approval, that reply is the holding message - so echoing it back would
+        # tell the approver that something needs approving, as the result of them
+        # approving it. What the AI actually wanted to say is the useful thing.
+        said = case.model_reply or case.shopper_reply
+        return Executed(
+            succeeded=True,
+            action_type=str(action_type),
+            summary=(
+                f"Answered the shopper: \u201c{said}\u201d"
+                if said
+                else "Answered the shopper. No commerce operation was needed."
+            ),
+        )
+    @staticmethod
+    def _operation_for(action_type: ActionType) -> Operation | None:
+        mapping = {
+            ActionType.SUGGEST_ALTERNATIVE: Operation.SEARCH_PRODUCTS,
+            ActionType.RECOMMEND_PRODUCTS: Operation.SEARCH_PRODUCTS,
+            ActionType.CHECK_AVAILABILITY: Operation.CHECK_INVENTORY,
+            ActionType.ADD_TO_CART: Operation.ADD_TO_CART,
+            ActionType.UPDATE_CART_QUANTITY: Operation.UPDATE_CART,
+            ActionType.REMOVE_CART_LINE: Operation.UPDATE_CART,
+            ActionType.APPLY_PROMOTION: Operation.APPLY_PROMOTION,
+            ActionType.RETRY_PAYMENT: Operation.RECOVER_PAYMENT,
+            ActionType.OFFER_ALTERNATE_PAYMENT: Operation.RECOVER_PAYMENT,
+            ActionType.SPLIT_PAYMENT: Operation.RECOVER_PAYMENT,
+            ActionType.ISSUE_REFUND: Operation.RECOVER_PAYMENT,
+        }
+        return mapping.get(action_type)

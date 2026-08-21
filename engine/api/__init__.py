@@ -1,0 +1,1 @@
+"""FastAPI routes: engine, policy, pipeline simulation, and the shop proxy."""
