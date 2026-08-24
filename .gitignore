@@ -2,6 +2,7 @@
 *.log
 *.sql
 *.sqlite
+*.db
 
 # OS generated files
 .DS_Store
@@ -27,4 +28,6 @@ bin/
 obj/
 
 
-.venv
+venv/
+.venv/
+env/

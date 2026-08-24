@@ -31,6 +31,7 @@ export function ChatWidget({
   onCartChanged,
   unread,
   merchantName,
+  onUnread,
 }: {
   sessionId: string;
   cartId?: string;
@@ -48,6 +49,8 @@ export function ChatWidget({
   /** The merchant's own name. A coffee roaster's assistant should not introduce
    *  itself as a running shop. */
   merchantName?: string;
+  /** Called when messages arrive while the chat is shut, so the parent can badge. */
+  onUnread?: (count: number) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -59,6 +62,40 @@ export function ChatWidget({
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns, busy]);
+
+  // Poll for turns written by something other than this shopper.
+  //
+  // When an operator approves a payment recovery, the outcome is written into the
+  // session by the engine, not returned as a reply to anything typed here. Without
+  // polling, a shopper told "someone will pick this up" would sit there while the
+  // money was recovered and never learn it happened.
+  //
+  // Ten seconds is a compromise: fast enough that an approval feels prompt, slow
+  // enough not to hammer the engine for a shopper who has wandered off. A real
+  // deployment would use a websocket and drop this entirely.
+  useEffect(() => {
+    const seen = new Set(turns.map((t) => t.text));
+
+    async function poll() {
+      try {
+        const { turns: stored } = await api.transcript(sessionId);
+        const fresh = stored
+          .filter((t) => t.speaker === "assistant" && !seen.has(t.text))
+          .map((t) => ({ speaker: "assistant" as const, text: t.text }));
+
+        if (fresh.length > 0) {
+          onTurns([...turns, ...fresh]);
+          if (!open) onUnread?.(fresh.length);
+        }
+      } catch {
+        // A failed poll is not worth surfacing. The next one may work, and an error
+        // about background syncing would only confuse a shopper.
+      }
+    }
+
+    const id = window.setInterval(poll, 10_000);
+    return () => window.clearInterval(id);
+  }, [sessionId, turns, open, onTurns, onUnread]);
 
   async function send() {
     const text = draft.trim();

@@ -20,6 +20,8 @@ import { MerchantConsole } from "./MerchantConsole";
 import { OrderView } from "./OrderView";
 import { ProductCard } from "./ProductCard";
 import { ProductDetail } from "./ProductDetail";
+import { Hero } from "./Hero";
+import { themeFor } from "./theme";
 
 /** Reshape a chat reply into the engine panel's Pipeline view.
  *
@@ -75,6 +77,7 @@ export default function App() {
 
   const [connections, setConnections] = useState<Connection[]>([]);
   const [connection, setConnectionState] = useState(getConnection());
+  const merchant = themeFor(connection);
     // Unread assistant messages while the chat is shut. Drives the badge, so a
   // shopper who closed the chat still knows something arrived for them.
   const [unread, setUnread] = useState(0);
@@ -99,6 +102,7 @@ export default function App() {
 
   // Pipeline stages, rule names, token counts. Off by default, on for demos.
   const [showEngine, setShowEngine] = useState(false);
+  
 
   const load = useCallback(
     async (q: string, d: string | null) => {
@@ -159,7 +163,13 @@ export default function App() {
     },
        [sessionId, cart?.cart_id, openedForDeadSearch, chatOpen],
   );
-
+  // Set on the root rather than passed as props. Every token in the stylesheet keys
+  // off this, so one attribute changes the whole shop and no component needs to know
+  // which merchant it is rendering.
+  useEffect(() => {
+    document.documentElement.dataset.theme = merchant.theme;
+    document.title = merchant.name;
+  }, [merchant]);
   useEffect(() => {
     load("", null);
     api.connections().then(setConnections).catch(() => {});
@@ -356,6 +366,7 @@ export default function App() {
         error={error}
         onPromo={applyPromo}
         onCheckout={checkout}
+        couponHint={merchant.couponHint}
       />
     </div>
   );
@@ -366,10 +377,7 @@ export default function App() {
     <>
       <header className="masthead">
         <div className="brandbar">
-          <div className="wordmark">
-            {connections.find((c) => c.connection_id === connection)
-              ?.merchant_name ?? "Northfield Running Co."}
-          </div>
+          <div className="wordmark">{merchant.name}</div>
           {connections.length > 1 && (
             <select
               className="merchantpick"
@@ -398,7 +406,7 @@ export default function App() {
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search the shop"
+              placeholder={merchant.searchPlaceholder}
               aria-label="Search the shop"
             />
             <button type="submit">SEARCH</button>
@@ -461,8 +469,10 @@ export default function App() {
           {sidebar}
         </div>
       ) : (
-        <div className="layout">
-          <main>
+        <>
+          {!deadSearch && !query && !dept && <Hero theme={merchant} />}
+          <div className="layout">
+            <main>
             <nav className="depts">
               <button aria-pressed={dept === null} onClick={() => browse(null)}>
                 All
@@ -507,7 +517,8 @@ export default function App() {
           </main>
 
           {sidebar}
-        </div>
+          </div>
+        </>
       )}
 
       {shopView && (
@@ -529,6 +540,7 @@ export default function App() {
           merchantName={
             connections.find((c) => c.connection_id === connection)?.merchant_name
           }
+          onUnread={(n) => setUnread((prev) => prev + n)}
         />
       )}
     </>

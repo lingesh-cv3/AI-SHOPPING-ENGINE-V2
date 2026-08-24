@@ -15,6 +15,7 @@ from .repository import (
     get_case,
     list_cases,
     load_policies,
+    merchant_report,
     pending_approvals,
     record_case,
     record_outcome,
@@ -38,5 +39,5 @@ __all__ = [
     "record_case",
     "record_outcome",
     "session_scope",
-    "stats","MerchantPolicy", "load_policies", "save_policy"
+    "stats","MerchantPolicy", "load_policies", "save_policy","merchant_report"
 ]

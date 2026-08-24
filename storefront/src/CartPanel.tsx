@@ -5,18 +5,21 @@ import type { Cart, CheckoutResult } from "./api";
  * The cart, coupon field, and checkout.
  *
  * The card picker is not something a real storefront would have. It exists so a
- * decline can be produced on demand - waiting for a real card to fail is not a
- * demo. Cards ending 0002, 0003 and 0004 always fail, with different reasons.
+ * decline can be produced on demand, because waiting for a real card to fail is not
+ * a demo. The three listed here fail the same way on both platforms; merchant
+ * specific ones were removed after a card that did nothing on one shop made the
+ * demo look broken.
  *
- * A declined checkout is rendered as an unpaid order rather than an error,
- * because that is what it is: the order exists, the money did not move, and the
- * sale is still recoverable.
+ * A declined checkout renders as an unpaid order rather than an error, because that
+ * is what it is: the order exists, the money did not move, and the sale is still
+ * recoverable.
  */
 export function CartPanel({
   cart,
   result,
   busy,
   error,
+  couponHint,
   onPromo,
   onCheckout,
 }: {
@@ -24,6 +27,7 @@ export function CartPanel({
   result: CheckoutResult | null;
   busy: boolean;
   error: string | null;
+  couponHint?: string;
   onPromo: (code: string) => void;
   onCheckout: (cardLast4: string) => void;
 }) {
@@ -35,7 +39,7 @@ export function CartPanel({
       <div className="panel-head">
         <span className="eyebrow">Cart</span>
         <span className="num" style={{ fontSize: 12 }}>
-            {cart?.item_count ?? 0} {cart?.item_count === 1 ? "item" : "items"}
+          {cart?.item_count ?? 0} {cart?.item_count === 1 ? "item" : "items"}
         </span>
       </div>
       <div className="panel-body">
@@ -95,10 +99,9 @@ export function CartPanel({
                 Apply
               </button>
             </div>
-            {/* Demo hint only, and only while no code is applied. A real shop does
-                not publish its own coupon codes under the box. */}
-            {cart.applied_promotions.length === 0 && (
-              <p className="note">Try a code if you have one.</p>
+
+            {cart.applied_promotions.length === 0 && couponHint && (
+              <p className="note">{couponHint}</p>
             )}
 
             <select
@@ -110,8 +113,6 @@ export function CartPanel({
               <option value="1111">Card ending 1111 — approves</option>
               <option value="0002">Card ending 0002 — no funds</option>
               <option value="0003">Card ending 0003 — expired</option>
-              <option value="0004">Card ending 0004 — bank refuses</option>
-              <option value="0005">Card ending 0005 — issuer down</option>
             </select>
 
             <button
@@ -125,15 +126,22 @@ export function CartPanel({
           </>
         )}
 
-        {/* Coupon problems are handled by the assistant now, which explains and
-            offers an alternative. Repeating a bare error line here would say less
-            and look worse. */}
+        {/* Coupon problems are handled by the assistant, which explains and offers
+            an alternative. Repeating a bare error line here would say less. */}
         {error && !error.includes("code") && (
-          <p className="note" style={{ color: "var(--friction)" }}>{error}</p>
+          <p className="note" style={{ color: "var(--friction)" }}>
+            {error}
+          </p>
         )}
 
         {result && (
-          <div style={{ marginTop: 14, borderTop: "1px solid var(--ink)", paddingTop: 12 }}>
+          <div
+            style={{
+              marginTop: 16,
+              borderTop: "1px solid var(--ink)",
+              paddingTop: 14,
+            }}
+          >
             <div className="gate-label">
               {result.succeeded ? "Order placed" : "Payment did not go through"}
             </div>

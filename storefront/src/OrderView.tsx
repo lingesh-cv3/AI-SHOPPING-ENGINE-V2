@@ -30,7 +30,17 @@ export function OrderView({
       .order(orderId)
       .then(setOrder)
       .catch((e) => setError(shopperMessage(e)));
+
+    // An order can change under the shopper's feet: an operator approving a payment
+    // recovery settles it minutes after they last looked. Fetching once on mount
+    // would leave them staring at "unpaid" for an order that is now paid.
+    const id = window.setInterval(
+      () => api.order(orderId).then(setOrder).catch(() => {}),
+      10_000,
+    );
+    return () => window.clearInterval(id);
   }, [orderId]);
+
 
   if (error) {
     return (

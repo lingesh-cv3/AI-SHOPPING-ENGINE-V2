@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from engine import db
+from engine import session as session_store
 from engine.decision import CapabilityRegistry
 from shared.models import (
     ActionType,
@@ -94,6 +95,11 @@ class Executed:
     #: and guessing a size on their behalf is how a shop ends up with a returns
     #: problem.
     needs_choice: bool = False
+    #: What the shopper should be told, if anything. Deliberately separate from
+    #: `summary`, which is written for an operator reading a queue. "Recovered
+    #: 3422.00 INR on KB-0001" is the right sentence for the person who approved it
+    #: and the wrong one for the person whose card failed.
+    shopper_summary: str | None = None
     choices: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -191,6 +197,32 @@ class ExecutionService:
             currency=result.payload.get("recovered_currency"),
             required_human=case.risk_outcome != "AUTO",
         )
+
+        # Close the loop. An approval that recovers a payment is useless to the
+        # shopper if nobody tells them, and "someone will pick this up" followed by
+        # silence is worse than not offering.
+        #
+        # Only for cases that actually waited on a person. An action that ran
+        # automatically already reported itself in the turn that triggered it, and
+        # writing it twice would read as the assistant repeating itself.
+        if (
+            result.shopper_summary
+            and case.session_id
+            and case.risk_outcome != "AUTO"
+        ):
+            try:
+                await session_store.add_turn(
+                    session_id=case.session_id,
+                    connection_id=connection_id,
+                    speaker="assistant",
+                    text=result.shopper_summary,
+                    case_id=case_id,
+                )
+            except Exception:  # noqa: BLE001
+                # A failure here loses a message, not the outcome. Worth logging and
+                # not worth undoing an executed action over.
+                logger.exception("could not deliver the outcome to the shopper")
+
         return result
 
     @staticmethod
@@ -513,6 +545,10 @@ class ExecutionService:
                         f"Applied {code}. Discount {cart.discount_total}, "
                         f"new total {cart.grand_total}."
                     ),
+                    shopper_summary=(
+                        f"Your {code} discount has been applied. Your total is now "
+                        f"{cart.grand_total}."
+                    ),
                     payload={
                         "code": str(code),
                         "discount": str(cart.discount_total),
@@ -552,11 +588,15 @@ class ExecutionService:
                             f"Recovery did not work: "
                             f"{outcome.reason or 'the platform declined'}."
                         ),
+                        shopper_summary=(
+                            f"We tried to put order {case.order_id} through again "
+                            "and it did not go through. Someone from the shop will "
+                            "be in touch."
+                        ),
                         payload={"method": str(method), "order_id": case.order_id},
                         error_code="PAYMENT_RECOVERY_FAILED",
                         final_state=str(CaseState.FAILED),
                     )
-
                 amount = outcome.amount_recovered
                 return Executed(
                     succeeded=True,
@@ -564,6 +604,10 @@ class ExecutionService:
                     summary=(
                         f"Recovered {amount} on {case.order_id}"
                         + (f" - {outcome.reason}." if outcome.reason else ".")
+                    ),
+                    shopper_summary=(
+                        f"Good news - your payment for order {case.order_id} has "
+                        f"gone through. Nothing more for you to do."
                     ),
                     payload={
                         "method": str(method),
@@ -592,6 +636,9 @@ class ExecutionService:
                 summary=(
                     "Handed to a person. Nothing was attempted automatically, "
                     "which was the correct outcome here."
+                ),
+                shopper_summary=(
+                    "Someone from the shop has picked this up and will be in touch."
                 ),
                 final_state=str(CaseState.ESCALATED),
             )

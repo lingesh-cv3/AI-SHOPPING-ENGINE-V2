@@ -141,3 +141,41 @@ async def context_for(
         await history(session_id, connection_id),
         await recent_friction(session_id, connection_id),
     )
+
+
+async def turns(
+    session_id: str, connection_id: str, *, limit: int = 60
+) -> list[dict]:
+    """The conversation as structured turns, for the interface.
+
+    `history` formats turns as prose for the model's context. This returns them as
+    data, because the widget needs to know who said what and when in order to render
+    bubbles and to work out which turns it has not shown yet.
+
+    That second part is what makes the closed loop work. When an operator approves a
+    payment recovery, the outcome is written here as an assistant turn - not as a
+    reply to anything the shopper said. The widget finds it by polling.
+    """
+    async with session_scope() as db:
+        result = await db.execute(
+            select(SessionTurn)
+            .where(
+                SessionTurn.session_id == session_id,
+                SessionTurn.connection_id == connection_id,
+            )
+            .order_by(SessionTurn.created_at.desc())
+            .limit(limit)
+        )
+        rows = list(result.scalars())
+
+    rows.reverse()
+    return [
+        {
+            "turn_id": t.turn_id,
+            "speaker": t.speaker,
+            "text": t.text,
+            "case_id": t.case_id,
+            "at": (t.created_at.isoformat() if t.created_at else None),
+        }
+        for t in rows
+    ]

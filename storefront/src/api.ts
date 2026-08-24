@@ -51,6 +51,17 @@ export interface Variant {
   quantity_available: number | null;
 }
 
+
+/** A turn as stored, not as rendered. Polled so the widget can pick up messages
+ *  written by something other than the shopper - an operator approving a recovery. */
+export interface StoredTurn {
+  turn_id: string;
+  speaker: "shopper" | "assistant";
+  text: string;
+  case_id: string | null;
+  at: string | null;
+}
+
 export interface Product {
   product_id: string;
   image_url: string | null;
@@ -307,6 +318,11 @@ export const api = {
       }),
     }),
 
+  transcript: (sessionId: string) =>
+    call<{ session_id: string; turns: StoredTurn[]; friction: string[] }>(
+      `/api/chat/${getConnection()}/${sessionId}`,
+    ),
+
   applyPromotion: (cartId: string, code: string) =>
     call<Cart>(shop(`/cart/${cartId}/promotion`), {
       method: "POST",
@@ -504,3 +520,25 @@ export const console_api = {
 
   stats: () => call<Stats>(`/api/stats/${getConnection()}`),
 };
+
+export interface MerchantReport {
+  days: number;
+  shoppers_helped: number;
+  problems_solved: number;
+  handled_without_you: number;
+  waiting_for_you: number;
+  revenue_recovered: string;
+  currency: string;
+  median_resolution_ms: number | null;
+  friction: { type: string; count: number }[];
+  recent: {
+    case_id: string;
+    friction_type: string | null;
+    diagnosis: string | null;
+    selected_action: string | null;
+    risk_outcome: string | null;
+    shopper_reply: string | null;
+    used_model: boolean;
+    created_at: string;
+  }[];
+}

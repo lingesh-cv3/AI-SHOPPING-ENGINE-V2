@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import func, select
 
@@ -362,3 +363,99 @@ async def load_policies() -> list[dict]:
             }
             for r in rows.scalars()
         ]
+
+async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
+    """What the engine did for one merchant, in their terms.
+
+    `stats` counts cases for the operations console. This answers a different
+    question, asked by a different person: what did this do for my shop.
+
+    So the numbers are outcomes rather than throughput. A merchant does not care how
+    many cases were opened; they care how many shoppers were helped, how much money
+    came back, and how much of it needed someone's time.
+
+    Revenue is summed from outcomes rather than from cases, because only an outcome
+    knows whether money actually moved. A case that proposed a payment recovery and
+    was rejected recovered nothing.
+    """
+    since = datetime.now(UTC) - timedelta(days=days)
+
+    async with session_scope() as db:
+        cases = await db.execute(
+            select(Case).where(
+                Case.connection_id == connection_id, Case.created_at >= since
+            )
+        )
+        case_rows = list(cases.scalars())
+
+        outcomes = await db.execute(
+            select(Outcome).where(
+                Outcome.connection_id == connection_id, Outcome.recorded_at >= since
+            )
+        )
+        outcome_rows = list(outcomes.scalars())
+
+        waiting = await db.scalar(
+            select(func.count(Approval.approval_id)).where(
+                Approval.connection_id == connection_id, Approval.state == "PENDING"
+            )
+        )
+
+    resolved = [o for o in outcome_rows if o.resolved]
+
+    # Decimal, not float. A revenue figure shown to a merchant is the one number on
+    # the page they will check against their own books.
+    recovered = sum(
+        (
+            Decimal(o.revenue_recovered_amount)
+            for o in resolved
+            if o.revenue_recovered_amount
+        ),
+        Decimal("0.00"),
+    )
+    currency = next(
+        (
+            o.revenue_recovered_currency
+            for o in resolved
+            if o.revenue_recovered_currency
+        ),
+        "INR",
+    )
+
+    friction: dict[str, int] = {}
+    for case in case_rows:
+        if case.friction_type:
+            friction[case.friction_type] = friction.get(case.friction_type, 0) + 1
+
+    handled_alone = sum(1 for o in resolved if not o.required_human)
+
+    times = [o.time_to_resolution_ms for o in resolved if o.time_to_resolution_ms]
+    median_ms = sorted(times)[len(times) // 2] if times else None
+
+    return {
+        "days": days,
+        "shoppers_helped": len(case_rows),
+        "problems_solved": len(resolved),
+        "handled_without_you": handled_alone,
+        "waiting_for_you": waiting or 0,
+        "revenue_recovered": f"{recovered:.2f}",
+        "currency": currency,
+        "median_resolution_ms": median_ms,
+        "friction": [
+            {"type": k, "count": v}
+            for k, v in sorted(friction.items(), key=lambda kv: -kv[1])
+        ],
+        "recent": [
+            {
+                "case_id": c.case_id,
+                "friction_type": c.friction_type,
+                "diagnosis": c.diagnosis,
+                "selected_action": c.selected_action,
+                "risk_outcome": c.risk_outcome,
+                "shopper_reply": c.shopper_reply,
+                "used_model": c.used_model,
+                "created_at": _aware(c.created_at).isoformat(),
+            }
+            for c in sorted(case_rows, key=lambda c: c.created_at, reverse=True)[:8]
+        ],
+    }

@@ -518,3 +518,14 @@ async def get_stats(connection_id: str) -> dict:
     """Headline counts for the console."""
     _adapter(connection_id)
     return await db.stats(connection_id)
+
+@app.get(f"{API}/report/{{connection_id}}")
+async def merchant_report(connection_id: str, days: int = 30) -> dict:
+    """What the engine did for this merchant.
+
+    Distinct from /stats, which counts work for the operations console. This is
+    written for the shop owner: shoppers helped, problems solved, money recovered,
+    and how much of it needed their time.
+    """
+    _adapter(connection_id)
+    return await db.merchant_report(connection_id, days=days)

@@ -1,39 +1,114 @@
-/* Northfield Running Co. — storefront
+/* Two shops, one engine.
  *
- * Visual language borrowed from race timing, because the subject is running and
- * because the engine's pipeline genuinely is a sequence of gates. Numbers are
- * always monospace with tabular figures: prices, stock counts, totals, split
- * times. Names are heavy and tight, like a race bib.
+ * Every visual decision below is a token, and each merchant fills them
+ * differently via data-theme on the root. The components never know which shop
+ * they are rendering, which is the same discipline the engine follows with
+ * adapters: one set of parts, many clients.
  *
- * Colour is disciplined: cold concrete and ink carry the whole page, one signal
- * blue marks anything interactive, and the friction amber appears ONLY when the
- * engine has detected a problem — so when the page turns amber, it means
- * something.
+ * Northfield is a running shop. Its world is race timing, so the design borrows
+ * from it: cold concrete, condensed heavy type, and every number monospaced with
+ * tabular figures so a price does not shift as it changes.
+ *
+ * Kettle & Bloom is a coffee roastery. The obvious move for coffee is cream paper,
+ * a high-contrast serif and a terracotta accent, which is why it was avoided.
+ * Coffee's real world is agricultural and traded: green beans arrive in jute sacks
+ * stencilled with origin, lot, altitude and process. So Kettle gets pale sage
+ * paper, bottle green, indigo stamp marks and a slab serif.
  */
 
+/* ---- shared scale ---- */
+
 :root {
+  --step-0: 15px;
+  --step-1: 17px;
+  --step-2: 21px;
+  --step-3: 27px;
+  --step-4: 36px;
+  --step-5: 52px;
+
+  --gap: 20px;
+  --gap-lg: 32px;
+  --measure: 1240px;
+
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --body: "Public Sans", system-ui, sans-serif;
+
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+/* ---- Northfield: race timing ---- */
+
+[data-theme="northfield"] {
   --ink: #10151c;
   --ink-2: #3a4552;
   --ink-3: #6b7683;
-  --concrete: #c9ced4;
-  --line: #dcdfe3;
-  --paper: #f2f4f6;
+  --paper: #eef0f2;
   --surface: #ffffff;
+  --line: #dcdfe3;
+  --hero: #10151c;
+  --hero-ink: #ffffff;
+  --hero-ink-2: #9aa5b1;
 
-  --signal: #1156d6;
-  --signal-soft: #e8effc;
+  --accent: #1156d6;
+  --accent-soft: #e8effc;
+  --accent-ink: #ffffff;
+
   --friction: #a8471a;
   --friction-soft: #fbeee6;
   --ok: #1b6b4c;
   --ok-soft: #e7f2ed;
 
   --display: "Archivo", system-ui, sans-serif;
-  --body: "Public Sans", system-ui, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --display-weight: 900;
+  --display-tracking: -0.035em;
+  --display-transform: none;
 
-  --gap: 20px;
   --radius: 3px;
+  --radius-card: 3px;
 }
+
+/* ---- Kettle & Bloom: import documents and stencilled sacks ---- */
+
+[data-theme="kettle"] {
+  --ink: #16261e;
+  --ink-2: #3d5147;
+  --ink-3: #77857c;
+  --paper: #ecede4;
+  --surface: #f8f8f3;
+  --line: #d6d8cb;
+  --hero: #1c2f26;
+  --hero-ink: #f4f3ea;
+  --hero-ink-2: #a3b0a6;
+
+  --accent: #2f5d50;
+  --accent-soft: #e3e9e2;
+  --accent-ink: #f8f8f3;
+
+  /* Customs-ink indigo for stamp marks. Not the warm clay a coffee brief pulls
+   * toward, which is the point. */
+  --stamp: #33477a;
+
+  --friction: #9a4a2c;
+  --friction-soft: #f4e9e2;
+  --ok: #2f5d50;
+  --ok-soft: #e3e9e2;
+
+  --display: "Bitter", Georgia, serif;
+  --display-weight: 700;
+  --display-tracking: -0.015em;
+  --display-transform: none;
+
+  --radius: 2px;
+  --radius-card: 2px;
+}
+
+/* Kettle has a stamp colour, Northfield does not. Falling back to the accent means
+ * components can use it unconditionally. */
+[data-theme="northfield"] {
+  --stamp: var(--accent);
+}
+
+/* ---- base ---- */
 
 * {
   box-sizing: border-box;
@@ -44,12 +119,14 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--body);
-  font-size: 15px;
+  font-size: var(--step-0);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  transition: background 0.4s var(--ease), color 0.4s var(--ease);
 }
 
-/* Every number on this page is tabular. Prices must not shift as they change. */
+/* Every number is tabular. A price must not shift width as it changes, and a stock
+ * count next to another stock count should line up. */
 .num {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
@@ -65,59 +142,97 @@ body {
   color: var(--ink-3);
 }
 
-/* ---- shell ---- */
+h1,
+h2,
+h3 {
+  font-family: var(--display);
+  font-weight: var(--display-weight);
+  letter-spacing: var(--display-tracking);
+  text-transform: var(--display-transform);
+  margin: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+
+
+/* ---- masthead ---- */
+/* Sticky, because a shopper scrolling a long grid should not have to go back up to
+ * search or reach the cart. */
 
 .masthead {
-  background: var(--ink);
-  color: var(--surface);
-  padding: 18px 28px;
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: var(--hero);
+  color: var(--hero-ink);
+  padding: 14px 28px;
   display: flex;
   align-items: center;
-  gap: 28px;
+  gap: 24px;
   flex-wrap: wrap;
+  transition: background 0.4s var(--ease);
+}
+
+.brandbar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .wordmark {
   font-family: var(--display);
-  font-weight: 900;
-  font-size: 21px;
-  letter-spacing: -0.035em;
-  text-transform: uppercase;
+  font-weight: var(--display-weight);
+  font-size: var(--step-2);
+  letter-spacing: var(--display-tracking);
   line-height: 1;
+  color: var(--hero-ink);
 }
 
-.wordmark span {
-  color: var(--concrete);
-  font-weight: 500;
+.merchantpick {
+  background: transparent;
+  color: var(--hero-ink-2);
+  border: 1px solid color-mix(in srgb, var(--hero-ink) 22%, transparent);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  padding: 3px 6px;
+  cursor: pointer;
+  max-width: 250px;
 }
 
 .searchbar {
   flex: 1;
-  min-width: 260px;
+  min-width: 240px;
   display: flex;
-  gap: 0;
 }
 
 .searchbar input {
   flex: 1;
   border: 0;
-  padding: 11px 14px;
+  padding: 11px 15px;
   font-family: var(--body);
-  font-size: 15px;
+  font-size: var(--step-0);
   background: var(--surface);
   color: var(--ink);
   border-radius: var(--radius) 0 0 var(--radius);
 }
 
-.searchbar input:focus {
-  outline: 2px solid var(--signal);
-  outline-offset: 1px;
-}
-
 .searchbar button {
   border: 0;
-  background: var(--signal);
-  color: #fff;
+  background: var(--accent);
+  color: var(--accent-ink);
   padding: 0 20px;
   font-family: var(--mono);
   font-size: 11px;
@@ -125,6 +240,11 @@ body {
   letter-spacing: 0.1em;
   cursor: pointer;
   border-radius: 0 var(--radius) var(--radius) 0;
+  transition: filter 0.15s var(--ease);
+}
+
+.searchbar button:hover {
+  filter: brightness(1.12);
 }
 
 .tabs {
@@ -135,42 +255,155 @@ body {
 .tabs button {
   border: 0;
   background: transparent;
-  color: var(--concrete);
+  color: var(--hero-ink-2);
   font-family: var(--mono);
   font-size: 11px;
-  font-weight: 500;
   letter-spacing: 0.1em;
   padding: 8px 12px;
   cursor: pointer;
   text-transform: uppercase;
+  border-radius: var(--radius);
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.tabs button:hover {
+  color: var(--hero-ink);
 }
 
 .tabs button[aria-selected="true"] {
   background: var(--surface);
   color: var(--ink);
-  border-radius: var(--radius);
 }
+
+.enginetoggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--hero-ink-2);
+  cursor: pointer;
+}
+
+.enginetoggle input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ---- hero ---- */
+
+.hero {
+  background: var(--hero);
+  color: var(--hero-ink);
+  padding: 52px 28px 48px;
+  transition: background 0.4s var(--ease);
+}
+
+/* Two columns on a wide screen: the statement, then the facts. The first version
+ * left the right two thirds empty, which read as unfinished rather than as
+ * restraint. */
+.hero-inner {
+  max-width: var(--measure);
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(230px, 0.55fr);
+  gap: 56px;
+  align-items: end;
+}
+
+.hero .eyebrow {
+  color: var(--hero-ink-2);
+}
+
+.hero h1 {
+  font-size: var(--step-5);
+  line-height: 1.04;
+  max-width: 17ch;
+  margin: 14px 0 16px;
+  color: var(--hero-ink);
+}
+
+.hero p {
+  font-size: var(--step-1);
+  line-height: 1.5;
+  max-width: 46ch;
+  margin: 0;
+  color: var(--hero-ink-2);
+}
+
+/* A description list, because that is what it is: three labels and their values.
+ * Stacked rather than in a row, so it fills the column it sits in. */
+.facts {
+  margin: 0;
+  border-left: 1px solid color-mix(in srgb, var(--hero-ink) 18%, transparent);
+  padding-left: 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.fact-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--hero-ink-2);
+  margin-bottom: 4px;
+}
+
+.fact-value {
+  font-size: 15px;
+  color: var(--hero-ink);
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .hero {
+    padding: 34px 20px 30px;
+  }
+  .hero-inner {
+    grid-template-columns: 1fr;
+    gap: 28px;
+  }
+  .hero h1 {
+    font-size: var(--step-3);
+  }
+  .facts {
+    border-left: 0;
+    padding-left: 0;
+    padding-top: 20px;
+    border-top: 1px solid color-mix(in srgb, var(--hero-ink) 18%, transparent);
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 28px;
+  }
+}
+
+/* ---- layout ---- */
 
 .layout {
   display: grid;
-  grid-template-columns: 1fr 320px;
-  gap: var(--gap);
-  padding: var(--gap);
+  grid-template-columns: 1fr 330px;
+  gap: var(--gap-lg);
+  padding: var(--gap-lg) var(--gap);
   align-items: start;
-  max-width: 1240px;
+  max-width: var(--measure);
   margin: 0 auto;
 }
 
-@media (max-width: 880px) {
+@media (max-width: 900px) {
   .layout {
     grid-template-columns: 1fr;
+    gap: var(--gap);
   }
 }
 
 .panel {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-card);
 }
 
 .panel-head {
@@ -185,23 +418,73 @@ body {
   padding: 16px;
 }
 
+/* ---- departments ---- */
+
+.depts {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.depts button {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 8px 13px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--ink-2);
+  transition: all 0.15s var(--ease);
+}
+
+.depts button:hover {
+  border-color: var(--ink-3);
+  color: var(--ink);
+}
+
+.depts button[aria-pressed="true"] {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--surface);
+}
 
 /* ---- product grid ---- */
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 18px;
 }
 
 .card {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 14px;
+  border-radius: var(--radius-card);
+  padding: 0 0 16px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  transition: transform 0.18s var(--ease), box-shadow 0.18s var(--ease),
+    border-color 0.18s var(--ease);
+}
+
+/* Lifts a little on hover. Enough to feel responsive, not enough to be a feature. */
+.card:hover {
+  transform: translateY(-2px);
+  border-color: var(--ink-3);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 8%, transparent);
+}
+
+.card > *:not(.pimage) {
+  margin-left: 16px;
+  margin-right: 16px;
+}
+
+.card > :last-child {
+  margin-top: auto;
 }
 
 .card-dept {
@@ -213,12 +496,8 @@ body {
 }
 
 .card-title {
-  font-family: var(--display);
-  font-weight: 700;
-  font-size: 17px;
-  line-height: 1.15;
-  letter-spacing: -0.02em;
-  margin: 0;
+  font-size: var(--step-1);
+  line-height: 1.2;
 }
 
 .card-desc {
@@ -227,27 +506,37 @@ body {
   margin: 0;
 }
 
-/* Push the price strip and button to the bottom of every card, so a product
- * without sizes does not leave a hole where the size selector would be. Cards in
- * a row stretch to match the tallest, and the alignment should survive that. */
-.card > :last-child {
-  margin-top: auto;
+.titlelink {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-/* The price strip: a race-split readout. Rule above, tabular figures, the
- * struck-through original sitting quietly beside the current price. */
+.titlelink:hover {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+/* The split strip. A rule, then the figures, the way a race result is printed. */
 .price-strip {
   border-top: 1px solid var(--ink);
-  padding-top: 8px;
+  padding-top: 9px;
   display: flex;
   align-items: baseline;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .price {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  font-size: 16px;
+  font-size: var(--step-1);
   font-weight: 700;
 }
 
@@ -262,9 +551,8 @@ body {
 .stock {
   font-family: var(--mono);
   font-size: 10px;
-  font-weight: 500;
   letter-spacing: 0.08em;
-  padding: 3px 6px;
+  padding: 3px 7px;
   border-radius: 2px;
 }
 
@@ -283,25 +571,35 @@ body {
   color: var(--ink-3);
 }
 
-/* Variants as lane markers. Unavailable sizes stay visible but struck through —
- * a shopper needs to know their size exists and is gone, not that it never was. */
+
+
+/* ---- variants ---- */
+/* Unavailable options stay visible and struck through. A shopper needs to see that
+ * their size exists and is gone, which is a different fact from it never having
+ * existed, and it is the friction the assistant is there to answer. */
+
 .sizes {
   display: flex;
-  gap: 4px;
+  gap: 5px;
   flex-wrap: wrap;
 }
 
 .size {
   font-family: var(--mono);
   font-size: 12px;
-  font-weight: 500;
-  min-width: 30px;
-  padding: 5px 0;
+  min-width: 34px;
+  padding: 6px 8px;
   text-align: center;
   border: 1px solid var(--line);
   background: var(--surface);
+  color: var(--ink);
   border-radius: 2px;
   cursor: pointer;
+  transition: all 0.13s var(--ease);
+}
+
+.size:hover:not(:disabled) {
+  border-color: var(--ink-3);
 }
 
 .size[aria-pressed="true"] {
@@ -317,6 +615,23 @@ body {
   background: var(--paper);
 }
 
+.size-lg {
+  min-width: 74px;
+  padding: 9px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+}
+
+.size-left {
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+}
+
+/* ---- buttons ---- */
+
 button.add {
   border: 1px solid var(--ink);
   background: var(--ink);
@@ -325,10 +640,15 @@ button.add {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.1em;
-  padding: 10px;
+  padding: 11px;
   cursor: pointer;
   border-radius: 2px;
   text-transform: uppercase;
+  transition: filter 0.15s var(--ease);
+}
+
+button.add:hover:not(:disabled) {
+  filter: brightness(1.35);
 }
 
 button.add:disabled {
@@ -338,13 +658,89 @@ button.add:disabled {
   cursor: not-allowed;
 }
 
+.backlink {
+  border: 0;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--ink-2);
+  cursor: pointer;
+  padding: 0 0 14px;
+  text-transform: uppercase;
+}
+
+.backlink:hover {
+  color: var(--ink);
+}
+
+/* ---- product artwork ---- */
+
+.pimage {
+  aspect-ratio: 4 / 3;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  overflow: hidden;
+  background: var(--paper);
+}
+
+.pimage svg {
+  width: 44%;
+  height: 44%;
+  transition: transform 0.3s var(--ease);
+}
+
+.card:hover .pimage svg {
+  transform: scale(1.06);
+}
+
+.pimage img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.pimage-lg {
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius-card);
+  margin-bottom: 18px;
+}
+
+.pimage-lg svg {
+  width: 26%;
+  height: 26%;
+}
+
+/* Sold-out items are drained rather than hidden. Recognising the thing you wanted
+ * and seeing it is gone is what makes a substitute suggestion make sense. */
+.pimage-out {
+  filter: grayscale(1);
+  opacity: 0.5;
+}
+
+/* ---- product detail ---- */
+
+.detail-title {
+  font-size: var(--step-3);
+  line-height: 1.1;
+  margin: 6px 0 10px;
+}
+
+.detail-desc {
+  font-size: var(--step-1);
+  color: var(--ink-2);
+  margin: 0;
+  max-width: 54ch;
+}
+
 /* ---- cart ---- */
 
 .line {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  padding: 9px 0;
+  padding: 10px 0;
   border-bottom: 1px solid var(--line);
   font-size: 13px;
 }
@@ -356,7 +752,7 @@ button.add:disabled {
 }
 
 .totals {
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .total-row {
@@ -369,36 +765,40 @@ button.add:disabled {
 
 .total-row.grand {
   border-top: 1px solid var(--ink);
-  margin-top: 6px;
-  padding-top: 8px;
-  font-size: 16px;
-  font-weight: 700;
+  margin-top: 7px;
+  padding-top: 9px;
+  font-family: var(--display);
+  font-size: var(--step-1);
+  font-weight: var(--display-weight);
   color: var(--ink);
 }
 
 .field {
   display: flex;
   gap: 6px;
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .field input {
   flex: 1;
   border: 1px solid var(--line);
-  padding: 8px 10px;
+  padding: 9px 11px;
   font-family: var(--mono);
   font-size: 12px;
   border-radius: 2px;
   text-transform: uppercase;
+  background: var(--surface);
+  color: var(--ink);
 }
 
 .field button {
   border: 1px solid var(--ink);
   background: var(--surface);
+  color: var(--ink);
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 700;
-  padding: 0 12px;
+  padding: 0 13px;
   cursor: pointer;
   border-radius: 2px;
 }
@@ -406,29 +806,296 @@ button.add:disabled {
 select.card-picker {
   width: 100%;
   border: 1px solid var(--line);
-  padding: 9px 10px;
+  padding: 10px 11px;
   font-family: var(--mono);
   font-size: 12px;
   border-radius: 2px;
   background: var(--surface);
-  margin-top: 12px;
+  color: var(--ink);
+  margin-top: 14px;
 }
 
-/* ---- the signature: gate strip ---- */
-/* The pipeline drawn as timing checkpoints. Each gate is either passed, held,
- * or closed — the same three things that happen to an action. */
+/* ---- order ---- */
+/* A declined order gets a friction-toned edge, not a red banner. The order is real
+ * and the sale is still live; the tone should say held, not failed. */
+
+.order-ok {
+  border-left: 3px solid var(--ok);
+}
+
+.order-unpaid {
+  border-left: 3px solid var(--friction);
+}
+
+.orderstats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 16px;
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ink);
+}
+
+/* ---- banner, empty, notes ---- */
+
+.banner {
+  background: var(--friction-soft);
+  border: 1px solid var(--friction);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: 18px;
+}
+
+.banner h2 {
+  font-size: var(--step-2);
+  margin: 5px 0 7px;
+}
+
+.banner p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.empty {
+  text-align: center;
+  padding: 48px 20px;
+  color: var(--ink-3);
+  font-size: 14px;
+}
+
+.note {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin: 8px 0 0;
+}
+
+/* ---- chat ---- */
+
+.chatlaunch {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 40;
+  border: 0;
+  background: var(--ink);
+  color: var(--surface);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 14px 22px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  box-shadow: 0 8px 26px color-mix(in srgb, var(--ink) 26%, transparent);
+  transition: transform 0.18s var(--ease), background 0.18s var(--ease);
+}
+
+.chatlaunch:hover {
+  transform: translateY(-2px);
+}
+
+.chatlaunch.nudging {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.chatbadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  margin-left: 9px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.chatwidget {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 40;
+  width: 375px;
+  max-width: calc(100vw - 32px);
+  height: 545px;
+  max-height: calc(100vh - 44px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-card);
+  box-shadow: 0 16px 48px color-mix(in srgb, var(--ink) 28%, transparent);
+  animation: rise 0.22s var(--ease);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+
+.chathead {
+  background: var(--hero);
+  color: var(--hero-ink);
+  padding: 12px 15px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+}
+
+.chathead .eyebrow {
+  color: var(--hero-ink);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+.chatmem {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--hero-ink-2);
+  margin-top: 3px;
+}
+
+.chatclose {
+  border: 0;
+  background: transparent;
+  color: var(--hero-ink-2);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.chatbody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.chathint {
+  font-size: 13px;
+  color: var(--ink-3);
+  margin: 0;
+  line-height: 1.45;
+}
+
+.bubble {
+  max-width: 87%;
+  padding: 10px 13px;
+  border-radius: var(--radius);
+  font-size: 13.5px;
+  line-height: 1.45;
+  animation: rise 0.2s var(--ease);
+}
+
+.bubble.shopper {
+  align-self: flex-end;
+  background: var(--ink);
+  color: var(--surface);
+}
+
+.bubble.assistant {
+  align-self: flex-start;
+  background: var(--paper);
+  border-left: 2px solid var(--accent);
+}
+
+.bubble.thinking {
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.bubbletext {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* Products the engine actually fetched. Never ones the model merely described. */
+.chatproducts {
+  margin-top: 9px;
+  border-top: 1px solid var(--line);
+  padding-top: 7px;
+}
+
+.chatproduct {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  padding: 3px 0;
+}
+
+.chatwait {
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--friction);
+}
+
+.chatform {
+  display: flex;
+  border-top: 1px solid var(--line);
+}
+
+.chatform input {
+  flex: 1;
+  border: 0;
+  padding: 13px 15px;
+  font-family: var(--body);
+  font-size: 13.5px;
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 0 0 0 var(--radius-card);
+}
+
+.chatform button {
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 0 19px;
+  cursor: pointer;
+  border-radius: 0 0 var(--radius-card) 0;
+}
+
+.chatform button:disabled {
+  background: var(--line);
+  color: var(--ink-3);
+  cursor: not-allowed;
+}
+
+/* ---- engine panel (demo only) ---- */
 
 .gates {
   display: flex;
   flex-direction: column;
-  gap: 0;
 }
 
 .gate {
   display: grid;
   grid-template-columns: 22px 1fr;
   gap: 12px;
-  padding: 10px 0;
+  padding: 11px 0;
   border-bottom: 1px dashed var(--line);
 }
 
@@ -454,9 +1121,9 @@ select.card-picker {
 
 .gate-value {
   font-family: var(--display);
-  font-weight: 700;
+  font-weight: var(--display-weight);
   font-size: 14px;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--display-tracking);
 }
 
 .gate-note {
@@ -467,9 +1134,9 @@ select.card-picker {
 
 .verdict {
   font-family: var(--display);
-  font-weight: 900;
-  font-size: 24px;
-  letter-spacing: -0.03em;
+  font-weight: var(--display-weight);
+  font-size: var(--step-2);
+  letter-spacing: var(--display-tracking);
   text-transform: uppercase;
   line-height: 1;
 }
@@ -489,7 +1156,6 @@ select.card-picker {
 .rule {
   font-family: var(--mono);
   font-size: 11px;
-  font-weight: 500;
   color: var(--ink-2);
   margin-top: 4px;
   word-break: break-word;
@@ -500,49 +1166,55 @@ select.card-picker {
   color: var(--ink-3);
 }
 
-.banner {
+.said {
+  font-size: 14px;
+  line-height: 1.45;
+  margin: 3px 0 0;
+  padding-left: 11px;
+  border-left: 2px solid var(--accent);
+}
+
+.swapped {
+  margin-top: 9px;
+  padding: 9px 11px;
   background: var(--friction-soft);
-  border: 1px solid var(--friction);
-  border-left-width: 3px;
-  border-radius: var(--radius);
-  padding: 14px 16px;
-  margin-bottom: 12px;
+  border-left: 2px solid var(--friction);
+  border-radius: 2px;
 }
 
-.banner h2 {
-  font-family: var(--display);
-  font-weight: 900;
-  font-size: 19px;
-  letter-spacing: -0.025em;
-  margin: 4px 0 6px;
+.prov {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin-left: 7px;
+  padding: 2px 5px;
+  border-radius: 2px;
 }
 
-.banner p {
-  margin: 0;
-  font-size: 13px;
+.prov.ai {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.prov.rules {
+  background: var(--line);
   color: var(--ink-2);
 }
 
-.empty {
-  text-align: center;
-  padding: 40px 20px;
-  color: var(--ink-3);
-  font-size: 14px;
-}
-
-.note {
+.evidence {
+  margin: 7px 0 0;
+  padding-left: 17px;
   font-size: 12px;
-  color: var(--ink-3);
-  margin: 8px 0 0;
+  color: var(--ink-2);
 }
-
 
 /* ---- merchant console ---- */
 
 .caps {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 11px;
 }
 
 .cap {
@@ -555,7 +1227,6 @@ select.card-picker {
 .cap-name {
   font-family: var(--mono);
   font-size: 12px;
-  font-weight: 500;
 }
 
 .dot {
@@ -583,7 +1254,7 @@ select.card-picker {
   display: grid;
   grid-template-columns: 26px 1fr;
   gap: 10px;
-  padding: 7px 0;
+  padding: 8px 0;
   border-bottom: 1px dashed var(--line);
   font-size: 13px;
 }
@@ -607,12 +1278,18 @@ select.card-picker {
   text-align: left;
   border: 1px solid var(--line);
   background: var(--surface);
+  color: var(--ink);
   border-radius: 2px;
-  padding: 9px 11px;
+  padding: 10px 12px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
+  transition: all 0.15s var(--ease);
+}
+
+.mode:hover {
+  border-color: var(--ink-3);
 }
 
 .mode[aria-pressed="true"] {
@@ -623,13 +1300,13 @@ select.card-picker {
 
 .mode-label {
   font-family: var(--display);
-  font-weight: 700;
+  font-weight: var(--display-weight);
   font-size: 14px;
 }
 
 .mode-hint {
   font-size: 11px;
-  opacity: 0.7;
+  opacity: 0.72;
 }
 
 .checks {
@@ -637,31 +1314,10 @@ select.card-picker {
   flex-direction: column;
 }
 
-.check {
-  display: grid;
-  grid-template-columns: 16px 1fr;
-  gap: 9px;
-  align-items: start;
-  padding: 7px 0;
-  border-bottom: 1px dashed var(--line);
-  cursor: pointer;
-}
-
-.check input {
-  margin: 3px 0 0;
-  accent-color: var(--signal);
-}
-
 .check-name {
   font-family: var(--mono);
   font-size: 12px;
   display: block;
-}
-
-/* Locked actions stay legible. Greying them out entirely would read as
- * "unavailable" when the truth is "permitted to try, guaranteed to be refused". */
-.check.locked .check-name {
-  color: var(--ink-2);
 }
 
 .check-why {
@@ -671,192 +1327,67 @@ select.card-picker {
   margin-top: 1px;
 }
 
-
-/* Department navigation. Reads as a row of lane markers rather than pills -
- * flat, monospaced, with the active one filled in like a selected size. */
-
-.depts {
+.actrow {
   display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  margin-bottom: 14px;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px dashed var(--line);
 }
 
-.depts button {
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  padding: 7px 12px;
+.actrow.off .check-name {
+  text-decoration: line-through;
+  color: var(--ink-3);
+}
+
+.offswitch {
+  flex-shrink: 0;
   border: 1px solid var(--line);
   background: var(--surface);
-  border-radius: 2px;
-  cursor: pointer;
-  color: var(--ink-2);
-}
-
-.depts button[aria-pressed="true"] {
-  border-color: var(--ink);
-  background: var(--ink);
-  color: var(--surface);
-}
-
-
-
-/* ---- product detail ---- */
-
-.backlink {
-  border: 0;
-  background: transparent;
   font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  color: var(--ink-2);
-  cursor: pointer;
-  padding: 0 0 12px;
-  text-transform: uppercase;
-}
-
-.detail-title {
-  font-family: var(--display);
-  font-weight: 900;
-  font-size: 30px;
-  letter-spacing: -0.035em;
-  line-height: 1.05;
-  margin: 6px 0 10px;
-}
-
-.detail-desc {
-  font-size: 15px;
-  color: var(--ink-2);
-  margin: 0;
-  max-width: 52ch;
-}
-
-/* Sizes on the detail page carry their remaining count, so LOW_STOCK means
- * something concrete rather than being a decorative badge. */
-.size-lg {
-  min-width: 62px;
-  padding: 8px 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  align-items: center;
-}
-
-.size-left {
-  font-size: 9px;
-  letter-spacing: 0.04em;
-  opacity: 0.65;
-}
-
-
-/* ---- order view ---- */
-/* A declined order is not an error page. It gets a friction-toned left edge
- * rather than a red banner, because the order is real and the sale is still
- * live - the tone should say "held", not "failed". */
-
-.order-ok {
-  border-left: 3px solid var(--ok);
-}
-
-.order-unpaid {
-  border-left: 3px solid var(--friction);
-}
-
-.orderstats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 14px;
-  margin-top: 20px;
-  padding-top: 14px;
-  border-top: 1px solid var(--ink);
-}
-
-
-/* ---- AI output ---- */
-
-/* What the shopper is told, set apart from the machinery around it. This is the
- * only text on the panel a shopper would ever see, so it reads as speech. */
-.said {
-  font-family: var(--body);
-  font-size: 14px;
-  line-height: 1.45;
-  margin: 2px 0 0;
-  padding-left: 10px;
-  border-left: 2px solid var(--signal);
-}
-
-/* When the engine overrides its own AI, say so loudly enough to notice. A system
- * quietly rewriting model output should be auditable, not invisible. */
-.swapped {
-  margin-top: 8px;
-  padding: 8px 10px;
-  background: var(--friction-soft);
-  border-left: 2px solid var(--friction);
-  border-radius: 2px;
-}
-
-/* Provenance badge. Whether a diagnosis came from the model or from rules changes
- * how much weight it deserves, so it is stated rather than implied. */
-.prov {
-  font-family: var(--mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
-  margin-left: 7px;
-  padding: 2px 5px;
+  padding: 5px 12px;
   border-radius: 2px;
+  cursor: pointer;
+  color: var(--ok);
 }
 
-.prov.ai {
-  background: var(--signal-soft);
-  color: var(--signal);
-}
-
-.prov.rules {
-  background: var(--line);
-  color: var(--ink-2);
-}
-
-.evidence {
-  margin: 6px 0 0;
-  padding-left: 16px;
-  font-size: 12px;
-  color: var(--ink-2);
-}
-
-.evidence li {
-  margin-bottom: 2px;
+.offswitch[aria-pressed="true"] {
+  border-color: var(--ink-3);
+  color: var(--ink-3);
+  background: var(--paper);
 }
 
 /* ---- approval queue ---- */
 
 .statgrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 12px;
-  margin-bottom: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 14px;
+  margin-bottom: 22px;
 }
 
 .stat {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 14px 16px;
+  border-radius: var(--radius-card);
+  padding: 16px 18px;
 }
 
 .statnum {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  font-size: 30px;
+  font-size: var(--step-4);
   font-weight: 700;
   line-height: 1;
-  margin-bottom: 6px;
+  margin-bottom: 7px;
 }
 
 /* Work waiting on a person is the one number that should draw the eye. Everything
- * else on this page is history; this is the thing to act on. */
+ * else on this page is history. */
 .statnum.warn {
   color: var(--friction);
 }
@@ -864,24 +1395,24 @@ select.card-picker {
 .refresh {
   border: 1px solid var(--line);
   background: var(--surface);
+  color: var(--ink);
   font-family: var(--mono);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  padding: 5px 10px;
+  padding: 6px 11px;
   border-radius: 2px;
   cursor: pointer;
 }
 
-/* Each card is a complete case. The left edge marks it as live work rather than a
- * log entry - once decided, the result panel inside carries its own colour. */
 .qcard {
   border: 1px solid var(--line);
   border-left: 3px solid var(--friction);
-  border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 14px;
+  border-radius: var(--radius-card);
+  padding: 18px;
+  margin-bottom: 16px;
+  background: var(--surface);
 }
 
 .qhead {
@@ -889,16 +1420,13 @@ select.card-picker {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
-  margin-bottom: 12px;
+  margin-bottom: 13px;
 }
 
 .qaction {
-  font-family: var(--display);
-  font-weight: 900;
-  font-size: 20px;
-  letter-spacing: -0.03em;
+  font-size: var(--step-2);
   line-height: 1.1;
-  margin: 3px 0 0;
+  margin: 4px 0 0;
 }
 
 .qmeta {
@@ -926,14 +1454,14 @@ select.card-picker {
 .qdiag {
   font-size: 14px;
   line-height: 1.45;
-  margin: 2px 0 10px;
+  margin: 3px 0 11px;
 }
 
 .qbuttons {
   display: flex;
-  gap: 8px;
-  margin-top: 16px;
-  padding-top: 14px;
+  gap: 9px;
+  margin-top: 17px;
+  padding-top: 15px;
   border-top: 1px solid var(--line);
 }
 
@@ -950,16 +1478,14 @@ select.card-picker {
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  padding: 10px 18px;
+  padding: 11px 20px;
   border-radius: 2px;
   cursor: pointer;
 }
 
-/* The result replaces the buttons rather than the whole card. An operator needs to
- * see what their decision did, next to the case that prompted it. */
 .qresult {
-  margin-top: 16px;
-  padding: 12px 14px;
+  margin-top: 17px;
+  padding: 13px 15px;
   border-radius: 2px;
   border-left: 3px solid;
 }
@@ -980,342 +1506,32 @@ select.card-picker {
 }
 
 
+/* ---- product artwork tints ----
+ *
+ * Each shop gets its own set. A running brand's grounds are cool and technical; a
+ * roastery's lean green and unbleached. Picking from a shared palette would have
+ * produced the same six greys in both shops, which is exactly the templated look
+ * per-merchant theming exists to avoid.
+ *
+ * Kept low-contrast on purpose. The artwork sits above the price and the stock
+ * state, and a vivid tile would compete with the information that matters. */
 
-/* ---- chat widget ---- */
-/* Fixed to the corner because it belongs to the shopper, not to the page. It
- * follows them from the catalog to a product to their order, which is what makes a
- * shared session feel like one conversation rather than three. */
-
-.chatlaunch {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: 40;
-  border: 0;
-  background: var(--ink);
-  color: var(--surface);
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 13px 20px;
-  border-radius: 2px;
-  cursor: pointer;
-  box-shadow: 0 6px 20px rgba(16, 21, 28, 0.22);
+[data-theme="northfield"] {
+  --tint-1: #e4e9ee;
+  --tint-2: #e9e7e3;
+  --tint-3: #e2e9e5;
+  --tint-4: #e9e5ea;
+  --tint-5: #e6eaed;
+  --tint-6: #e1e5e1;
+  --tint-ink: #38424e;
 }
 
-.chatwidget {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: 40;
-  width: 360px;
-  max-width: calc(100vw - 40px);
-  height: 520px;
-  max-height: calc(100vh - 40px);
-  display: flex;
-  flex-direction: column;
-  background: var(--surface);
-  border: 1px solid var(--ink);
-  border-radius: var(--radius);
-  box-shadow: 0 12px 40px rgba(16, 21, 28, 0.26);
-}
-
-.chathead {
-  background: var(--ink);
-  color: var(--surface);
-  padding: 11px 14px;
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.chathead .eyebrow {
-  color: var(--concrete);
-}
-
-/* Stating what it remembers, rather than leaving the shopper to test it. The whole
- * value of shared memory is lost if they cannot tell it is there. */
-.chatmem {
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.04em;
-  color: var(--concrete);
-  margin-top: 3px;
-}
-
-.chatclose {
-  border: 0;
-  background: transparent;
-  color: var(--concrete);
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 2px;
-}
-
-.chatbody {
-  flex: 1;
-  overflow-y: auto;
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.chathint {
-  font-size: 13px;
-  color: var(--ink-3);
-  margin: 0;
-  line-height: 1.45;
-}
-
-.bubble {
-  max-width: 86%;
-  padding: 9px 12px;
-  border-radius: 3px;
-  font-size: 13.5px;
-  line-height: 1.45;
-}
-
-.bubble.shopper {
-  align-self: flex-end;
-  background: var(--ink);
-  color: var(--surface);
-}
-
-.bubble.assistant {
-  align-self: flex-start;
-  background: var(--paper);
-  border-left: 2px solid var(--signal);
-}
-
-.bubble.thinking {
-  color: var(--ink-3);
-  font-family: var(--mono);
-  font-size: 11px;
-}
-
-/* Whitespace is preserved because the engine's replies contain deliberate
- * paragraph breaks - the escalation notice is a separate thought and should read
- * as one. */
-.bubbletext {
-  margin: 0;
-  white-space: pre-wrap;
-}
-
-/* Products the engine actually fetched. Never ones the model merely described. */
-.chatproducts {
-  margin-top: 8px;
-  border-top: 1px solid var(--line);
-  padding-top: 6px;
-}
-
-.chatproduct {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 12px;
-  padding: 3px 0;
-}
-
-.chatwait {
-  margin-top: 7px;
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--friction);
-}
-
-.chatform {
-  display: flex;
-  border-top: 1px solid var(--line);
-}
-
-.chatform input {
-  flex: 1;
-  border: 0;
-  padding: 12px 14px;
-  font-family: var(--body);
-  font-size: 13.5px;
-  border-radius: 0 0 0 var(--radius);
-}
-
-.chatform input:focus {
-  outline: 2px solid var(--signal);
-  outline-offset: -2px;
-}
-
-.chatform button {
-  border: 0;
-  background: var(--signal);
-  color: #fff;
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  padding: 0 18px;
-  cursor: pointer;
-}
-
-.chatform button:disabled {
-  background: var(--concrete);
-  cursor: not-allowed;
-}
-
-
-
-/* ---- merchant switcher ---- */
-/* Only visible because this is a demo. A real storefront belongs to one merchant
- * and would never show this - the connection would come from the script tag. */
-
-.brandbar {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.merchantpick {
-  background: transparent;
-  color: var(--concrete);
-  border: 1px solid #333c47;
-  border-radius: 2px;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  padding: 3px 6px;
-  cursor: pointer;
-  max-width: 260px;
-}
-
-.merchantpick:focus {
-  outline: 1px solid var(--signal);
-}
-
-
-/* Demo-only. A real deployment ships without this - the engine panel is
- * diagnostic output and a shopper should never encounter it. */
-.enginetoggle {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--concrete);
-  cursor: pointer;
-  margin-right: 10px;
-}
-
-.enginetoggle input {
-  accent-color: var(--signal);
-  cursor: pointer;
-}
-
-
-/* An assistant message arrived while the chat was shut. The badge is enough - a
- * panel that reopens itself every time a shopper mistypes is an interruption, not
- * help. */
-
-.chatlaunch.nudging {
-  background: var(--signal);
-  padding-right: 14px;
-}
-
-.chatbadge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 17px;
-  height: 17px;
-  margin-left: 9px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: #fff;
-  color: var(--signal);
-  font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 700;
-}
-
-
-/* ---- product artwork ---- */
-
-.pimage {
-  aspect-ratio: 4 / 3;
-  display: grid;
-  place-items: center;
-  border-radius: 2px;
-  margin-bottom: 12px;
-  overflow: hidden;
-  background: var(--paper);
-}
-
-.pimage svg {
-  width: 46%;
-  height: 46%;
-}
-
-.pimage img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.pimage-lg {
-  aspect-ratio: 16 / 10;
-}
-
-.pimage-lg svg {
-  width: 32%;
-  height: 32%;
-}
-
-/* Sold-out items are drained rather than hidden. A shopper should be able to see
- * the thing they wanted and that it is gone - that recognition is what the engine's
- * substitute suggestion is answering. */
-.pimage-out {
-  filter: grayscale(1);
-  opacity: 0.55;
-}
-
-
-/* Each action, with a real on/off rather than a checkbox that does nothing. */
-
-.actrow {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 0;
-  border-bottom: 1px dashed var(--line);
-}
-
-.actrow.off .check-name {
-  text-decoration: line-through;
-  color: var(--ink-3);
-}
-
-.offswitch {
-  flex-shrink: 0;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  padding: 4px 11px;
-  border-radius: 2px;
-  cursor: pointer;
-  color: var(--ok);
-}
-
-.offswitch[aria-pressed="true"] {
-  border-color: var(--ink-3);
-  color: var(--ink-3);
-  background: var(--paper);
+[data-theme="kettle"] {
+  --tint-1: #e5eade;
+  --tint-2: #ece8dc;
+  --tint-3: #e0e7e0;
+  --tint-4: #e9e6d9;
+  --tint-5: #e3e9e3;
+  --tint-6: #e7ebe0;
+  --tint-ink: #2c4438;
 }

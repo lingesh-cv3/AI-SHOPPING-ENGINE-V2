@@ -352,12 +352,18 @@ async def chat(req: ChatRequest) -> ChatReply:
 
 @router.get("/{connection_id}/{session_id}")
 async def transcript(connection_id: str, session_id: str) -> dict:
-    """The conversation so far, for reloading the widget or for the console."""
+    """The conversation so far.
+
+    Returns structured turns rather than formatted strings, because the widget polls
+    this to pick up messages written by something other than the shopper - an
+    operator approving a payment recovery, for instance. Those arrive here rather
+    than as a reply to anything the shopper said.
+    """
     if engine.registry.adapter_for(connection_id) is None:
         raise HTTPException(404, f"unknown connection '{connection_id}'")
     return {
         "session_id": session_id,
-        "turns": await session_store.history(session_id, connection_id, limit=50),
+        "turns": await session_store.turns(session_id, connection_id, limit=60),
         "friction": await session_store.recent_friction(
             session_id, connection_id, limit=5
         ),
