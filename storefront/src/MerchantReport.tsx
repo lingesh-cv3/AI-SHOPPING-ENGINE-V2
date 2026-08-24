@@ -12,9 +12,6 @@ import { console_api, type MerchantReport as Report } from "./api";
  * because that is the one a merchant checks against their own books. Case counts
  * and throughput belong on the operations console, which is a different page for a
  * different person.
- *
- * Every number here is real. Nothing is projected, annualised or extrapolated, and
- * an empty shop reads as empty rather than as a demo dataset.
  */
 export function MerchantReport() {
   const [report, setReport] = useState<Report | null>(null);
@@ -24,11 +21,39 @@ export function MerchantReport() {
     console_api
       .report()
       .then(setReport)
-      .catch(() => setError("Could not load your figures."));
+      .catch((e) =>
+        setError(e instanceof Error ? e.message : "Could not load your figures."),
+      );
   }, []);
 
-  if (error) return <p className="empty">{error}</p>;
-  if (!report) return null;
+  // Every branch renders something. Returning null on failure made the panel vanish
+  // with no console error, which is the hardest kind of bug to find: nothing looks
+  // wrong, there is just less of the page than there should be.
+  if (error) {
+    return (
+      <section className="panel">
+        <div className="panel-head">
+          <span className="eyebrow">Your figures</span>
+        </div>
+        <div className="panel-body">
+          <p className="empty">{error}</p>
+        </div>
+      </section>
+    );
+  }
+
+  if (!report) {
+    return (
+      <section className="panel">
+        <div className="panel-head">
+          <span className="eyebrow">Your figures</span>
+        </div>
+        <div className="panel-body">
+          <p className="empty">Loading...</p>
+        </div>
+      </section>
+    );
+  }
 
   const nothingYet = report.shoppers_helped === 0;
 
@@ -46,8 +71,8 @@ export function MerchantReport() {
       <div className="panel-body">
         {nothingYet ? (
           <p className="empty">
-            Nothing yet. As shoppers run into problems, what the assistant did about
-            them shows up here.
+            Nothing yet. As shoppers run into problems, what the assistant did
+            about them shows up here.
           </p>
         ) : (
           <>
@@ -62,14 +87,8 @@ export function MerchantReport() {
             </div>
 
             <div className="figures">
-              <Figure
-                value={report.shoppers_helped}
-                label="Shoppers helped"
-              />
-              <Figure
-                value={report.problems_solved}
-                label="Problems solved"
-              />
+              <Figure value={report.shoppers_helped} label="Shoppers helped" />
+              <Figure value={report.problems_solved} label="Problems solved" />
               <Figure
                 value={report.handled_without_you}
                 label="Without your time"
@@ -109,7 +128,7 @@ export function MerchantReport() {
                 {c.diagnosis && <p className="recent-diag">{c.diagnosis}</p>}
                 {c.shopper_reply && (
                   <p className="recent-said">
-                    Told them: &ldquo;{trim(c.shopper_reply)}&rdquo;
+                    Told them: {trim(c.shopper_reply)}
                   </p>
                 )}
               </div>
@@ -143,21 +162,21 @@ function Figure({
 /** Milliseconds are an engineering unit. A merchant wants "under a second". */
 function formatMs(ms: number): string {
   if (ms < 1000) return "under a second";
-  if (ms < 60_000) return `${Math.round(ms / 1000)} seconds`;
-  return `${Math.round(ms / 60_000)} minutes`;
+  if (ms < 60000) return Math.round(ms / 1000) + " seconds";
+  return Math.round(ms / 60000) + " minutes";
 }
 
 function when(iso: string): string {
-  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60_000);
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 60) return mins + "m ago";
   const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
+  if (hours < 24) return hours + "h ago";
+  return Math.round(hours / 24) + "d ago";
 }
 
 /** The assistant's replies run to a couple of sentences. One is enough here. */
 function trim(text: string): string {
   const first = text.split("\n")[0];
-  return first.length > 110 ? `${first.slice(0, 110)}…` : first;
+  return first.length > 110 ? first.slice(0, 110) + "..." : first;
 }

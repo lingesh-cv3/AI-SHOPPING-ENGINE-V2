@@ -452,10 +452,311 @@ async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
                 "diagnosis": c.diagnosis,
                 "selected_action": c.selected_action,
                 "risk_outcome": c.risk_outcome,
+                # The reply as sent, not as the model first drafted it. When an action was
+                # held for approval the two differ, and showing a merchant a promise
+                # their customer never received would misrepresent their own shop.
                 "shopper_reply": c.shopper_reply,
                 "used_model": c.used_model,
                 "created_at": _aware(c.created_at).isoformat(),
             }
             for c in sorted(case_rows, key=lambda c: c.created_at, reverse=True)[:8]
         ],
+    }
+
+
+async def expire_approvals() -> list[dict]:
+    """Close out approvals nobody actioned in time.
+
+    Until now an expired approval simply stopped appearing in the queue. The case
+    stayed PENDING_APPROVAL forever, the shopper who was told "someone will pick
+    this up" was never told otherwise, and nothing recorded that a sale had been
+    lost to nobody looking. That is the worst of the three: it is invisible, so it
+    never gets fixed.
+
+    Returns what expired, so the caller can tell each shopper and record an outcome.
+    The caller does that rather than this function, because writing to a session and
+    recording revenue are not the repository's job.
+    """
+    now = datetime.now(UTC)
+
+    async with session_scope() as db:
+        result = await db.execute(
+            select(Approval, Case)
+            .join(Case, Case.case_id == Approval.case_id)
+            .where(
+                Approval.state == "PENDING",
+                Approval.expires_at.is_not(None),
+                Approval.expires_at < now,
+            )
+        )
+
+        expired = []
+        for approval, case in result.all():
+            approval.state = "EXPIRED"
+            approval.decided_at = now
+            # Recorded as the deciding party so an audit trail never has a decision
+            # with nobody attached to it. Nobody decided; time did.
+            approval.decided_by = "expired"
+            case.state = str(CaseState.TIMEOUT)
+
+            expired.append(
+                {
+                    "approval_id": approval.approval_id,
+                    "case_id": case.case_id,
+                    "connection_id": case.connection_id,
+                    "session_id": case.session_id,
+                    "action_type": approval.action_type,
+                    "friction_type": case.friction_type,
+                    "order_id": case.order_id,
+                    "waited_minutes": int(
+                        (now - _aware(approval.requested_at)).total_seconds() / 60
+                    ),
+                }
+            )
+
+    return expired
+
+
+async def expire_approvals() -> list[dict]:
+    """Close out approvals nobody actioned in time.
+
+    Until now an expired approval simply stopped appearing in the queue. The case
+    stayed PENDING_APPROVAL forever, the shopper who was told "someone will pick
+    this up" was never told otherwise, and nothing recorded that a sale had been
+    lost to nobody looking. That is the worst of the three: it is invisible, so it
+    never gets fixed.
+
+    Returns what expired, so the caller can tell each shopper and record an outcome.
+    The caller does that rather than this function, because writing to a session and
+    recording revenue are not the repository's job.
+    """
+    now = datetime.now(UTC)
+
+    async with session_scope() as db:
+        result = await db.execute(
+            select(Approval, Case)
+            .join(Case, Case.case_id == Approval.case_id)
+            .where(
+                Approval.state == "PENDING",
+                Approval.expires_at.is_not(None),
+                Approval.expires_at < now,
+            )
+        )
+
+        expired = []
+        for approval, case in result.all():
+            approval.state = "EXPIRED"
+            approval.decided_at = now
+            # Recorded as the deciding party so an audit trail never has a decision
+            # with nobody attached to it. Nobody decided; time did.
+            approval.decided_by = "expired"
+            case.state = str(CaseState.TIMEOUT)
+
+            expired.append(
+                {
+                    "approval_id": approval.approval_id,
+                    "case_id": case.case_id,
+                    "connection_id": case.connection_id,
+                    "session_id": case.session_id,
+                    "action_type": approval.action_type,
+                    "friction_type": case.friction_type,
+                    "order_id": case.order_id,
+                    "waited_minutes": int(
+                        (now - _aware(approval.requested_at)).total_seconds() / 60
+                    ),
+                }
+            )
+
+    return expired
+
+
+# ---------------------------------------------------------------------------
+# Cross-client views, for CV3's own operators
+# ---------------------------------------------------------------------------
+#
+# Every function above takes one connection_id and there is no unfiltered variant,
+# which is what makes tenant isolation structural rather than remembered.
+#
+# These take a list of ids instead. That is not a hole in the rule: the query is
+# still filtered, just by many ids rather than one, and the caller supplies the list
+# from the connection registry. When authentication arrives, the list becomes the
+# set of merchants a given operator is permitted to see, and nothing here changes.
+#
+# A CV3 operator covering ten clients is a real user with a real need. Making them
+# switch merchant ten times to find their work is not isolation, it is an interface
+# failure wearing isolation's clothes.
+
+
+async def pending_across(connection_ids: list[str], *, limit: int = 100) -> list[dict]:
+    """Everything waiting on a person, across the given merchants.
+
+    Oldest first. A shopper has been waiting on each of these, and sorting by
+    merchant or by amount would leave the person who has waited longest waiting
+    longer.
+    """
+    if not connection_ids:
+        return []
+
+    now = datetime.now(UTC)
+    async with session_scope() as db:
+        result = await db.execute(
+            select(Approval, Case)
+            .join(Case, Case.case_id == Approval.case_id)
+            .where(
+                Approval.connection_id.in_(connection_ids),
+                Approval.state == "PENDING",
+            )
+            .order_by(Approval.requested_at.asc())
+            .limit(limit)
+        )
+
+        rows = []
+        for approval, case in result.all():
+            expires = _aware(approval.expires_at)
+            if expires is not None and expires < now:
+                continue
+            requested = _aware(approval.requested_at)
+            rows.append(
+                {
+                    "approval_id": approval.approval_id,
+                    "case_id": case.case_id,
+                    "connection_id": case.connection_id,
+                    "action_type": approval.action_type,
+                    "risk_rule": approval.risk_rule,
+                    "requested_at": requested.isoformat(),
+                    "waiting_minutes": int((now - requested).total_seconds() / 60),
+                    "expires_at": expires.isoformat() if expires else None,
+                    "minutes_left": (
+                        int((expires - now).total_seconds() / 60) if expires else None
+                    ),
+                    "friction_type": case.friction_type,
+                    "diagnosis": case.diagnosis,
+                    "evidence": case.evidence,
+                    "used_model": case.used_model,
+                    "shopper_reply": case.shopper_reply,
+                    "model_reply": case.model_reply,
+                    "selection_reason": case.selection_reason,
+                    "rejected": case.rejected,
+                    "financial": case.financial,
+                    "order_id": case.order_id,
+                    "query": case.query,
+                }
+            )
+        return rows
+
+
+async def decided_across(connection_ids: list[str], *, limit: int = 40) -> list[dict]:
+    """What has already been settled, newest first.
+
+    The queue showed pending work and nothing else, so an operator could not answer
+    "what did I decide this morning", "who approved that refund", or "did the thing
+    I approved actually work". All three are ordinary questions and the data was
+    there the whole time.
+
+    Includes expiries, which are decisions too - by nobody, which is the kind worth
+    being able to count.
+    """
+    if not connection_ids:
+        return []
+
+    async with session_scope() as db:
+        result = await db.execute(
+            select(Approval, Case)
+            .join(Case, Case.case_id == Approval.case_id)
+            .where(
+                Approval.connection_id.in_(connection_ids),
+                Approval.state != "PENDING",
+            )
+            .order_by(Approval.decided_at.desc())
+            .limit(limit)
+        )
+        pairs = list(result.all())
+
+        # The outcome says what actually happened after the decision, which is not
+        # the same question as what was decided. Fetched in one query, not per row.
+        case_ids = [case.case_id for _, case in pairs]
+        outcomes = {}
+        if case_ids:
+            found = await db.execute(
+                select(Outcome).where(Outcome.case_id.in_(case_ids))
+            )
+            outcomes = {o.case_id: o for o in found.scalars()}
+
+    rows = []
+    for approval, case in pairs:
+        outcome = outcomes.get(case.case_id)
+        decided = _aware(approval.decided_at)
+        rows.append(
+            {
+                "approval_id": approval.approval_id,
+                "case_id": case.case_id,
+                "connection_id": case.connection_id,
+                "state": approval.state,
+                "action_type": approval.action_type,
+                "decided_at": decided.isoformat() if decided else None,
+                "decided_by": approval.decided_by,
+                "note": approval.note,
+                "friction_type": case.friction_type,
+                "diagnosis": case.diagnosis,
+                "financial": case.financial,
+                "order_id": case.order_id,
+                "resolved": outcome.resolved if outcome else None,
+                "final_state": outcome.final_state if outcome else case.state,
+                "revenue": outcome.revenue_recovered_amount if outcome else None,
+                "currency": outcome.revenue_recovered_currency if outcome else None,
+            }
+        )
+    return rows
+
+
+async def ops_stats(connection_ids: list[str]) -> dict:
+    """Headline numbers for CV3, not for any one merchant.
+
+    Different from merchant_report, which answers "what did this do for my shop".
+    This answers "where should I be looking" - a question about workload rather than
+    about outcomes.
+    """
+    if not connection_ids:
+        return {"waiting": 0, "oldest_wait_minutes": 0, "by_merchant": {}, "today": 0}
+
+    now = datetime.now(UTC)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    async with session_scope() as db:
+        pending = await db.execute(
+            select(Approval).where(
+                Approval.connection_id.in_(connection_ids),
+                Approval.state == "PENDING",
+            )
+        )
+        rows = [
+            a
+            for a in pending.scalars()
+            if a.expires_at is None or _aware(a.expires_at) >= now
+        ]
+
+        settled_today = await db.scalar(
+            select(func.count(Approval.approval_id)).where(
+                Approval.connection_id.in_(connection_ids),
+                Approval.state != "PENDING",
+                Approval.decided_at >= midnight,
+            )
+        )
+
+    by_merchant: dict[str, int] = {}
+    for approval in rows:
+        by_merchant[approval.connection_id] = (
+            by_merchant.get(approval.connection_id, 0) + 1
+        )
+
+    waits = [int((now - _aware(a.requested_at)).total_seconds() / 60) for a in rows]
+
+    return {
+        "waiting": len(rows),
+        # The number that decides whether anyone should be worried. Ten cases
+        # waiting two minutes is a busy morning; one waiting fourteen is a shopper
+        # about to be let down by the timeout.
+        "oldest_wait_minutes": max(waits) if waits else 0,
+        "by_merchant": by_merchant,
+        "today": settled_today or 0,
     }

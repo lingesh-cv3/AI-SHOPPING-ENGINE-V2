@@ -14,13 +14,14 @@ Two groups of routes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from .deps import MERCHANT_NAMES, engine
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from engine import db
+from engine import db, expiry
+from engine import session as session_store
 from engine.decision import operation_for
 from engine.risk import RULE_ORDER, AutomationMode, RiskPolicy, explain_rules
 from shared.models import (
@@ -31,7 +32,7 @@ from shared.models import (
     risk_properties_for,
 )
 
-from .deps import DEV_MERCHANT_NAME, engine
+from .deps import DEV_MERCHANT_NAME, MERCHANT_NAMES, engine
 from .schemas import (
     ActionInfo,
     ApprovalDecision,
@@ -85,9 +86,16 @@ async def _startup() -> None:
     if stored:
         logger.info("restored %d merchant policies", len(stored))
 
+    # Expire approvals nobody actions. Held on app.state so shutdown can cancel it;
+    # a task nobody keeps a reference to can be garbage collected mid-run.
+    app.state.expiry_task = asyncio.create_task(expiry.run_forever())
+
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
+    task = getattr(app.state, "expiry_task", None)
+    if task is not None:
+        task.cancel()
     await engine.close()
     await db.dispose()
 
@@ -469,7 +477,46 @@ async def decide(connection_id: str, approval_id: str, body: ApprovalDecision) -
     # operators clicking approve would produce one decision and two executions -
     # which is precisely the double-charge the idempotency key exists to prevent,
     # arrived at from the other direction.
-    if not result.get("changed") or not body.approved:
+    if not result.get("changed"):
+        return {**result, "executed": None}
+
+    if not body.approved:
+        # A rejection is a decision the shopper is waiting on just as much as an
+        # approval. Recording it and telling nobody leaves them on a page that will
+        # never update, which is the same failure expiry was built to fix.
+        #
+        # The operator's note is deliberately not passed through. It is written for
+        # the next person to read the case - "customer already paid by transfer" -
+        # and is often about the shop's own processes rather than anything the
+        # shopper should see.
+        case = await db.get_case(connection_id, result["case_id"])
+        if case is not None and case.session_id:
+            try:
+                await session_store.add_turn(
+                    session_id=case.session_id,
+                    connection_id=connection_id,
+                    speaker="assistant",
+                    text=(
+                        "I checked with the shop and they're not able to do that "
+                        "one, sorry. If you'd still like a hand, ask me and I'll "
+                        "pass it on."
+                    ),
+                    case_id=case.case_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("could not tell the shopper about a rejection")
+
+        try:
+            await db.record_outcome(
+                connection_id=connection_id,
+                case_id=result["case_id"],
+                resolved=False,
+                final_state="REJECTED",
+                required_human=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("could not record a rejection outcome")
+
         return {**result, "executed": None}
 
     executed = await engine.execution.execute_case(connection_id, result["case_id"])
@@ -529,3 +576,67 @@ async def merchant_report(connection_id: str, days: int = 30) -> dict:
     """
     _adapter(connection_id)
     return await db.merchant_report(connection_id, days=days)
+
+
+@app.post(f"{API}/admin/expire")
+async def run_expiry() -> dict:
+    """Run the expiry sweep now.
+
+    The sweeper runs on a timer, which makes the behaviour hard to demonstrate
+    without waiting out an approval timeout. This does the same work immediately.
+    """
+    return {"expired": await expiry.sweep_once()}
+
+
+# ---------------------------------------------------------------------------
+# Operations console: CV3's own view, across every merchant
+# ---------------------------------------------------------------------------
+
+
+def _operator_connections() -> list[str]:
+    """Which merchants this operator can see.
+
+    Every registered connection, for now. When authentication arrives this becomes
+    the set a given operator is permitted to see, and nothing downstream changes -
+    which is why the repository takes a list rather than querying everything.
+    """
+    return list(engine.registry.connection_ids())
+
+
+@app.get(f"{API}/ops/queue")
+async def ops_queue() -> dict:
+    """Everything waiting on a person, across every merchant.
+
+    The per-merchant queue made an operator covering several clients switch between
+    them to find their work, so the oldest case on a quiet shop could sit unseen
+    while they worked a busy one. This is the same data ordered by how long a
+    shopper has been waiting, which is the order that matters.
+    """
+    rows = await db.pending_across(_operator_connections())
+    for row in rows:
+        row["merchant_name"] = MERCHANT_NAMES.get(
+            row["connection_id"], row["connection_id"]
+        )
+    return {"approvals": rows}
+
+
+@app.get(f"{API}/ops/history")
+async def ops_history(limit: int = 40) -> dict:
+    """What has already been decided, and what came of it."""
+    rows = await db.decided_across(_operator_connections(), limit=limit)
+    for row in rows:
+        row["merchant_name"] = MERCHANT_NAMES.get(
+            row["connection_id"], row["connection_id"]
+        )
+    return {"decisions": rows}
+
+
+@app.get(f"{API}/ops/stats")
+async def ops_overview() -> dict:
+    """Workload across every merchant."""
+    stats = await db.ops_stats(_operator_connections())
+    stats["by_merchant"] = {
+        MERCHANT_NAMES.get(cid, cid): count
+        for cid, count in stats["by_merchant"].items()
+    }
+    return stats

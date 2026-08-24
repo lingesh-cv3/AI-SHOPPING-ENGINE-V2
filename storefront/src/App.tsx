@@ -12,7 +12,7 @@ import {
   type Pipeline,
   type Product,
 } from "./api";
-import { ApprovalQueue } from "./ApprovalQueue";
+import { OpsConsole } from "./OpsConsole";
 import { CartPanel } from "./CartPanel";
 import { ChatWidget } from "./ChatWidget";
 import { Gates } from "./Gates";
@@ -430,7 +430,7 @@ export default function App() {
             aria-selected={view === "queue"}
             onClick={() => setView("queue")}
           >
-            Queue
+            Operations
           </button>
           <button
             aria-selected={view === "console"}
@@ -446,7 +446,7 @@ export default function App() {
       ) : view === "queue" ? (
         <div className="layout" style={{ gridTemplateColumns: "1fr" }}>
           <main>
-            <ApprovalQueue />
+            <OpsConsole />
           </main>
         </div>
       ) : view === "product" && openProduct ? (

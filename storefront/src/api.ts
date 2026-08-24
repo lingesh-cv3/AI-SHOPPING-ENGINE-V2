@@ -519,6 +519,8 @@ export const console_api = {
     }),
 
   stats: () => call<Stats>(`/api/stats/${getConnection()}`),
+
+  report: () => call<MerchantReport>(`/api/report/${getConnection()}`),
 };
 
 export interface MerchantReport {
@@ -542,3 +544,85 @@ export interface MerchantReport {
     created_at: string;
   }[];
 }
+
+
+export interface OpsQueueItem {
+  approval_id: string;
+  case_id: string;
+  connection_id: string;
+  merchant_name: string;
+  action_type: string;
+  risk_rule: string | null;
+  requested_at: string;
+  waiting_minutes: number;
+  expires_at: string | null;
+  minutes_left: number | null;
+  friction_type: string | null;
+  diagnosis: string | null;
+  evidence: string[];
+  used_model: boolean;
+  shopper_reply: string | null;
+  model_reply: string | null;
+  selection_reason: string | null;
+  rejected: { action_type: string; reason: string; detail: string }[];
+  financial: boolean;
+  order_id: string | null;
+  query: string | null;
+}
+
+export interface OpsDecision {
+  approval_id: string;
+  case_id: string;
+  connection_id: string;
+  merchant_name: string;
+  state: string;
+  action_type: string;
+  decided_at: string | null;
+  decided_by: string | null;
+  note: string | null;
+  friction_type: string | null;
+  diagnosis: string | null;
+  financial: boolean;
+  order_id: string | null;
+  resolved: boolean | null;
+  final_state: string;
+  revenue: string | null;
+  currency: string | null;
+}
+
+export interface OpsStats {
+  waiting: number;
+  oldest_wait_minutes: number;
+  by_merchant: Record<string, number>;
+  today: number;
+}
+
+/** CV3's own view, across every merchant.
+ *
+ *  Separate from console_api, which is always scoped to one connection. These
+ *  deliberately are not, because an operator covering several clients should not
+ *  have to switch between them to find their work.
+ */
+export const ops_api = {
+  queue: () => call<{ approvals: OpsQueueItem[] }>("/api/ops/queue"),
+
+  history: () => call<{ decisions: OpsDecision[] }>("/api/ops/history"),
+
+  stats: () => call<OpsStats>("/api/ops/stats"),
+
+  /** The connection id comes from the item, not from the current shop. */
+  decide: (
+    connectionId: string,
+    approvalId: string,
+    approved: boolean,
+    note?: string,
+  ) =>
+    call<Decision>(`/api/approvals/${connectionId}/${approvalId}`, {
+      method: "POST",
+      body: JSON.stringify({
+        approved,
+        decided_by: "cv3-operator",
+        note: note ?? null,
+      }),
+    }),
+};

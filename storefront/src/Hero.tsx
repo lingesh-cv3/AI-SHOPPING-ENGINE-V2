@@ -6,29 +6,33 @@ import type { MerchantTheme } from "./theme";
  * One band, not a screenful. A shop's job is to show stock, so this says what the
  * shop is and gets out of the way.
  *
- * The three facts are chosen for what a shopper actually wants to know before
- * browsing: when it ships, when delivery stops costing, and what happens if it is
- * wrong. Not awards, not founder stories, not a number with a gradient behind it.
+ * The first version put everything in the left half of a wide screen and left the
+ * right two thirds empty, which read as unfinished rather than as restraint. It now
+ * runs as two columns: the statement on the left, the facts stacked on the right.
+ * On a narrow screen they collapse back into one.
  *
- * Hidden once a shopper searches. They have said what they want; repeating the
- * shop's introduction above their results would be talking over them.
+ * The three facts are what a shopper wants before browsing: when it ships, when
+ * delivery stops costing, and what happens if it is wrong. Not awards, not a
+ * founder story, not a large number with a gradient behind it.
  */
 export function Hero({ theme }: { theme: MerchantTheme }) {
   return (
     <section className="hero">
       <div className="hero-inner">
-        <div className="eyebrow">{theme.eyebrow}</div>
-        <h1>{theme.headline}</h1>
-        <p>{theme.standfirst}</p>
+        <div className="hero-lede">
+          <div className="eyebrow">{theme.eyebrow}</div>
+          <h1>{theme.headline}</h1>
+          <p>{theme.standfirst}</p>
+        </div>
 
-        <div className="facts">
+        <dl className="facts">
           {theme.facts.map((f) => (
-            <div key={f.label}>
-              <div className="fact-label">{f.label}</div>
-              <div className="fact-value">{f.value}</div>
+            <div key={f.label} className="fact">
+              <dt className="fact-label">{f.label}</dt>
+              <dd className="fact-value">{f.value}</dd>
             </div>
           ))}
-        </div>
+        </dl>
       </div>
     </section>
   );

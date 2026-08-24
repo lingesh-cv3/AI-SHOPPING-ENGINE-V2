@@ -8,7 +8,7 @@ import {
   type Rule,
 } from "./api";
 import { Gates } from "./Gates";
-
+import { MerchantReport } from "./MerchantReport";
 /**
  * The merchant's own view of how the engine behaves on their store.
  *
@@ -79,6 +79,8 @@ export function MerchantConsole() {
   return (
     <div className="layout">
       <main style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <MerchantReport />
+
         <section className="panel">
           <div className="panel-head">
             <span className="eyebrow">What your store can do</span>
