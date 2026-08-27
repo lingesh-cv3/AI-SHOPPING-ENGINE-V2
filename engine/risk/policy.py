@@ -75,12 +75,17 @@ class RiskPolicy(BaseModel):
 def default_policy(connection_id: str) -> RiskPolicy:
     """What a brand-new connection gets before anyone configures it.
 
-    The most restrictive setting that still functions - a merchant who has
-    configured nothing should find the engine cautious, not permissive.
+    STANDARD, not CAUTIOUS. Cautious meant every harmless thing - answering a
+    question, suggesting a product - queued for approval, so a merchant's first
+    experience was a hundred notifications about nothing. That trains people to
+    approve without reading. Standard is safe because the gate makes it safe:
+    rules 5 to 7 run before any policy is read, so nothing touching money, nothing
+    irreversible, and nothing that contacts a customer runs unattended whatever
+    the mode says.
     """
     return RiskPolicy(
         connection_id=connection_id,
-        mode=AutomationMode.CAUTIOUS,
+        mode=AutomationMode.STANDARD,
         auto_allowed=set(),
         blocked=set(),
     )

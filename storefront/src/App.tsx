@@ -72,7 +72,23 @@ export default function App() {
   // the mechanism behind shared memory - both report against it, so the assistant
   // knows about a declined payment nobody mentioned.
   const [sessionId] = useState(
-    () => `sess_${Math.random().toString(36).slice(2, 12)}`,
+    // Kept in sessionStorage, not React state.
+    //
+    // Generated per render, a refresh started a new session and the assistant
+    // forgot everything - including a payment decline it had been told about
+    // seconds earlier. Shared memory that survives everything except reloading
+    // the page is not memory.
+    //
+    // sessionStorage rather than localStorage: it clears when the tab closes,
+    // which matches how long a visit lasts, and it does not leave one shopper's
+    // conversation for whoever uses the browser next.
+    () => {
+      const existing = sessionStorage.getItem("cv3_session");
+      if (existing) return existing;
+      const fresh = `sess_${Math.random().toString(36).slice(2, 12)}`;
+      sessionStorage.setItem("cv3_session", fresh);
+      return fresh;
+    },
   );
 
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -174,7 +190,27 @@ export default function App() {
     load("", null);
     api.connections().then(setConnections).catch(() => {});
     api.departments().then((d) => setDepts(d.departments)).catch(() => {});
-    api.createCart().then(setCart).catch(() => setError("Could not start a cart"));
+    // Reuse the visit's cart rather than starting a new one on every page load.
+    //
+    // Creating one unconditionally orphaned whatever the shopper had. The session
+    // survived the reload and the cart did not, so the two disagreed: asked what
+    // was in the cart, the assistant answered from the conversation while the panel
+    // showed nothing. Both were right about different carts.
+    //
+    // The stored id is verified before it is trusted. A cart the platform has since
+    // dropped - expired, or the merchant restarted - would otherwise leave every
+    // request pointing at something that no longer exists.
+    const storedCart = sessionStorage.getItem("cv3_cart");
+    const cartReady = storedCart
+      ? api.getCart(storedCart).catch(() => api.createCart())
+      : api.createCart();
+
+    cartReady
+      .then((c) => {
+        sessionStorage.setItem("cv3_cart", c.cart_id);
+        setCart(c);
+      })
+      .catch(() => setError("Could not start a cart"));
     // Runs once on mount. load is intentionally not a dependency here - it changes
     // when the cart arrives, and re-running the initial load then would be wasteful.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -331,6 +367,10 @@ export default function App() {
     setOpenedForDeadSearch(false);
     setView("shop");
     setCart(null);
+    // A cart belongs to one platform. Carrying the id across would point the new
+    // merchant at something it has never issued.
+    sessionStorage.removeItem("cv3_cart");
+    sessionStorage.removeItem("cv3_session");
     setUnread(0);
 
     try {

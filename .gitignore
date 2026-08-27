@@ -31,3 +31,8 @@ obj/
 venv/
 .venv/
 env/
+
+
+start.txt
+
+patch*

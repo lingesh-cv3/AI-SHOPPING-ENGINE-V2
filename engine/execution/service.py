@@ -314,14 +314,33 @@ class ExecutionService:
                 # The model's suggested term, or the shopper's original if it did
                 # not supply one. Falling back to the original is not much use, but
                 # it is honest - better than inventing a term.
-                query = params.get("query") or case.query or ""
+                # The two actions fall back differently, and conflating them was a
+                # bug worth spelling out.
+                #
+                # SUGGEST_ALTERNATIVE answers a search that found nothing, so the
+                # original term is a sensible last resort - it at least addresses
+                # what they asked for.
+                #
+                # RECOMMEND_PRODUCTS answers "show me something". Falling back to the
+                # shopper's raw message meant a greeting was searched as a keyword:
+                # "Hi" matched no product, and the assistant answered a hello with
+                # "I couldn't turn anything up for that". An empty query browses the
+                # catalog, which is what recommending actually means.
+                if action_type is ActionType.RECOMMEND_PRODUCTS:
+                    query = str(params.get("query") or "")
+                else:
+                    query = str(params.get("query") or case.query or "")
                 found = await adapter.search_products(query, limit=6)
                 titles = [p.title for p in found.products]
                 if not titles:
                     return Executed(
                         succeeded=False,
                         action_type=str(action_type),
-                        summary=f'Searched for "{query}" and still found nothing.',
+                        summary=(
+                            "The catalog came back empty."
+                            if not query
+                            else f'Searched for "{query}" and still found nothing.'
+                        ),
                         payload={"query": query, "products": []},
                         final_state=str(CaseState.FAILED),
                     )
@@ -329,7 +348,13 @@ class ExecutionService:
                     succeeded=True,
                     action_type=str(action_type),
                     summary=(
-                        f'Searched "{query}" and found {len(titles)}: '
+                        # An empty query is a browse, not a search for nothing.
+                        # 'Searched "" and found 6' reads as a bug in the queue.
+                        (
+                            f"Showed {len(titles)} from the catalog: "
+                            if not query
+                            else f'Searched "{query}" and found {len(titles)}: '
+                        )
                         + ", ".join(titles[:3])
                         + ("…" if len(titles) > 3 else "")
                     ),
@@ -339,6 +364,10 @@ class ExecutionService:
                             {
                                 "product_id": p.product_id,
                                 "title": p.title,
+                                # The merchant's own words about the product. A card
+                                # with a name and a price gives a shopper nothing to
+                                # judge, so they either tap blindly or ignore it.
+                                "description": p.description,
                                 "price": str(p.price) if p.price else None,
                                 "availability": str(p.availability),
                             }
@@ -376,7 +405,7 @@ class ExecutionService:
                     },
                 )
             case ActionType.ADD_TO_CART:
-                product_id = params.get("product_id")
+                product_id = params.get("chosen_product") or params.get("product_id")
                 if not (product_id and case.cart_id):
                     return Executed(
                         succeeded=False,
@@ -386,16 +415,47 @@ class ExecutionService:
                         final_state=str(CaseState.FAILED),
                     )
 
-                variant_id = params.get("variant_id")
-
-                # A product with options cannot be added without choosing one. The
-                # platform would accept it - Northfield happily adds a shoe with no
-                # size - and the shopper would discover the problem at delivery.
-                # Asking costs one turn; guessing costs a return.
                 product = await adapter.get_product(product_id)
                 buyable = [
                     v for v in product.variants if str(v.availability) != "OUT_OF_STOCK"
                 ]
+
+                # One rule: a product with options is only ever added by choosing
+                # one explicitly.
+                #
+                # This replaced four interacting mechanisms - the model's suggested
+                # variant, matching the shopper's words against labels, matching in
+                # reverse for longer labels, and a separate needs-choice check. Each
+                # was defensible alone. Together they let a shopper end up with two
+                # bags of coffee: one added on a partial match, one added when they
+                # picked properly.
+                #
+                # chosen_variant is set only when a shopper taps an option, so it is
+                # the one signal that is unambiguously a choice they made. The
+                # model's guess is ignored entirely: it cannot know a size nobody
+                # stated, and once the catalog showed it real ids it started
+                # supplying them confidently anyway.
+                variant_id = params.get("chosen_variant")
+
+                # A typed option, and only when the whole message is the label.
+                #
+                # Tapping is the intended path, but a shopper who types "8" or
+                # "250g ground" in reply to being asked has plainly answered, and
+                # asking again would be obtuse. The match is exact and against the
+                # entire message - no containment, no partial, nothing fuzzy. That
+                # restraint is deliberate: the fuzzy version is what produced two
+                # bags of coffee for a shopper who wanted one.
+                if not variant_id:
+                    said = str(params.get("said") or "").strip().lower()
+                    if said:
+                        variant_id = next(
+                            (
+                                v.variant_id
+                                for v in buyable
+                                if (v.title or "").strip().lower() == said
+                            ),
+                            None,
+                        )
 
                 if product.variants and not variant_id:
                     if not buyable:
@@ -414,8 +474,8 @@ class ExecutionService:
                             succeeded=False,
                             action_type=str(action_type),
                             summary=(
-                                f"{product.title} comes in "
-                                f"{len(buyable)} options - asked which one."
+                                f"{product.title} comes in {len(buyable)} options - "
+                                "asked which one."
                             ),
                             needs_choice=True,
                             choices=[
@@ -432,10 +492,24 @@ class ExecutionService:
                             final_state=str(CaseState.DIAGNOSED),
                         )
 
+                # A chosen option that is not actually on this product is refused
+                # rather than dropped. Silently adding the parent product with no
+                # option is how an order ends up with a line nobody chose.
+                if variant_id and not any(
+                    v.variant_id == variant_id for v in product.variants
+                ):
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=f"{variant_id} is not an option on {product.title}.",
+                        error_code="VARIANT_UNAVAILABLE",
+                        final_state=str(CaseState.FAILED),
+                    )
+
                 cart = await adapter.add_to_cart(
                     case.cart_id, product_id, variant_id=variant_id
                 )
-                cart = await adapter.add_to_cart(case.cart_id, product_id)
+
                 chosen = next(
                     (v.title for v in product.variants if v.variant_id == variant_id),
                     None,
@@ -455,6 +529,7 @@ class ExecutionService:
                         "grand_total": str(cart.grand_total),
                     },
                 )
+
             case ActionType.REMOVE_CART_LINE | ActionType.UPDATE_CART_QUANTITY:
                 # The model names a product; the platform wants a line id. Reading
                 # the cart to translate is the adapter boundary working as intended -

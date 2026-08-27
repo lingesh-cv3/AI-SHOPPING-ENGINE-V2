@@ -19,7 +19,13 @@ looking - and the case is already in the queue when they are.
 """
 
 from __future__ import annotations
-from shared.models import CommerceError, FrictionType
+from engine.decision import operation_for
+from shared.models import (
+    ActionType,
+    CommerceError,
+    FrictionType,
+    ProposedAction,
+)
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -77,8 +83,28 @@ class ChatReply(BaseModel):
     action_summary: str | None = None
     products: list[dict] = Field(default_factory=list)
 
+    #: Options the shopper must pick between before the action can run. Rendered
+    #: as buttons rather than asked in prose - "which size?" followed by a list
+    #: they have to type back is worse than three things they can tap.
+    choices: list[dict] = Field(default_factory=list)
+
+    #: Options the shopper must pick between before the action can run. Rendered
+    #: as buttons rather than asked in prose - "which size?" followed by a list
+    #: they have to type back is worse than three things they can tap.
+    choices: list[dict] = Field(default_factory=list)
+
     awaiting_person: bool = False
     risk_rule: str | None = None
+    #: Options the shopper must pick between before the action can run. Rendered
+    #: as buttons rather than asked in prose - "which size?" followed by a list
+    #: they have to type back is worse than three things they can tap.
+    choices: list[dict] = Field(default_factory=list)
+
+    #: Options the shopper must pick between before the action can run. Rendered
+    #: as buttons rather than asked in prose - "which size?" followed by a list
+    #: they have to type back is worse than three things they can tap.
+    choices: list[dict] = Field(default_factory=list)
+
     awaiting_person: bool = False
     risk_rule: str | None = None
 
@@ -170,6 +196,20 @@ async def chat(req: ChatRequest) -> ChatReply:
         for candidate in reasoning.actions:
             for field, value in req.known.items():
                 candidate.parameters.setdefault(field, value)
+
+    # The shopper's own words, carried alongside every proposal.
+    #
+    # Asked which size, a shopper types "7". The model then writes "I'll add it in
+    # size 7" in its prose and leaves the structured field empty, so execution has
+    # nothing to act on and asks again - and again, because the same thing happens
+    # every turn. Watching someone answer the same question four times is what
+    # prompted this.
+    #
+    # Passing the raw message costs nothing and cannot fail. Execution matches it
+    # against the actual variant labels and ignores it when nothing matches, so a
+    # shopper saying "yes please" does not accidentally choose a size.
+    for candidate in reasoning.actions:
+        candidate.parameters.setdefault("said", req.message[:80])
     trace = await engine.decision.decide(
         reasoning.actions, connection_id=req.connection_id, friction=friction_type
     )
@@ -271,6 +311,8 @@ async def chat(req: ChatRequest) -> ChatReply:
     action_taken = None
     action_summary = None
     products: list[dict] = []
+    choices: list[dict] = []
+    choices: list[dict] = []
     cart_changed = False
 
     if not awaiting and case_id:
@@ -280,8 +322,29 @@ async def chat(req: ChatRequest) -> ChatReply:
         found = executed.payload.get("products")
         if isinstance(found, list):
             products = found
-
-        if executed.succeeded:
+        if executed.needs_choice:
+            # Not a failure. The shopper has not said enough yet, and asking is the
+            # right answer - a guessed size is a return waiting to happen.
+            choices = executed.choices
+            first = executed.choices[0] if executed.choices else {}
+            first = executed.choices[0] if executed.choices else {}
+            # Only ask if the model has not. It usually says "which size
+            # would you like?" itself, and following that with our own
+            # near-identical question reads as a system talking over its own
+            # output.
+            #
+            # A trailing question mark is a crude test, and it is the right
+            # kind of crude: a false negative adds a redundant sentence, a
+            # false positive leaves buttons with no prompt. The first is the
+            # cheaper mistake.
+            if not reply.rstrip().endswith("?"):
+                reply = (
+                    reply
+                    + "\n\nWhich option would you like for the "
+                    + str(first.get("product_title", "item"))
+                    + "?"
+                )
+        elif executed.succeeded:
             if executed.action_type in {
                 "ADD_TO_CART",
                 "REMOVE_CART_LINE",
@@ -297,7 +360,7 @@ async def chat(req: ChatRequest) -> ChatReply:
                     + (f". Your cart is now {count} item(s), {total}." if count is not None else ".")
                 )
             elif products:
-                reply = f"{reply}\n\nHere's what I found:"
+                pass  # the cards say what was found; a label announcing them is noise
             elif executed.action_type == "CHECK_AVAILABILITY":
                 reply = f"{reply}\n\n{executed.summary}"
         else:
@@ -326,6 +389,7 @@ async def chat(req: ChatRequest) -> ChatReply:
         action_taken=action_taken,
         action_summary=action_summary,
         products=products,
+        choices=choices,
         awaiting_person=awaiting,
         risk_rule=decision.policy_rule,
         cart_changed=cart_changed,
@@ -368,3 +432,222 @@ async def transcript(connection_id: str, session_id: str) -> dict:
             session_id, connection_id, limit=5
         ),
     }
+
+
+class ActRequest(BaseModel):
+    """A shopper tapped something.
+
+    Distinct from a message because there is nothing to interpret. They named a
+    product and possibly an option, and both arrived as ids.
+    """
+
+    connection_id: str
+    session_id: str
+    product_id: str
+    variant_id: str | None = None
+    cart_id: str | None = None
+    #: What to write in the transcript. The shopper's gesture, in words, so the
+    #: conversation still reads like one.
+    said: str = "Add that to my cart"
+
+
+@router.post("/act", response_model=ChatReply)
+async def act(req: ActRequest) -> ChatReply:
+    """Carry out a tap, without asking a model anything.
+
+    The safety path is unchanged. The action still goes through the Decision Engine
+    for capability and policy, and through the Risk Gate. Skipping reasoning skips
+    only the part that had nothing to contribute.
+    """
+    adapter = engine.registry.adapter_for(req.connection_id)
+    if adapter is None:
+        raise HTTPException(404, f"unknown connection '{req.connection_id}'")
+
+    await session_store.add_turn(
+        session_id=req.session_id,
+        connection_id=req.connection_id,
+        speaker="shopper",
+        text=req.said,
+    )
+
+    parameters: dict[str, object] = {"chosen_product": req.product_id}
+    if req.variant_id:
+        parameters["chosen_variant"] = req.variant_id
+
+    candidate = ProposedAction(
+        action_type=ActionType.ADD_TO_CART,
+        operation=operation_for(ActionType.ADD_TO_CART),
+        parameters=parameters,
+        rationale="the shopper tapped this",
+        confidence=1.0,
+    )
+
+    trace = await engine.decision.decide(
+        [candidate], connection_id=req.connection_id, friction=None
+    )
+    decision = engine.gate.classify(trace.selected)
+    awaiting = str(decision.outcome) != "AUTO"
+
+    case_id = None
+    try:
+        case_id = await db.record_case(
+            connection_id=req.connection_id,
+            friction=None,
+            query=req.said[:300],
+            cart_id=req.cart_id,
+            order_id=None,
+            session_id=req.session_id,
+            reasoning={
+                # No model was involved, and the console should say so rather than
+                # implying a diagnosis nobody made.
+                "used_model": False,
+                "fallback_reason": "the shopper chose this directly",
+                "shopper_reply": None,
+            },
+            decision={
+                "proposed": [
+                    {
+                        "action_type": str(candidate.action_type),
+                        "parameters": candidate.parameters,
+                        "rationale": candidate.rationale,
+                        "confidence": candidate.confidence,
+                    }
+                ],
+                "rejected": [
+                    {
+                        "action_type": str(r.action_type),
+                        "reason": r.reason,
+                        "detail": r.detail,
+                    }
+                    for r in trace.rejected
+                ],
+                "selected_action": str(trace.selected.action.action_type),
+                "selection_reason": trace.selected.selection_reason,
+            },
+            risk={
+                "outcome": str(decision.outcome),
+                "rule": decision.policy_rule,
+                "reason": decision.reason,
+                "financial": decision.properties.financial,
+            },
+            approval_timeout_minutes=engine.policies.get(
+                req.connection_id
+            ).approval_timeout_minutes,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("could not record a tap; continuing")
+
+    # The product itself, for the wording below. Best-effort: a reply without the
+    # product's name is worse than one with it, and not worth failing the turn over.
+    product = None
+    try:
+        product = await adapter.get_product(req.product_id)
+    except CommerceError:
+        pass
+
+    def describe() -> str:
+        """The product, in a sentence a person would say.
+
+        The merchant's description is a fragment rather than a sentence - "Built for
+        milk. Chocolate, toffee, a clean finish." Joining it with a dash produced
+        "Good choice - the X - built for milk": three clauses and two dashes, which
+        reads like a machine. A full stop between the name and the note reads like
+        someone talking.
+        """
+        if product is None:
+            return ""
+        if not product.description:
+            return f"The {product.title}, good choice."
+        return f"The {product.title}. {product.description.rstrip('.')}."
+
+    reply = "Someone at the shop needs to approve that first."
+    choices: list[dict] = []
+    cart_changed = False
+    action_summary = None
+
+    if not awaiting and case_id:
+        executed = await engine.execution.execute_case(req.connection_id, case_id)
+        action_summary = executed.summary
+
+        if executed.needs_choice:
+            choices = executed.choices
+            what = describe()
+            reply = (f"{what} " if what else "") + "Which would you like?"
+        elif executed.succeeded:
+            cart_changed = True
+            count = executed.payload.get("item_count")
+            total = executed.payload.get("grand_total")
+            chosen = next(
+                (
+                    v.title
+                    for v in (product.variants if product else [])
+                    if v.variant_id == req.variant_id
+                ),
+                None,
+            )
+            title = product.title if product else "That"
+            reply = (
+                f"{title}"
+                + (f" ({chosen})" if chosen else "")
+                + " is in your cart"
+                + (
+                    f" - {count} item{'' if count == 1 else 's'}, {total}."
+                    if count is not None
+                    else "."
+                )
+            )
+        else:
+            # executed.summary is written for an operator reading a queue. It
+            # says things like "A cart and a product are both needed to add a
+            # line" and, when a platform misbehaves, "no endpoint at /graphql".
+            # Neither belongs in front of a shopper, and the second is close to a
+            # security problem: it describes our infrastructure to a stranger.
+            #
+            # So the shopper gets a short, true sentence per case, and the real
+            # summary goes to the queue where somebody can act on it.
+            code = executed.error_code or ""
+            name = product.title if product else "that"
+            if code == "INVENTORY_INSUFFICIENT" or "sold out" in executed.summary:
+                reply = (
+                    f"{name} is sold out at the moment. Would you like me to "
+                    "suggest something similar?"
+                )
+            elif code in {"PRODUCT_UNAVAILABLE", "VARIANT_UNAVAILABLE"}:
+                reply = (
+                    "I couldn't find that one - it may have just been taken "
+                    "down. Have a look at what else is in the shop and I'll help "
+                    "from there."
+                )
+            elif code == "CART_NOT_FOUND" or "cart" in executed.summary.lower():
+                reply = (
+                    "Something went wrong with your basket. Try refreshing the "
+                    "page and I'll pick up where we left off."
+                )
+            else:
+                reply = (
+                    "I couldn't add that, sorry. Someone at the shop can help if "
+                    "you'd like."
+                )
+
+    await session_store.add_turn(
+        session_id=req.session_id,
+        connection_id=req.connection_id,
+        speaker="assistant",
+        text=reply,
+        case_id=case_id,
+    )
+
+    return ChatReply(
+        reply=reply,
+        session_id=req.session_id,
+        case_id=case_id,
+        used_model=False,
+        action_taken=str(ActionType.ADD_TO_CART),
+        action_summary=action_summary,
+        choices=choices,
+        awaiting_person=awaiting,
+        risk_rule=decision.policy_rule,
+        cart_changed=cart_changed,
+        selected_action=str(trace.selected.action.action_type),
+        risk_outcome=str(decision.outcome),
+    )

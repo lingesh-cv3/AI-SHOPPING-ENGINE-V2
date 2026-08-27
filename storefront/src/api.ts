@@ -122,10 +122,25 @@ export interface CheckoutResult {
 
 
 export interface ChatTurn {
+  /** Options offered with this message. Rendered as buttons: a shopper tapping
+   *  "250g ground" cannot be misread, where typing "ground" can. */
+  choices?: {
+    variant_id: string;
+    label: string;
+    product_id: string;
+    product_title: string;
+    left: number | null;
+  }[];
   speaker: "shopper" | "assistant";
   text: string;
   /** Products the engine actually fetched, not ones the model described. */
-  products?: { product_id: string; title: string; price: string | null }[];
+  products?: {
+    product_id: string;
+    title: string;
+    description: string | null;
+    price: string | null;
+    categories: string[];
+  }[];
   awaitingPerson?: boolean;
   usedModel?: boolean;
 }
@@ -138,8 +153,23 @@ export interface ChatReply {
   diagnosis: string | null;
   action_taken: string | null;
   action_summary: string | null;
-  products: { product_id: string; title: string; price: string | null }[];
+  products: {
+    product_id: string;
+    title: string;
+    description: string | null;
+    price: string | null;
+    categories: string[];
+  }[];
   awaiting_person: boolean;
+  /** Options the shopper must pick between. Rendered as buttons - tapping is
+   *  unambiguous where typing is not. */
+  choices: {
+    variant_id: string;
+    label: string;
+    product_id: string;
+    product_title: string;
+    left: number | null;
+  }[];
   remembered_turns: number;
   remembered_friction: number;
   cart_changed: boolean;
@@ -315,6 +345,32 @@ export const api = {
         product_id: productId,
         variant_id: variantId,
         quantity: qty,
+      }),
+    }),
+
+  /** A tap, carried out without a model call.
+   *
+   *  The shopper named a product and possibly an option, both as ids the engine
+   *  issued. There is nothing to interpret, so sending it to be interpreted was
+   *  slow, cost tokens, and broke under rate limiting - a shopper tapping a size
+   *  was told the assistant was busy, when we knew exactly what they wanted.
+   */
+  act: (
+    sessionId: string,
+    productId: string,
+    said: string,
+    variantId?: string,
+    cartId?: string,
+  ) =>
+    call<ChatReply>("/api/chat/act", {
+      method: "POST",
+      body: JSON.stringify({
+        connection_id: getConnection(),
+        session_id: sessionId,
+        product_id: productId,
+        variant_id: variantId ?? null,
+        cart_id: cartId ?? null,
+        said,
       }),
     }),
 

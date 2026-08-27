@@ -137,10 +137,20 @@ def _product_line(p: Product) -> str:
     if p.variants:
         buyable = [v for v in p.variants if v.availability != "OUT_OF_STOCK"]
         if buyable:
-            bits.append("sizes " + "/".join(v.title or v.variant_id for v in buyable))
+            # Labelled with their ids, because the model is asked to name a variant
+            # and cannot name one it has never seen. Showing "8" alone led it to
+            # invent an id or omit the field, and the turn was wasted asking a
+            # question the shopper had already answered.
+            #
+            # Only the buyable ones. An id it cannot use is an id it might try.
+            bits.append(
+                "options "
+                + ", ".join(
+                    f"{v.title or v.variant_id}={v.variant_id}" for v in buyable
+                )
+            )
         else:
-            bits.append("every size sold out")
-    else:
+            bits.append("every option sold out")
         bits.append(str(p.availability).replace("_", " ").lower())
 
     if p.categories:

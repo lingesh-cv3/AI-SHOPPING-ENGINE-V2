@@ -6,17 +6,13 @@ import { api, shopperMessage, type ChatReply, type ChatTurn } from "./api";
  *
  * Controlled rather than self-contained: the parent owns whether it is open and
  * what has been said. That is what lets the storefront start a conversation the
- * shopper did not - when a search finds nothing, the assistant opens itself and
- * explains, instead of leaving them looking at an empty page.
+ * shopper did not - when a search finds nothing, the assistant opens itself.
  *
- * Two honesty rules the interface enforces:
- *
- * Products shown are ones the engine actually fetched, never ones the model
- * described. If the model mentions a coffee and the search did not return it, no
- * card appears.
- *
- * When an action needs approval the shopper is told plainly. A cheerful
- * acknowledgement of something that has not happened would be worse than silence.
+ * Everything tappable goes through one path. A product card and a size button are
+ * the same gesture, and both send an id alongside the shopper's words. The words
+ * make the transcript read naturally; the id is what execution acts on. That split
+ * is why tapping is unambiguous where typing is not - "whole bean" fits two of
+ * Kettle's three options, and a tap fits one.
  */
 export function ChatWidget({
   sessionId,
@@ -41,19 +37,14 @@ export function ChatWidget({
   onOpen: () => void;
   onClose: () => void;
   onTurns: (next: ChatTurn[]) => void;
-  /** Handed the whole reply so the parent can keep the engine panel in step. */
   onReply?: (reply: ChatReply) => void;
   onCartChanged?: () => void;
-  /** Assistant messages that arrived while the chat was shut. */
   unread?: number;
-  /** The merchant's own name. A coffee roaster's assistant should not introduce
-   *  itself as a running shop. */
   merchantName?: string;
-  /** Called when messages arrive while the chat is shut, so the parent can badge. */
   onUnread?: (count: number) => void;
 }) {
   const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
   const [memory, setMemory] = useState<{ turns: number; friction: number } | null>(
     null,
   );
@@ -63,16 +54,47 @@ export function ChatWidget({
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns, busy]);
 
+  // Load the conversation once, on mount.
+  //
+  // Separate from the poll below, and that separation is the point. Polling takes
+  // assistant turns only, because a shopper's own messages are already on screen
+  // the moment they send them and echoing them back would duplicate every line.
+  // After a reload nothing is on screen, so that same filter dropped exactly the
+  // half that was missing - the transcript came back as the assistant talking to
+  // itself.
+  //
+  // Only when there is nothing yet. A shopper who closes and reopens the panel
+  // mid-visit should not have their conversation rebuilt underneath them.
+  const loadedOnce = useRef(false);
+  useEffect(() => {
+    if (loadedOnce.current || turns.length > 0) return;
+    loadedOnce.current = true;
+
+    api
+      .transcript(sessionId)
+      .then(({ turns: stored }) => {
+        if (stored.length === 0) return;
+        onTurns(
+          stored.map((t) => ({
+            speaker: t.speaker,
+            text: t.text,
+          })),
+        );
+      })
+      .catch(() => {
+        // Nothing to show is better than an error about restoring history the
+        // shopper never asked to have restored.
+      });
+    // Runs once. Depending on `turns` would re-trigger on every message.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
   // Poll for turns written by something other than this shopper.
   //
   // When an operator approves a payment recovery, the outcome is written into the
   // session by the engine, not returned as a reply to anything typed here. Without
   // polling, a shopper told "someone will pick this up" would sit there while the
   // money was recovered and never learn it happened.
-  //
-  // Ten seconds is a compromise: fast enough that an approval feels prompt, slow
-  // enough not to hammer the engine for a shopper who has wandered off. A real
-  // deployment would use a websocket and drop this entirely.
   useEffect(() => {
     const seen = new Set(turns.map((t) => t.text));
 
@@ -88,8 +110,7 @@ export function ChatWidget({
           if (!open) onUnread?.(fresh.length);
         }
       } catch {
-        // A failed poll is not worth surfacing. The next one may work, and an error
-        // about background syncing would only confuse a shopper.
+        // A failed poll is not worth surfacing. The next one may work.
       }
     }
 
@@ -97,17 +118,25 @@ export function ChatWidget({
     return () => window.clearInterval(id);
   }, [sessionId, turns, open, onTurns, onUnread]);
 
-  async function send() {
-    const text = draft.trim();
-    if (!text || busy) return;
+  /** Send a message on the shopper's behalf, with whatever they picked.
+   *
+   *  `known` carries ids the engine trusts outright, so a tap never depends on
+   *  matching text. Used by the composer, the option buttons and the product cards
+   *  alike - one path, so they cannot drift apart.
+   */
+  async function act(said: string, known?: Record<string, string>) {
+    if (busy) return;
 
-    setDraft("");
-    const withShopper: ChatTurn[] = [...turns, { speaker: "shopper", text }];
+    const withShopper: ChatTurn[] = [...turns, { speaker: "shopper", text: said }];
     onTurns(withShopper);
-    setBusy(true);
+    setBusy("sending");
 
     try {
-      const r: ChatReply = await api.chat(sessionId, text, { cartId, orderId });
+      const r: ChatReply = await api.chat(sessionId, said, {
+        cartId,
+        orderId,
+        known,
+      });
       setMemory({ turns: r.remembered_turns, friction: r.remembered_friction });
       onReply?.(r);
       if (r.cart_changed) onCartChanged?.();
@@ -119,16 +148,70 @@ export function ChatWidget({
           products: r.products,
           awaitingPerson: r.awaiting_person,
           usedModel: r.used_model,
+          choices: r.choices,
         },
       ]);
     } catch (e) {
+      onTurns([...withShopper, { speaker: "assistant", text: shopperMessage(e) }]);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** A tap goes straight to execution, never to the model.
+   *
+   *  Both handlers below share this. It records what the shopper did in the
+   *  transcript and returns whatever came back - options to pick from, or a filled
+   *  cart. No thinking pause, no tokens, and it keeps working while the model is
+   *  rate limited, because the model is not involved.
+   */
+  async function tap(productId: string, said: string, variantId?: string) {
+    if (busy) return;
+
+    const withShopper: ChatTurn[] = [...turns, { speaker: "shopper", text: said }];
+    onTurns(withShopper);
+    setBusy("tapping");
+
+    try {
+      const r = await api.act(sessionId, productId, said, variantId, cartId);
+      onReply?.(r);
+      if (r.cart_changed) onCartChanged?.();
       onTurns([
         ...withShopper,
-        { speaker: "assistant", text: shopperMessage(e) },
+        {
+          speaker: "assistant",
+          text: r.reply,
+          awaitingPerson: r.awaiting_person,
+          choices: r.choices,
+        },
       ]);
+    } catch (e) {
+      onTurns([...withShopper, { speaker: "assistant", text: shopperMessage(e) }]);
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
+  }
+
+  function tapProduct(p: { product_id: string; title: string }) {
+    return tap(p.product_id, `Add the ${p.title}`);
+  }
+
+  /** The option carries its own product id, set when the engine offered it. Relying
+   *  on parsing it out of the variant id would break on any platform using opaque
+   *  ids, and Kettle's happen to be readable only by accident. */
+  function tapOption(c: {
+    variant_id: string;
+    label: string;
+    product_id: string;
+  }) {
+    return tap(c.product_id, c.label, c.variant_id);
+  }
+
+  function send() {
+    const text = draft.trim();
+    if (!text) return;
+    setDraft("");
+    return act(text);
   }
 
   if (!open) {
@@ -142,6 +225,7 @@ export function ChatWidget({
       </button>
     );
   }
+
   return (
     <div className="chatwidget">
       <div className="chathead">
@@ -174,13 +258,49 @@ export function ChatWidget({
           <div key={i} className={`bubble ${turn.speaker}`}>
             <p className="bubbletext">{turn.text}</p>
 
+            {/* Products the engine actually fetched, never ones the model merely
+                described. Tappable, because reading a name and then typing it back
+                is work the shopper should not have to do. */}
             {turn.products && turn.products.length > 0 && (
               <div className="chatproducts">
                 {turn.products.slice(0, 4).map((p) => (
-                  <div key={p.product_id} className="chatproduct">
-                    <span>{p.title}</span>
-                    <span className="num">{p.price}</span>
-                  </div>
+                  <button
+                    key={p.product_id}
+                    className="chatproduct tappable"
+                    disabled={busy !== null}
+                    onClick={() => tapProduct(p)}
+                  >
+                    <span className="cptitle">
+                      <span>{p.title}</span>
+                      <span className="num">{p.price}</span>
+                    </span>
+                    {p.description && (
+                      <span className="cpdesc">{p.description}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {turn.choices && turn.choices.length > 0 && (
+              <div className="optionrow">
+                {turn.choices.map((ch) => (
+                  <button
+                    key={ch.variant_id}
+                    className="optionbtn"
+                    // Only the most recent offer is live. Every row
+                    // stayed tappable before, so a shopper could scroll
+                    // up and pick a size for a product they had moved on
+                    // from - and the conversation and the cart would then
+                    // disagree. A stale offer is history, not a control.
+                    disabled={busy !== null || i !== turns.length - 1}
+                    onClick={() => tapOption(ch)}
+                  >
+                    {ch.label}
+                    {ch.left !== null && (
+                      <span className="optionleft">{ch.left} left</span>
+                    )}
+                  </button>
                 ))}
               </div>
             )}
@@ -207,9 +327,9 @@ export function ChatWidget({
           onChange={(e) => setDraft(e.target.value)}
           placeholder="Type a message"
           aria-label="Message the assistant"
-          disabled={busy}
+          disabled={busy !== null}
         />
-        <button type="submit" disabled={busy || !draft.trim()}>
+        <button type="submit" disabled={busy !== null || !draft.trim()}>
           Send
         </button>
       </form>

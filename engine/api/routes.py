@@ -519,6 +519,84 @@ async def decide(connection_id: str, approval_id: str, body: ApprovalDecision) -
 
         return {**result, "executed": None}
 
+    if not body.approved:
+        # A rejection is a decision the shopper is waiting on just as much as an
+        # approval. Recording it and telling nobody leaves them on a page that will
+        # never update, which is the same failure expiry was built to fix.
+        #
+        # The operator's note is deliberately not passed through. It is written for
+        # the next person to read the case - "customer already paid by transfer" -
+        # and is often about the shop's own processes rather than anything the
+        # shopper should see.
+        case = await db.get_case(connection_id, result["case_id"])
+        if case is not None and case.session_id:
+            try:
+                await session_store.add_turn(
+                    session_id=case.session_id,
+                    connection_id=connection_id,
+                    speaker="assistant",
+                    text=(
+                        "I checked with the shop and they're not able to do that "
+                        "one, sorry. If you'd still like a hand, ask me and I'll "
+                        "pass it on."
+                    ),
+                    case_id=case.case_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("could not tell the shopper about a rejection")
+
+        try:
+            await db.record_outcome(
+                connection_id=connection_id,
+                case_id=result["case_id"],
+                resolved=False,
+                final_state="REJECTED",
+                required_human=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("could not record a rejection outcome")
+
+        return {**result, "executed": None}
+
+    if not body.approved:
+        # A rejection is a decision the shopper is waiting on just as much as an
+        # approval. Recording it and telling nobody leaves them on a page that will
+        # never update, which is the same failure expiry was built to fix.
+        #
+        # The operator's note is deliberately not passed through. It is written for
+        # the next person to read the case - "customer already paid by transfer" -
+        # and is often about the shop's own processes rather than anything the
+        # shopper should see.
+        case = await db.get_case(connection_id, result["case_id"])
+        if case is not None and case.session_id:
+            try:
+                await session_store.add_turn(
+                    session_id=case.session_id,
+                    connection_id=connection_id,
+                    speaker="assistant",
+                    text=(
+                        "I checked with the shop and they're not able to do that "
+                        "one, sorry. If you'd still like a hand, ask me and I'll "
+                        "pass it on."
+                    ),
+                    case_id=case.case_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("could not tell the shopper about a rejection")
+
+        try:
+            await db.record_outcome(
+                connection_id=connection_id,
+                case_id=result["case_id"],
+                resolved=False,
+                final_state="REJECTED",
+                required_human=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("could not record a rejection outcome")
+
+        return {**result, "executed": None}
+
     executed = await engine.execution.execute_case(connection_id, result["case_id"])
     return {
         **result,

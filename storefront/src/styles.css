@@ -1686,3 +1686,95 @@ select.card-picker {
   padding-left: 10px;
   border-left: 2px solid var(--line);
 }
+
+
+/* ---- tappable options ---- */
+/* A shopper tapping "250g ground" cannot be misread. Typing "ground" can, and
+ * typing "whole bean" is genuinely ambiguous across Kettle's three options - which
+ * is why the engine kept asking the same question. Buttons remove the guess. */
+
+.optionrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.optionbtn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  border: 1px solid var(--ink);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 8px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.13s var(--ease), color 0.13s var(--ease);
+}
+
+.optionbtn:hover:not(:disabled) {
+  background: var(--ink);
+  color: var(--surface);
+}
+
+.optionbtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* How many are left, where the platform tells us. Kettle does not count, so this
+ * is simply absent there rather than showing a number we invented. */
+.optionleft {
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+}
+
+
+/* A suggested product is a button, not a label. Reading a name and typing it back
+ * is work the shopper should not have to do. */
+.chatproduct.tappable {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--body);
+  text-align: left;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.13s var(--ease), background 0.13s var(--ease);
+}
+
+.chatproduct.tappable:hover:not(:disabled) {
+  border-color: var(--ink);
+  background: var(--paper);
+}
+
+.chatproduct.tappable:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+
+/* A suggested product needs enough for a shopper to judge it. Name and price alone
+ * means they tap blindly or ignore the card. */
+.cptitle {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.cpdesc {
+  display: block;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  margin-top: 2px;
+  line-height: 1.35;
+}

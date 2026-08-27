@@ -56,8 +56,25 @@ def key_for(
     return f"idem_{digest[:32]}"
 
 
+#: Actions that change something the shopper can see, beyond the money ones.
+#:
+#: The guard originally covered financial actions only, on the reasoning that a
+#: repeated search costs nothing. True, but too narrow: a repeated add-to-cart costs
+#: the shopper a second bag of coffee they did not ask for, which they discover at
+#: checkout. Anything that mutates state a shopper looks at belongs here.
+_MUTATING: frozenset[ActionType] = frozenset(
+    {
+        ActionType.ADD_TO_CART,
+        ActionType.REMOVE_CART_LINE,
+        ActionType.UPDATE_CART_QUANTITY,
+    }
+)
+
+
 def guarded(action_type: ActionType) -> bool:
     """Whether this action needs the guard. Money-touching actions only."""
+    if action_type in _MUTATING:
+        return True
     props = ACTION_RISK_PROPERTIES.get(action_type)
     return bool(props and props.financial)
 

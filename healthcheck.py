@@ -468,6 +468,275 @@ check(
 
 # ---------------------------------------------------------------------------
 
+section("Cart, through the chat")
+
+if model_on:
+    shop_session = f"hc_cart_{uuid.uuid4().hex[:6]}"
+    shop_cart = call("POST", f"/api/shop/{NORTHFIELD}/cart")
+
+    # A product with several sizes. Adding it without one should ask rather than
+    # guess, because a guessed size is a return waiting to happen.
+    ask = call(
+        "POST",
+        "/api/chat",
+        {
+            "connection_id": NORTHFIELD,
+            "session_id": shop_session,
+            "message": "add the Trailblazer Running Shoe to my cart",
+            "cart_id": shop_cart["cart_id"],
+        },
+    )
+    choices = ask.get("choices") or []
+    check(
+        "asks which size instead of guessing",
+        len(choices) > 0,
+        f"{len(choices)} choices, reply: {str(ask.get('reply'))[:60]}",
+        "engine/execution/service.py ADD_TO_CART, engine/api/chat.py needs_choice",
+    )
+
+    if choices:
+        check(
+            "sold-out sizes are not offered",
+            all(c.get("label") != "10" for c in choices),
+            str([c.get("label") for c in choices]),
+            "engine/execution/service.py buyable filter",
+        )
+
+    # Now with a size named.
+    sized = call(
+        "POST",
+        "/api/chat",
+        {
+            "connection_id": NORTHFIELD,
+            "session_id": shop_session,
+            # Sent the way the widget sends it when a shopper taps an option.
+            # Typing a phrase deliberately does not add - only the exact label does
+            # - because fuzzy matching is what produced double-adds.
+            "message": choices[0]["label"] if choices else "8",
+            "cart_id": shop_cart["cart_id"],
+            "known": {
+                "chosen_variant": choices[0]["variant_id"] if choices else ""
+            },
+        },
+    )
+    cart_now = call("GET", f"/api/shop/{NORTHFIELD}/cart/{shop_cart['cart_id']}")
+    added = cart_now.get("item_count", 0) > 0
+    check(
+        "adds to cart when a size is given",
+        added,
+        f"{cart_now.get('item_count')} items, reply: {str(sized.get('reply'))[:60]}",
+        "engine/execution/service.py ADD_TO_CART",
+    )
+    if added:
+        check(
+            "the storefront is told the cart changed",
+            sized.get("cart_changed") is True,
+            str(sized.get("cart_changed")),
+            "engine/api/chat.py cart_changed",
+        )
+
+        removed = call(
+            "POST",
+            "/api/chat",
+            {
+                "connection_id": NORTHFIELD,
+                "session_id": shop_session,
+                "message": "actually remove that from my cart",
+                "cart_id": shop_cart["cart_id"],
+            },
+        )
+        after = call("GET", f"/api/shop/{NORTHFIELD}/cart/{shop_cart['cart_id']}")
+        check(
+            "removes from cart on request",
+            after.get("item_count", 1) == 0,
+            f"{after.get('item_count')} items left, reply: {str(removed.get('reply'))[:60]}",
+            "engine/execution/service.py REMOVE_CART_LINE",
+        )
+else:
+    print("  SKIP  cart checks (no key configured)")
+
+# ---------------------------------------------------------------------------
+
+section("Rejection")
+
+rej_bag = call("POST", f"/api/shop/{KETTLE}/cart")
+call(
+    "POST",
+    f"/api/shop/{KETTLE}/cart/{rej_bag['cart_id']}/lines",
+    {
+        "product_id": "KB-COL-02",
+        "variant_id": "KB-COL-02::250g whole bean",
+        "quantity": 1,
+    },
+)
+rej_paid = call(
+    "POST",
+    f"/api/shop/{KETTLE}/cart/{rej_bag['cart_id']}/checkout",
+    {"card_last4": "0002"},
+)
+rej_order = (rej_paid.get("order") or {}).get("order_id")
+rej_session = f"hc_rej_{uuid.uuid4().hex[:6]}"
+
+call(
+    "POST",
+    "/api/chat",
+    {
+        "connection_id": KETTLE,
+        "session_id": rej_session,
+        "message": "my payment failed",
+        "friction": "PAYMENT_DECLINED",
+        "order_id": rej_order,
+    },
+)
+
+queue2 = (call("GET", f"/api/approvals/{KETTLE}").get("approvals")) or []
+if queue2:
+    rej_id = queue2[-1]["approval_id"]
+    call(
+        "POST",
+        f"/api/approvals/{KETTLE}/{rej_id}",
+        {
+            "approved": False,
+            "decided_by": "healthcheck",
+            "note": "customer already paid by transfer",
+        },
+    )
+
+    turns2 = (call("GET", f"/api/chat/{KETTLE}/{rej_session}").get("turns")) or []
+    told_no = any(
+        "not able to do that one" in (t.get("text") or "") for t in turns2
+    )
+    check(
+        "a rejected shopper is told",
+        told_no,
+        f"{len(turns2)} turns, none reporting the rejection",
+        "engine/api/routes.py::decide, the not-approved branch",
+    )
+
+    leaked = any(
+        "already paid by transfer" in (t.get("text") or "") for t in turns2
+    )
+    check(
+        "the operator's note stays private",
+        not leaked,
+        "the internal note reached the shopper",
+        "engine/api/routes.py::decide",
+    )
+else:
+    check("rejection case reached the queue", False, "queue was empty", "chat.py")
+
+# ---------------------------------------------------------------------------
+
+section("Expiry")
+
+exp_session = f"hc_exp_{uuid.uuid4().hex[:6]}"
+call(
+    "POST",
+    "/api/chat",
+    {
+        "connection_id": KETTLE,
+        "session_id": exp_session,
+        "message": "my payment failed",
+        "friction": "PAYMENT_DECLINED",
+    },
+)
+
+# Backdate whatever is pending so the sweeper has something to find. Written in
+# SQLAlchemy's SQLite format; an ISO string with an offset compares as text and
+# silently never matches.
+try:
+    import sqlite3
+    from datetime import UTC, datetime, timedelta
+
+    conn = sqlite3.connect("cv3.db")
+    past = (datetime.now(UTC) - timedelta(minutes=30)).strftime(
+        "%Y-%m-%d %H:%M:%S.%f"
+    )
+    conn.execute(
+        "update approvals set expires_at=? where state='PENDING'", (past,)
+    )
+    conn.commit()
+    conn.close()
+    backdated = True
+except Exception as e:  # noqa: BLE001
+    backdated = False
+    print(f"  SKIP  expiry (could not backdate: {e})")
+
+if backdated:
+    swept = call("POST", "/api/admin/expire")
+    check(
+        "the sweeper expires stale approvals",
+        (swept.get("expired") or 0) > 0,
+        str(swept),
+        "engine/expiry.py, engine/db/repository.py::expire_approvals",
+    )
+
+    exp_turns = (call("GET", f"/api/chat/{KETTLE}/{exp_session}").get("turns")) or []
+    check(
+        "an abandoned shopper is told",
+        any("in time" in (t.get("text") or "") for t in exp_turns),
+        f"{len(exp_turns)} turns, none reporting the timeout",
+        "engine/expiry.py::sweep_once",
+    )
+
+# ---------------------------------------------------------------------------
+
+section("Operations console")
+
+ops = call("GET", "/api/ops/stats")
+check(
+    "cross-merchant workload",
+    "waiting" in ops and "by_merchant" in ops,
+    str(ops)[:90],
+    "engine/api/routes.py::ops_overview",
+)
+
+ops_q = call("GET", "/api/ops/queue")
+q_rows = ops_q.get("approvals")
+check(
+    "one queue across every merchant",
+    isinstance(q_rows, list),
+    str(ops_q)[:90],
+    "engine/api/routes.py::ops_queue",
+)
+if isinstance(q_rows, list) and q_rows:
+    check(
+        "queue entries name their merchant",
+        all(r.get("merchant_name") for r in q_rows),
+        "an entry has no merchant_name",
+        "engine/api/routes.py::ops_queue",
+    )
+    check(
+        "queue entries show the wait",
+        all(r.get("waiting_minutes") is not None for r in q_rows),
+        "an entry has no waiting_minutes",
+        "engine/db/repository.py::pending_across",
+    )
+
+hist = call("GET", "/api/ops/history")
+rows = hist.get("decisions") or []
+check(
+    "decided work is visible",
+    len(rows) > 0,
+    f"{len(rows)} decisions",
+    "engine/api/routes.py::ops_history",
+)
+if rows:
+    check(
+        "rejection notes are kept",
+        any(r.get("note") for r in rows),
+        "no decision carries a note",
+        "engine/db/repository.py::decided_across",
+    )
+    check(
+        "expiries are recorded as decisions",
+        any(r.get("state") == "EXPIRED" for r in rows),
+        str([r.get("state") for r in rows][:6]),
+        "engine/db/repository.py::expire_approvals",
+    )
+
+# ---------------------------------------------------------------------------
+
 print("\n" + "=" * 60)
 if failed:
     print(f"{passed} passed, {len(failed)} FAILED")
