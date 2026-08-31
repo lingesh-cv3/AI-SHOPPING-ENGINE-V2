@@ -65,15 +65,24 @@ export function ChatWidget({
   //
   // Only when there is nothing yet. A shopper who closes and reopens the panel
   // mid-visit should not have their conversation rebuilt underneath them.
-  const loadedOnce = useRef(false);
+  // Which session we have already restored.
+  //
+  // A boolean was not enough once each merchant kept its own conversation:
+  // switching back changes the session id, and a one-shot flag meant the second
+  // one never loaded. Tracking the id restores each thread exactly once.
+  const restoreFor = useRef<string | null>(null);
   useEffect(() => {
-    if (loadedOnce.current || turns.length > 0) return;
-    loadedOnce.current = true;
+    if (restoreFor.current === sessionId) return;
+    restoreFor.current = sessionId;
 
     api
       .transcript(sessionId)
       .then(({ turns: stored }) => {
         if (stored.length === 0) return;
+        // Both speakers. The poll filters to assistant turns because a shopper's
+        // own messages are already on screen when they send them; on a restore
+        // nothing is on screen, and reusing that filter made the conversation read
+        // as the assistant talking to itself.
         onTurns(
           stored.map((t) => ({
             speaker: t.speaker,

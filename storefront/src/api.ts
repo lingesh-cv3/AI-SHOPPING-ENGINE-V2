@@ -18,9 +18,20 @@ const ENGINE = "http://localhost:8000";
  *  platforms. In a real deployment this is fixed per storefront - a shop does not
  *  change which backend it runs on - and would come from the script tag's key.
  */
-let CONNECTION = "conn_demo";
+// Which merchant we are talking to, remembered across reloads.
+//
+// This was a plain variable, so every refresh reset it to Northfield - while the
+// session id and cart id in storage still belonged to Kettle. The conversation came
+// back empty because the transcript endpoint filters by connection and honestly had
+// nothing, and the cart 404'd because Northfield had never issued it. Two symptoms,
+// one cause.
+let CONNECTION =
+  (typeof sessionStorage !== "undefined" &&
+    sessionStorage.getItem("cv3_connection")) ||
+  "conn_demo";
 
 export function setConnection(id: string) {
+  sessionStorage.setItem("cv3_connection", id);
   CONNECTION = id;
 }
 

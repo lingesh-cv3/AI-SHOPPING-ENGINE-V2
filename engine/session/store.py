@@ -109,6 +109,15 @@ async def recent_friction(
                 Case.session_id == session_id,
                 Case.connection_id == connection_id,
                 Case.friction_type.is_not(None),
+                # Only what is still open. A problem that has been resolved is
+                # history, not context - it belongs in the transcript, which the
+                # model already sees, and not in the list of things currently
+                # wrong. Leaving it here meant a shopper whose payment had just
+                # been recovered said "hi" and was told someone needed to approve
+                # something.
+                Case.state.notin_(
+                    ("OUTCOME", "TIMEOUT", "FAILED", "ESCALATED")
+                ),
             )
             .order_by(Case.created_at.desc())
             .limit(limit)

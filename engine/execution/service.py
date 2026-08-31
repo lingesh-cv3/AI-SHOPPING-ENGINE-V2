@@ -205,17 +205,30 @@ class ExecutionService:
         # Only for cases that actually waited on a person. An action that ran
         # automatically already reported itself in the turn that triggered it, and
         # writing it twice would read as the assistant repeating itself.
-        if (
-            result.shopper_summary
-            and case.session_id
-            and case.risk_outcome != "AUTO"
-        ):
+        # What to tell the shopper, including when it did not work.
+        #
+        # Only successes had a shopper_summary, so an approved action that then
+        # failed left the shopper waiting forever. Every other ending was already
+        # covered - expiry tells them, rejection tells them, success tells them -
+        # and failure was the one case left silent. That is the worst one to miss,
+        # because a person actually looked at it and it still went nowhere.
+        #
+        # The fallback is deliberately vague about the cause. "The platform reported
+        # VOUCHER_DEAD" is for the queue, not for the person who typed the code.
+        told = result.shopper_summary
+        if not told and not result.succeeded and not result.needs_choice:
+            told = (
+                "I checked with the shop and that one could not be done, sorry. "
+                "If you would still like a hand, ask me and I will pass it on."
+            )
+
+        if told and case.session_id and case.risk_outcome != "AUTO":
             try:
                 await session_store.add_turn(
                     session_id=case.session_id,
                     connection_id=connection_id,
                     speaker="assistant",
-                    text=result.shopper_summary,
+                    text=told,
                     case_id=case_id,
                 )
             except Exception:  # noqa: BLE001
@@ -332,6 +345,15 @@ class ExecutionService:
                     query = str(params.get("query") or case.query or "")
                 found = await adapter.search_products(query, limit=6)
                 titles = [p.title for p in found.products]
+                # Recommending is not searching. If the model's invented term
+                # finds nothing, there is still a catalogue to show - and telling
+                # somebody who said hello that we could not turn anything up is
+                # absurd. A genuinely failed search is SUGGEST_ALTERNATIVE, which
+                # keeps its honest empty case below.
+                if not titles and action_type is ActionType.RECOMMEND_PRODUCTS:
+                    found = await adapter.search_products("", limit=6)
+                    titles = [p.title for p in found.products]
+
                 if not titles:
                     return Executed(
                         succeeded=False,

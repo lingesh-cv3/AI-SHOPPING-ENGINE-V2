@@ -61,6 +61,22 @@ function fromChat(r: ChatReply, friction: string | null): Pipeline {
  * A shopper should never see pipeline stages or rule names; when a search finds
  * nothing, they get an assistant that explains, not a trace.
  */
+/** The conversation id for one merchant, created on first visit and kept.
+ *
+ *  Keyed by connection, exactly like the cart. Each merchant keeps its own thread,
+ *  nothing leaks between them, and coming back to a shop finds where you left off.
+ *  Switching used to discard the conversation entirely, which left the odd state
+ *  where the cart remembered and the chat did not.
+ */
+function sessionFor(connectionId: string): string {
+  const key = `cv3_session_${connectionId}`;
+  const existing = sessionStorage.getItem(key);
+  if (existing) return existing;
+  const fresh = `sess_${Math.random().toString(36).slice(2, 12)}`;
+  sessionStorage.setItem(key, fresh);
+  return fresh;
+}
+
 export default function App() {
   const [view, setView] = useState<
     "shop" | "console" | "queue" | "product" | "order"
@@ -71,24 +87,8 @@ export default function App() {
   // One session id for the visit, shared by the friction path and the chat. This is
   // the mechanism behind shared memory - both report against it, so the assistant
   // knows about a declined payment nobody mentioned.
-  const [sessionId] = useState(
-    // Kept in sessionStorage, not React state.
-    //
-    // Generated per render, a refresh started a new session and the assistant
-    // forgot everything - including a payment decline it had been told about
-    // seconds earlier. Shared memory that survives everything except reloading
-    // the page is not memory.
-    //
-    // sessionStorage rather than localStorage: it clears when the tab closes,
-    // which matches how long a visit lasts, and it does not leave one shopper's
-    // conversation for whoever uses the browser next.
-    () => {
-      const existing = sessionStorage.getItem("cv3_session");
-      if (existing) return existing;
-      const fresh = `sess_${Math.random().toString(36).slice(2, 12)}`;
-      sessionStorage.setItem("cv3_session", fresh);
-      return fresh;
-    },
+  const [sessionId, setSessionId] = useState(() =>
+    sessionFor(getConnection()),
   );
 
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -200,14 +200,35 @@ export default function App() {
     // The stored id is verified before it is trusted. A cart the platform has since
     // dropped - expired, or the merchant restarted - would otherwise leave every
     // request pointing at something that no longer exists.
-    const storedCart = sessionStorage.getItem("cv3_cart");
+    // Keyed by merchant. One key meant a Kettle cart could be handed to
+    // Northfield, which answered 404 - correctly, since it never issued it.
+    const cartKey = `cv3_cart_${connection}`;
+    const storedCart = sessionStorage.getItem(cartKey);
+
+    // A cart the engine does not recognise is not a cart. This already fell back
+    // to creating a new one; the missing half was clearing the stale id, so the
+    // next reload tried the dead one again.
     const cartReady = storedCart
-      ? api.getCart(storedCart).catch(() => api.createCart())
+      ? api.getCart(storedCart).catch(() => {
+          sessionStorage.removeItem(cartKey);
+          return api.createCart();
+        })
       : api.createCart();
+
+    // And the same for the conversation: a shopper we cannot find is a new
+    // shopper. Deleting the database used to leave the browser holding an id
+    // nothing knew about, and the only cure was clearing storage by hand.
+    const sessionKey = `cv3_session_${connection}`;
+    const knownSession = sessionStorage.getItem(sessionKey);
+    if (knownSession) {
+      api.transcript(knownSession).catch(() => {
+        sessionStorage.removeItem(sessionKey);
+      });
+    }
 
     cartReady
       .then((c) => {
-        sessionStorage.setItem("cv3_cart", c.cart_id);
+        sessionStorage.setItem(cartKey, c.cart_id);
         setCart(c);
       })
       .catch(() => setError("Could not start a cart"));
@@ -369,13 +390,34 @@ export default function App() {
     setCart(null);
     // A cart belongs to one platform. Carrying the id across would point the new
     // merchant at something it has never issued.
-    sessionStorage.removeItem("cv3_cart");
-    sessionStorage.removeItem("cv3_session");
+    
+    // A new conversation, in both places at once.
+    //
+    // This used to delete the stored id and leave the React one alone, so the two
+    // disagreed: turns were written under an id no longer in storage, and the next
+    // reload generated a third id with nothing attached. The conversation was not
+    // lost, it was orphaned.
+    // That merchant's own conversation, resumed rather than replaced.
+    setSessionId(sessionFor(id));
     setUnread(0);
 
     try {
-      const [d, c] = await Promise.all([api.departments(), api.createCart()]);
+      // That merchant's own cart, resumed rather than replaced. This called
+      // createCart unconditionally, so switching back always produced an empty
+      // cart even though the id was sitting in storage.
+      const priorCart = sessionStorage.getItem(`cv3_cart_${id}`);
+      const [d, c] = await Promise.all([
+        api.departments(),
+        priorCart
+          ? api.getCart(priorCart).catch(() => api.createCart())
+          : api.createCart(),
+      ]);
       setDepts(d.departments);
+      // The switched-to merchant's cart is stored too, or the next reload loses it.
+      // The write previously existed only in the mount effect, so a cart created by
+      // switching was never persisted - and switching is the whole point of having
+      // two merchants.
+      sessionStorage.setItem(`cv3_cart_${id}`, c.cart_id);
       setCart(c);
     } catch {
       setError("Could not switch merchant");
