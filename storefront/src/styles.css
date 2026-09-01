@@ -1827,3 +1827,89 @@ select.card-picker {
   width: 100%;
   margin-top: 14px;
 }
+
+
+/* ---- paying in the chat ---- */
+/* Set apart from the message it belongs to, because this is the one place in the
+ * conversation where a tap is not reversible. */
+
+.payblock {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.paytotal {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--display);
+  font-weight: var(--display-weight);
+  font-size: 15px;
+  padding-bottom: 6px;
+}
+
+.payline {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  padding: 1px 0;
+}
+
+.paycards {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.paycard {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-align: left;
+  padding: 9px 11px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.13s var(--ease), background 0.13s var(--ease);
+}
+
+.paycard:hover:not(:disabled) {
+  border-color: var(--ink);
+  background: var(--paper);
+}
+
+.paycard:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The second step. Deliberately heavier than the first: a shopper should notice
+ * they are being asked to confirm rather than clicking through it. */
+.payconfirm {
+  margin-top: 10px;
+  padding: 11px;
+  background: var(--paper);
+  border-left: 2px solid var(--accent);
+}
+
+.paynote {
+  font-size: 13px;
+  margin: 0 0 9px;
+  line-height: 1.4;
+}
+
+.payactions {
+  display: flex;
+  gap: 6px;
+}
+
+.payactions .add,
+.payactions .reject {
+  flex: 1;
+  padding: 9px;
+  font-size: 10.5px;
+}

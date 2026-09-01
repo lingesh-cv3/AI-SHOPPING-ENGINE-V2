@@ -618,6 +618,13 @@ export default function App() {
           onTurns={setChatTurns}
           onReply={(r) => showEngine && setPipeline(fromChat(r, null))}
           onCartChanged={refreshCart}
+          onCartRetired={async () => {
+            // A fresh cart, stored under this merchant's key. Same as
+            // the sidebar checkout does after a successful order.
+            const fresh = await api.createCart();
+            sessionStorage.setItem(`cv3_cart_${connection}`, fresh.cart_id);
+            setCart(fresh);
+          }}
           unread={unread}
           merchantName={
             connections.find((c) => c.connection_id === connection)?.merchant_name

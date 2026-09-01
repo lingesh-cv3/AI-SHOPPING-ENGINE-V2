@@ -45,6 +45,14 @@ class ActionType(StrEnum):
     SUGGEST_ALTERNATIVE = "SUGGEST_ALTERNATIVE"
     ADD_TO_CART = "ADD_TO_CART"
     UPDATE_CART_QUANTITY = "UPDATE_CART_QUANTITY"
+
+    #: Show the shopper what they are about to pay, and how they can pay it.
+    #:
+    #: Charges nothing. The AI may propose this; only a shopper request can
+    #: reach the endpoint that takes payment. That split is what lets
+    #: checkout happen in the conversation without the AI ever being able to
+    #: spend anybody's money.
+    PREPARE_CHECKOUT = "PREPARE_CHECKOUT"
     REMOVE_CART_LINE = "REMOVE_CART_LINE"
     NOTIFY_BACK_IN_STOCK = "NOTIFY_BACK_IN_STOCK"
 
@@ -90,6 +98,7 @@ ACTION_RISK_PROPERTIES: dict[ActionType, RiskProperties] = {
     ActionType.SUGGEST_ALTERNATIVE: RiskProperties(financial=False, reversible=True),
     ActionType.ADD_TO_CART: RiskProperties(financial=False, reversible=True),
     ActionType.UPDATE_CART_QUANTITY: RiskProperties(financial=False, reversible=True),
+    ActionType.PREPARE_CHECKOUT: RiskProperties(financial=False, reversible=True),
     ActionType.REMOVE_CART_LINE: RiskProperties(financial=False, reversible=True),
     ActionType.NOTIFY_BACK_IN_STOCK: RiskProperties(
         financial=False, reversible=False, touches_customer_data=True

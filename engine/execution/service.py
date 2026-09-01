@@ -618,6 +618,63 @@ class ExecutionService:
                         "removed": line.title if quantity == 0 else None,
                     },
                 )
+            case ActionType.PREPARE_CHECKOUT:
+                # Reads and reports. Charges nothing, which is why this is
+                # non-financial and why the AI is allowed to propose it at all.
+                if not case.cart_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="There is no cart to check out.",
+                        error_code="CART_NOT_FOUND",
+                        final_state=str(CaseState.FAILED),
+                    )
+
+                cart = await adapter.get_cart(case.cart_id)
+
+                if cart.is_empty:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="The cart is empty, so there is nothing to pay for.",
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+
+                # The cards are the merchant's test set rather than a real payment
+                # method list, because these are demo stores. On a real platform
+                # this is where the merchant's own methods would be read.
+                #
+                # Named honestly. A demo that hides which card declines is a demo
+                # nobody can drive, and a shopper who taps "no funds" chose to.
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f"Showed the shopper their total, {cart.grand_total}, "
+                        f"and {cart.item_count} item(s)."
+                    ),
+                    payload={
+                        "cart_id": cart.cart_id,
+                        "item_count": cart.item_count,
+                        "grand_total": str(cart.grand_total),
+                        "subtotal": str(cart.subtotal),
+                        "lines": [
+                            {
+                                "title": line.title,
+                                "quantity": line.quantity,
+                                "total": str(line.line_total),
+                            }
+                            for line in cart.lines
+                        ],
+                        "cards": [
+                            {"last4": "1111", "label": "Card ending 1111"},
+                            {"last4": "0002", "label": "Card ending 0002 (no funds)"},
+                            {"last4": "0003", "label": "Card ending 0003 (expired)"},
+                        ],
+                    },
+                )
+
             case ActionType.APPLY_PROMOTION:
                 code = params.get("code") or params.get("query")
                 if not (code and case.cart_id):

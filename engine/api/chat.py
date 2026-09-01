@@ -89,6 +89,10 @@ class ChatReply(BaseModel):
     #: they have to type back is worse than three things they can tap.
     choices: list[dict] = Field(default_factory=list)
 
+    #: A total and the ways to pay it, when the shopper asked to check out.
+    #: Rendered as buttons. Tapping one is what charges - nothing here does.
+    payment: dict = Field(default_factory=dict)
+
     #: Options the shopper must pick between before the action can run. Rendered
     #: as buttons rather than asked in prose - "which size?" followed by a list
     #: they have to type back is worse than three things they can tap.
@@ -314,6 +318,7 @@ async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
     action_summary = None
     products: list[dict] = []
     choices: list[dict] = []
+    payment: dict = {}
     choices: list[dict] = []
     cart_changed = False
 
@@ -346,6 +351,14 @@ async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
                     + str(first.get("product_title", "item"))
                     + "?"
                 )
+        elif executed.action_type == "PREPARE_CHECKOUT" and executed.succeeded:
+            payment = executed.payload
+            # Appends nothing about the amount: the block below already shows
+            # the total and every line, and saying it twice in different words
+            # reads as a system talking over itself. Only the question is added,
+            # and only when the model has not already asked one.
+            if not reply.rstrip().endswith("?"):
+                reply = f"{reply}\n\nHow would you like to pay?"
         elif executed.succeeded:
             if executed.action_type in {
                 "ADD_TO_CART",
@@ -392,6 +405,7 @@ async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
         action_summary=action_summary,
         products=products,
         choices=choices,
+        payment=payment,
         awaiting_person=awaiting,
         risk_rule=decision.policy_rule,
         cart_changed=cart_changed,
@@ -656,4 +670,168 @@ async def act(req: ActRequest, key=Depends(any_key)) -> ChatReply:
         cart_changed=cart_changed,
         selected_action=str(trace.selected.action.action_type),
         risk_outcome=str(decision.outcome),
+    )
+
+
+class PayRequest(BaseModel):
+    """A shopper chose a card and confirmed.
+
+    No action type corresponds to this, deliberately. The AI cannot propose it, the
+    risk gate never sees it, and nothing but a shopper's own request reaches here.
+    """
+
+    connection_id: str
+    session_id: str
+    cart_id: str
+    card_last4: str
+
+
+@router.post("/pay", response_model=ChatReply)
+async def pay(req: PayRequest, key=Depends(any_key)) -> ChatReply:
+    """Take payment, in the conversation the shopper is already in.
+
+    The one place in the system that charges without an approval, and the reason is
+    that the person approving is the shopper - who is here, and who just tapped a
+    card. Requiring anybody else's approval for somebody to buy something would be
+    an odd reading of a guarantee about not spending other people's money.
+
+    A decline is recorded as friction rather than returned as an error, so the
+    existing recovery path fires: the shopper is offered help in the same
+    conversation, and on a platform that supports it the money can still be
+    recovered.
+    """
+    belongs_to(key, req.connection_id)
+
+    adapter = engine.registry.adapter_for(req.connection_id)
+    if adapter is None:
+        raise HTTPException(404, f"unknown connection '{req.connection_id}'")
+
+    await session_store.add_turn(
+        session_id=req.session_id,
+        connection_id=req.connection_id,
+        speaker="shopper",
+        text=f"Pay with the card ending {req.card_last4}",
+    )
+
+    try:
+        # Derived from the cart and the card, never generated fresh.
+        #
+        # A shopper on a slow connection taps pay twice. Both requests arrive. With
+        # the same key the platform recognises the second as a retry of the first;
+        # with a random key per attempt it sees two purchases, which is exactly the
+        # failure the interface makes this parameter mandatory to prevent.
+        # Named idem_key, not key. `key` is already the auth record from
+        # Depends(any_key), and shadowing it here meant chat() was later handed a
+        # string where it expected a key - two different things sharing one name,
+        # twelve lines apart.
+        idem_key = f"pay-{req.cart_id}-{req.card_last4}"
+
+        result = await adapter.checkout_with_card(
+            req.cart_id, card_last4=req.card_last4, idempotency_key=idem_key
+        )
+    except CommerceError as exc:
+        # A platform refusal is not the shopper's fault and not their business.
+        logger.exception("checkout failed on %s", req.connection_id)
+        reply = (
+            "Something went wrong taking the payment, and it was not your card. "
+            "Nothing has been charged - try again in a moment."
+        )
+        await session_store.add_turn(
+            session_id=req.session_id,
+            connection_id=req.connection_id,
+            speaker="assistant",
+            text=reply,
+        )
+        return ChatReply(
+            reply=reply,
+            session_id=req.session_id,
+            used_model=False,
+            cart_changed=False,
+        )
+
+    order = result.order
+    order_id = order.order_id if order else None
+
+    if result.succeeded:
+        reply = (
+            f"Paid. Your order is {order_id} and you will get a confirmation "
+            "shortly. Thank you."
+        )
+    else:
+        # Runs the decline through the same pipeline a decline anywhere else takes,
+        # rather than writing a reply here and stopping. The earlier version told
+        # the shopper we could help and created no case, so nobody could - and a
+        # promise with no mechanism behind it is worse than saying nothing.
+        #
+        # This also means Kettle offers a recovery and Northfield escalates, from
+        # the platform capabilities rather than from a branch in this handler.
+        recovered = await chat(
+            ChatRequest(
+                connection_id=req.connection_id,
+                session_id=req.session_id,
+                message="My card was declined.",
+                friction=FrictionType.PAYMENT_DECLINED,
+                cart_id=req.cart_id,
+                order_id=order_id,
+            ),
+            key=key,
+        )
+
+        # Prefixed rather than replaced. The first sentence is the fact the shopper
+        # needs immediately - nothing was taken - and the rest is whatever the
+        # engine decided to do about it.
+        reply = (
+            f"That card was declined, so nothing has been charged. "
+            f"{recovered.reply}"
+        )
+
+        return ChatReply(
+            reply=reply,
+            session_id=req.session_id,
+            case_id=recovered.case_id,
+            used_model=recovered.used_model,
+            action_taken=recovered.action_taken,
+            action_summary=recovered.action_summary,
+            awaiting_person=recovered.awaiting_person,
+            risk_rule=recovered.risk_rule,
+            selected_action=recovered.selected_action,
+            risk_outcome=recovered.risk_outcome,
+            cart_changed=True,
+            payment={
+                "paid": False,
+                "order_id": order_id,
+                "cart_retired": False,
+            },
+        )
+
+    # Only the success path reaches here now. The decline path returned above,
+    # after the pipeline had written its own turn - writing a second one would
+    # show the shopper the same event twice.
+    await session_store.add_turn(
+        session_id=req.session_id,
+        connection_id=req.connection_id,
+        speaker="assistant",
+        text=reply,
+        case_id=None,
+    )
+
+    return ChatReply(
+        reply=reply,
+        session_id=req.session_id,
+        used_model=False,
+        action_taken="CHECKOUT",
+        action_summary=(
+            f"Shopper paid {order_id}" if result.succeeded else f"Card declined on {order_id}"
+        ),
+        # True either way. A declined checkout still empties nothing but the
+        # storefront needs to re-read, because the order now exists.
+        cart_changed=True,
+        payment={
+            "paid": result.succeeded,
+            "order_id": order_id,
+            # Tells the storefront to start a fresh cart. A paid cart is finished,
+            # and leaving it on screen invites a shopper to pay it twice.
+            "cart_retired": result.succeeded,
+            "grand_total": str(order.grand_total) if order and order.grand_total else None,
+        },
     )

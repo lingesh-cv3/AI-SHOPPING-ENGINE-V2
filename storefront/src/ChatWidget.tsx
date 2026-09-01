@@ -25,6 +25,7 @@ export function ChatWidget({
   onTurns,
   onReply,
   onCartChanged,
+  onCartRetired,
   unread,
   merchantName,
   onUnread,
@@ -39,12 +40,18 @@ export function ChatWidget({
   onTurns: (next: ChatTurn[]) => void;
   onReply?: (reply: ChatReply) => void;
   onCartChanged?: () => void;
+  /** Called after a successful payment. The cart is finished and a new one
+   *  is needed - the same thing the sidebar checkout does. */
+  onCartRetired?: () => void;
   unread?: number;
   merchantName?: string;
   onUnread?: (count: number) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  // The card a shopper has selected but not yet confirmed. Every other tap
+  // in this widget is reversible; this one is not, so it asks twice.
+  const [confirming, setConfirming] = useState<string | null>(null);
   const [memory, setMemory] = useState<{ turns: number; friction: number } | null>(
     null,
   );
@@ -158,6 +165,7 @@ export function ChatWidget({
           awaitingPerson: r.awaiting_person,
           usedModel: r.used_model,
           choices: r.choices,
+          payment: r.payment,
         },
       ]);
     } catch (e) {
@@ -192,7 +200,43 @@ export function ChatWidget({
           text: r.reply,
           awaitingPerson: r.awaiting_person,
           choices: r.choices,
+          payment: r.payment,
         },
+      ]);
+    } catch (e) {
+      onTurns([...withShopper, { speaker: "assistant", text: shopperMessage(e) }]);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+
+  /** Pay. Kept apart from tap() because this one spends money.
+   *
+   *  Sharing a handler with the reversible taps would have been tidier and would
+   *  have meant one careless edit could make a product card charge a card.
+   */
+  async function payNow(cartId: string, cardLast4: string) {
+    if (busy) return;
+    setConfirming(null);
+    setBusy("paying");
+
+    const said = `Pay with the card ending ${cardLast4}`;
+    const withShopper: ChatTurn[] = [...turns, { speaker: "shopper", text: said }];
+    onTurns(withShopper);
+
+    try {
+      const r = await api.pay(sessionId, cartId, cardLast4);
+      onReply?.(r);
+      if (r.payment?.cart_retired) {
+        onCartRetired?.();
+      } else {
+        // A declined card leaves the cart intact, so it only needs re-reading.
+        onCartChanged?.();
+      }
+      onTurns([
+        ...withShopper,
+        { speaker: "assistant", text: r.reply, payment: r.payment },
       ]);
     } catch (e) {
       onTurns([...withShopper, { speaker: "assistant", text: shopperMessage(e) }]);
@@ -311,6 +355,64 @@ export function ChatWidget({
                     )}
                   </button>
                 ))}
+              </div>
+            )}
+
+
+            {turn.payment?.cards && turn.payment.cards.length > 0 && (
+              <div className="payblock">
+                <div className="paytotal">
+                  <span>{turn.payment.item_count} item(s)</span>
+                  <span className="num">{turn.payment.grand_total}</span>
+                </div>
+
+                {turn.payment.lines?.map((line) => (
+                  <div key={line.title} className="payline">
+                    <span>
+                      {line.quantity} &times; {line.title}
+                    </span>
+                    <span className="num">{line.total}</span>
+                  </div>
+                ))}
+
+                {confirming ? (
+                  <div className="payconfirm">
+                    <p className="paynote">
+                      Charge {turn.payment.grand_total} to the card ending{" "}
+                      {confirming}?
+                    </p>
+                    <div className="payactions">
+                      <button
+                        className="add"
+                        disabled={busy !== null}
+                        onClick={() =>
+                          payNow(turn.payment!.cart_id!, confirming)
+                        }
+                      >
+                        {busy ? "Paying..." : "Yes, pay now"}
+                      </button>
+                      <button
+                        className="reject"
+                        onClick={() => setConfirming(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="paycards">
+                    {turn.payment.cards.map((card) => (
+                      <button
+                        key={card.last4}
+                        className="paycard"
+                        disabled={busy !== null || i !== turns.length - 1}
+                        onClick={() => setConfirming(card.last4)}
+                      >
+                        {card.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 

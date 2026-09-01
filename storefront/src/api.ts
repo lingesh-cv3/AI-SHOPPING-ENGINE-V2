@@ -133,6 +133,9 @@ export interface CheckoutResult {
 
 
 export interface ChatTurn {
+  /** A total and the ways to pay it. Rendered as buttons; tapping one is
+   *  what charges. */
+  payment?: PaymentOffer;
   /** Options offered with this message. Rendered as buttons: a shopper tapping
    *  "250g ground" cannot be misread, where typing "ground" can. */
   choices?: {
@@ -156,6 +159,20 @@ export interface ChatTurn {
   usedModel?: boolean;
 }
 
+export interface PaymentOffer {
+  cart_id?: string;
+  item_count?: number;
+  grand_total?: string;
+  subtotal?: string;
+  lines?: { title: string; quantity: number; total: string }[];
+  cards?: { last4: string; label: string }[];
+  /** Present on the reply to a payment rather than an offer of one. */
+  paid?: boolean;
+  /** The cart has been bought and should be replaced. */
+  cart_retired?: boolean;
+  order_id?: string | null;
+}
+
 export interface ChatReply {
   reply: string;
   session_id: string;
@@ -172,6 +189,7 @@ export interface ChatReply {
     categories: string[];
   }[];
   awaiting_person: boolean;
+  payment: PaymentOffer;
   /** Options the shopper must pick between. Rendered as buttons - tapping is
    *  unambiguous where typing is not. */
   choices: {
@@ -392,6 +410,28 @@ export const api = {
    *  slow, cost tokens, and broke under rate limiting - a shopper tapping a size
    *  was told the assistant was busy, when we knew exactly what they wanted.
    */
+  /** Take payment. The only call in this file that spends money.
+   *
+   *  Reached only by a shopper tapping a card - there is no action type for it, so
+   *  the AI cannot propose it and the risk gate never sees it. The guarantee was
+   *  always that we do not spend other people's money unattended, not that a
+   *  shopper cannot spend their own.
+   */
+  pay: (
+    sessionId: string,
+    cartId: string,
+    cardLast4: string,
+  ) =>
+    call<ChatReply>("/api/chat/pay", {
+      method: "POST",
+      body: JSON.stringify({
+        connection_id: getConnection(),
+        session_id: sessionId,
+        cart_id: cartId,
+        card_last4: cardLast4,
+      }),
+    }),
+
   act: (
     sessionId: string,
     productId: string,
@@ -820,7 +860,7 @@ export const ops_api = {
     approved: boolean,
     note?: string,
   ) =>
-    call<Decision>(`/api/approvals/${connectionId}/${approvalId}`, {
+    opsCall<Decision>(`/api/approvals/${connectionId}/${approvalId}`, {
       method: "POST",
       body: JSON.stringify({
         approved,

@@ -36,6 +36,7 @@ PROPOSABLE: tuple[ActionType, ...] = (
     ActionType.SUGGEST_ALTERNATIVE,
     ActionType.ADD_TO_CART,
     ActionType.UPDATE_CART_QUANTITY,
+    ActionType.PREPARE_CHECKOUT,
     ActionType.REMOVE_CART_LINE,
     ActionType.NOTIFY_BACK_IN_STOCK,
     ActionType.APPLY_PROMOTION,
@@ -209,6 +210,16 @@ Rules that matter:
   is useful. "Here's what I found" is not: the shopper can see what you found, and
   it tells them nothing about whether any of it suits them. They will be looking at
   names, prices and descriptions, so do not list those back at them.
+- When you propose PREPARE_CHECKOUT, say something short and human like
+  "Of course - here's your total." Do not describe what is about to happen:
+  there is no checkout page, and nobody says "prepare your checkout". Do not
+  name a card either. The shopper has not chosen one yet, and the ones in
+  your context are the options rather than their decision.
+- Propose PREPARE_CHECKOUT only when the shopper says they are ready to pay,
+  or asks how to. It shows them their total and their payment options and
+  charges nothing. Never offer it to hurry somebody along: a shopper who is
+  still choosing does not want a payment form pushed at them, and that is
+  exactly the behaviour that makes people distrust these assistants.
 - Say less rather than more. Two sentences to the shopper is plenty.
 - Never mention action names, approval, risk, policies, or any internal system.
   The shopper is buying running gear, not reading an audit log.

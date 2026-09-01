@@ -113,6 +113,9 @@ PREFERENCE: dict[FrictionType, tuple[ActionType, ...]] = {
 #: proposed nothing else, which is exactly what happens for a genuine question like
 #: "what is your returns policy".
 ASSISTANCE_PREFERENCE: tuple[ActionType, ...] = (
+    # Above add-to-cart on purpose. A shopper who has said they are ready to
+    # pay should not be offered another product first.
+    ActionType.PREPARE_CHECKOUT,
     ActionType.ADD_TO_CART,
     ActionType.RECOMMEND_PRODUCTS,
     ActionType.SUGGEST_ALTERNATIVE,
