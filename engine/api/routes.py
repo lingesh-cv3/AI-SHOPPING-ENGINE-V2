@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from engine import db, expiry
@@ -32,6 +32,7 @@ from shared.models import (
     risk_properties_for,
 )
 
+from .auth import any_key, belongs_to, merchant_scoped, operator
 from .deps import DEV_MERCHANT_NAME, MERCHANT_NAMES, engine
 from .schemas import (
     ActionInfo,
@@ -55,7 +56,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["*"],
-    allow_headers=["*"],
+    # Authorization is listed explicitly rather than relying on the wildcard.
+    # A browser will not send a header the server has not said it accepts, and
+    # some stacks treat "*" as excluding Authorization for exactly that reason.
+    # The operator key travels in this header, so being specific is the difference
+    # between the console working and a request that never leaves the browser.
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 API = "/api"
@@ -140,7 +146,9 @@ async def list_connections() -> list[ConnectionSummary]:
 
 
 @app.get(f"{API}/connections/{{connection_id}}/capabilities")
-async def get_capabilities(connection_id: str) -> dict:
+async def get_capabilities(
+    connection_id: str, _=Depends(merchant_scoped())
+) -> dict:
     """What this connection's platform can actually do.
 
     The honest answer, straight from the adapter. Unsupported operations carry the
@@ -209,7 +217,9 @@ def get_actions() -> list[ActionInfo]:
 
 
 @app.get(f"{API}/policy/{{connection_id}}")
-def get_policy(connection_id: str) -> dict:
+def get_policy(
+    connection_id: str, _=Depends(merchant_scoped())
+) -> dict:
     policy = engine.policies.get(connection_id)
     return {
         "connection_id": policy.connection_id,
@@ -221,7 +231,11 @@ def get_policy(connection_id: str) -> dict:
 
 
 @app.put(f"{API}/policy/{{connection_id}}")
-async def set_policy(connection_id: str, update: PolicyUpdate) -> dict:
+async def set_policy(
+    connection_id: str,
+    update: PolicyUpdate,
+    _=Depends(merchant_scoped()),
+) -> dict:
     """Update a connection's risk settings, and persist them.
 
     Awaited rather than fired and forgotten. A merchant who changes a setting and
@@ -258,7 +272,9 @@ async def set_policy(connection_id: str, update: PolicyUpdate) -> dict:
 
 
 @app.post(f"{API}/simulate", response_model=SimulateResponse)
-async def simulate(req: SimulateRequest) -> SimulateResponse:
+async def simulate(
+    req: SimulateRequest, key=Depends(any_key)
+) -> SimulateResponse:
     """Run one situation through Reasoning -> Decision -> Risk.
 
     The most useful endpoint for seeing the engine work: it returns what was
@@ -269,6 +285,7 @@ async def simulate(req: SimulateRequest) -> SimulateResponse:
     explores "what would happen if I changed this setting" without spending a
     model call on a question that has nothing to do with reasoning.
     """
+    belongs_to(key, req.connection_id)
     adapter = _adapter(req.connection_id)
 
     reasoning = None
@@ -442,7 +459,9 @@ async def simulate(req: SimulateRequest) -> SimulateResponse:
 
 
 @app.get(f"{API}/approvals/{{connection_id}}")
-async def list_approvals(connection_id: str) -> dict:
+async def list_approvals(
+    connection_id: str, _=Depends(merchant_scoped())
+) -> dict:
     """What a person needs to decide, oldest first.
 
     Each entry carries the full reasoning that produced it - the diagnosis, the
@@ -455,7 +474,12 @@ async def list_approvals(connection_id: str) -> dict:
 
 
 @app.post(f"{API}/approvals/{{connection_id}}/{{approval_id}}")
-async def decide(connection_id: str, approval_id: str, body: ApprovalDecision) -> dict:
+async def decide(
+    connection_id: str,
+    approval_id: str,
+    body: ApprovalDecision,
+    _=Depends(merchant_scoped()),
+) -> dict:
     """Approve or reject one pending action.
 
     Returns changed=False when the approval was already decided, rather than
@@ -613,7 +637,11 @@ async def decide(connection_id: str, approval_id: str, body: ApprovalDecision) -
 
 
 @app.get(f"{API}/cases/{{connection_id}}")
-async def list_cases(connection_id: str, limit: int = 30) -> dict:
+async def list_cases(
+    connection_id: str,
+    limit: int = 30,
+    _=Depends(merchant_scoped()),
+) -> dict:
     """Recent cases. The merchant console's activity view."""
     _adapter(connection_id)
     cases = await db.list_cases(connection_id, limit=limit)
@@ -639,13 +667,19 @@ async def list_cases(connection_id: str, limit: int = 30) -> dict:
 
 
 @app.get(f"{API}/stats/{{connection_id}}")
-async def get_stats(connection_id: str) -> dict:
+async def get_stats(
+    connection_id: str, _=Depends(merchant_scoped())
+) -> dict:
     """Headline counts for the console."""
     _adapter(connection_id)
     return await db.stats(connection_id)
 
 @app.get(f"{API}/report/{{connection_id}}")
-async def merchant_report(connection_id: str, days: int = 30) -> dict:
+async def merchant_report(
+    connection_id: str,
+    days: int = 30,
+    _=Depends(merchant_scoped()),
+) -> dict:
     """What the engine did for this merchant.
 
     Distinct from /stats, which counts work for the operations console. This is
@@ -657,7 +691,7 @@ async def merchant_report(connection_id: str, days: int = 30) -> dict:
 
 
 @app.post(f"{API}/admin/expire")
-async def run_expiry() -> dict:
+async def run_expiry(_=Depends(operator)) -> dict:
     """Run the expiry sweep now.
 
     The sweeper runs on a timer, which makes the behaviour hard to demonstrate
@@ -682,7 +716,7 @@ def _operator_connections() -> list[str]:
 
 
 @app.get(f"{API}/ops/queue")
-async def ops_queue() -> dict:
+async def ops_queue(_=Depends(operator)) -> dict:
     """Everything waiting on a person, across every merchant.
 
     The per-merchant queue made an operator covering several clients switch between
@@ -699,7 +733,7 @@ async def ops_queue() -> dict:
 
 
 @app.get(f"{API}/ops/history")
-async def ops_history(limit: int = 40) -> dict:
+async def ops_history(limit: int = 40, _=Depends(operator)) -> dict:
     """What has already been decided, and what came of it."""
     rows = await db.decided_across(_operator_connections(), limit=limit)
     for row in rows:
@@ -710,7 +744,7 @@ async def ops_history(limit: int = 40) -> dict:
 
 
 @app.get(f"{API}/ops/stats")
-async def ops_overview() -> dict:
+async def ops_overview(_=Depends(operator)) -> dict:
     """Workload across every merchant."""
     stats = await db.ops_stats(_operator_connections())
     stats["by_merchant"] = {

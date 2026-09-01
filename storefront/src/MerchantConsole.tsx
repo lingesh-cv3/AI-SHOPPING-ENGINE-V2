@@ -1,3 +1,5 @@
+import { NotAuthorised, getConnection, merchantKey } from "./api";
+import { MerchantSignIn } from "./MerchantSignIn";
 import { useCallback, useEffect, useState } from "react";
 import {
   console_api,
@@ -32,6 +34,11 @@ export function MerchantConsole() {
   const [test, setTest] = useState<Pipeline | null>(null);
   const [tested, setTested] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Signed out is the normal first state, not a failure, so it is tracked
+  // separately from `error`.
+  const [signedIn, setSignedIn] = useState(
+    () => merchantKey(getConnection()) !== null,
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -45,14 +52,21 @@ export function MerchantConsole() {
       setPolicy(p);
       setRules(r);
       setActions(a);
-    } catch {
+    } catch (e) {
+      // A refused key is not an outage. Conflating them has a merchant restarting
+      // services when they need to sign in.
+      if (e instanceof NotAuthorised) {
+        setSignedIn(false);
+        return;
+      }
       setError("Could not reach the engine. Is it running on port 8000?");
     }
   }, []);
 
   useEffect(() => {
+    if (!signedIn) return;
     refresh();
-  }, [refresh]);
+  }, [refresh, signedIn]);
 
   async function setMode(mode: string) {
     if (!policy) return;
@@ -71,6 +85,19 @@ export function MerchantConsole() {
     setTested(actionType);
     setTest(await console_api.testAction(actionType));
   }
+  if (!signedIn) {
+    return (
+      <MerchantSignIn
+        connectionId={getConnection()}
+        merchantName={caps?.platform ?? getConnection()}
+        onSignedIn={() => {
+          setSignedIn(true);
+          setError(null);
+        }}
+      />
+    );
+  }
+
   if (error) return <p className="empty">{error}</p>;
   if (!caps || !policy) return <p className="empty">Loading…</p>;
 

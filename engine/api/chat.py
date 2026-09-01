@@ -28,13 +28,14 @@ from shared.models import (
 )
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import Depends, APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from engine import db
 from engine import session as session_store
 from shared.models import CommerceError
 
+from .auth import any_key, belongs_to
 from .deps import engine
 
 logger = logging.getLogger(__name__)
@@ -139,8 +140,9 @@ class ChatReply(BaseModel):
 
 
 @router.post("", response_model=ChatReply)
-async def chat(req: ChatRequest) -> ChatReply:
+async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
     """Handle one shopper message."""
+    belongs_to(key, req.connection_id)
     adapter = engine.registry.adapter_for(req.connection_id)
     if adapter is None:
         raise HTTPException(404, f"unknown connection '{req.connection_id}'")
@@ -415,7 +417,9 @@ async def chat(req: ChatRequest) -> ChatReply:
 
 
 @router.get("/{connection_id}/{session_id}")
-async def transcript(connection_id: str, session_id: str) -> dict:
+async def transcript(
+    connection_id: str, session_id: str, key=Depends(any_key)
+) -> dict:
     """The conversation so far.
 
     Returns structured turns rather than formatted strings, because the widget polls
@@ -423,6 +427,7 @@ async def transcript(connection_id: str, session_id: str) -> dict:
     operator approving a payment recovery, for instance. Those arrive here rather
     than as a reply to anything the shopper said.
     """
+    belongs_to(key, connection_id)
     if engine.registry.adapter_for(connection_id) is None:
         raise HTTPException(404, f"unknown connection '{connection_id}'")
     return {
@@ -452,13 +457,14 @@ class ActRequest(BaseModel):
 
 
 @router.post("/act", response_model=ChatReply)
-async def act(req: ActRequest) -> ChatReply:
+async def act(req: ActRequest, key=Depends(any_key)) -> ChatReply:
     """Carry out a tap, without asking a model anything.
 
     The safety path is unchanged. The action still goes through the Decision Engine
     for capability and policy, and through the Risk Gate. Skipping reasoning skips
     only the part that had nothing to contribute.
     """
+    belongs_to(key, req.connection_id)
     adapter = engine.registry.adapter_for(req.connection_id)
     if adapter is None:
         raise HTTPException(404, f"unknown connection '{req.connection_id}'")

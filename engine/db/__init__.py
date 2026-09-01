@@ -8,7 +8,8 @@ SQLite by default so no install is needed; Postgres by changing DATABASE_URL.
 Nothing in the schema uses a SQLite-only feature.
 """
 from . import idempotency
-from .models import Approval, Base, Case, ExecutionAttempt, MerchantPolicy, Outcome
+from . import keys
+from .models import ApiKey, Approval, Base, Case, ExecutionAttempt, MerchantPolicy, Outcome
 from .repository import (
     decide_approval,
     decided_across,
@@ -28,11 +29,13 @@ from .repository import (
 from .session import create_schema, database_url, dispose, session_scope
 
 __all__ = [
+    "ApiKey",
     "Approval",
     "Base",
     "Case",
     "Outcome",
     "create_schema",
+    "keys",
     "database_url",
     "decide_approval",
     "decided_across",

@@ -25,10 +25,72 @@ from __future__ import annotations
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 import json
 import uuid
 
 ENGINE = "http://127.0.0.1:8000"
+
+
+def load_keys() -> dict[str, str]:
+    """The keys mint_keys.py wrote, or an empty dict.
+
+    Missing keys are not a failure of the engine, so the auth-dependent checks skip
+    with a reason rather than reporting red. A red line should mean something is
+    broken, not that a setup step has not been run.
+    """
+    path = Path(".env.keys")
+    if not path.exists():
+        return {}
+
+    found: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        found[name.strip()] = value.strip()
+    return found
+
+
+KEYS = load_keys()
+OPERATOR = KEYS.get("CV3_OPERATOR_KEY")
+SECRETS = {
+    "conn_demo": KEYS.get("CV3_SECRET_CONN_DEMO"),
+    "conn_kettle": KEYS.get("CV3_SECRET_CONN_KETTLE"),
+}
+
+
+#: Passed by a check that must reach the engine unauthenticated. An empty string
+#: was used first and is falsy, so it fell through to the automatic lookup and
+#: the request arrived with a key - which made a locked route report as open.
+NO_KEY = "__none__"
+
+
+def key_for(path: str, body: dict | None) -> str | None:
+    """The key a call should carry, worked out from where it is going.
+
+    Chosen here rather than passed at every call site. There are around sixty calls
+    in this file, and threading a key through each would be sixty chances to forget
+    one - which surfaces as a mysterious failure rather than a missing argument.
+
+    The secret key is used throughout rather than the publishable one. A secret key
+    can do everything a publishable key can, so one lookup covers every route, and
+    the audit is what proves a publishable key is correctly limited.
+    """
+    for cid in ("conn_kettle", "conn_demo"):
+        if f"/{cid}" in path:
+            return SECRETS.get(cid)
+
+    if body and isinstance(body, dict):
+        cid = body.get("connection_id")
+        if cid:
+            return SECRETS.get(cid)
+
+    if "/ops/" in path or "/admin/" in path:
+        return OPERATOR
+
+    return None
 NORTHFIELD = "conn_demo"
 KETTLE = "conn_kettle"
 
@@ -36,13 +98,32 @@ passed = 0
 failed: list[str] = []
 
 
-def call(method: str, path: str, body: dict | None = None) -> dict:
+def call(
+    method: str, path: str, body: dict | None = None, key: str | None = None
+) -> dict:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         f"{ENGINE}{path}",
         data=data,
         method=method,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            # An explicit key wins, so a check that deliberately sends none - or
+            # sends the wrong one - still gets to do that.
+            **(
+                {}
+                if key == NO_KEY
+                else (
+                    {"Authorization": f"Bearer {key}"}
+                    if key
+                    else (
+                        {"Authorization": f"Bearer {auto}"}
+                        if (auto := key_for(path, body))
+                        else {}
+                    )
+                )
+            ),
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=45) as r:
@@ -100,6 +181,17 @@ if "_unreachable" in health:
     # failures and bury the one that matters.
     print("\n  The engine is not answering. Start it and run this again:")
     print("    python -m uvicorn engine.api.main:app --port 8000")
+    sys.exit(1)
+
+# A refused first call means the keys are missing or stale. Better to say so than
+# to let sixty checks fail and then crash indexing into a refusal.
+probe = call("GET", "/api/shop/conn_demo/departments")
+if probe.get("_status") == 401:
+    print()
+    print("  The engine refused an authenticated request.")
+    print("  .env.keys is missing or does not match this database.")
+    print("  Delete cv3.db, restart the engine, and run mint_keys.py again.")
+    print()
     sys.exit(1)
 
 connections = call("GET", "/api/connections")
@@ -421,16 +513,65 @@ if approvals:
 
 section("Shared memory")
 
+# Tested while the problem is still open, which is the moment that matters: a card
+# declines, the shopper types "what now", and the assistant already knows without
+# being told. A resolved problem is deliberately excluded - otherwise a shopper whose
+# payment had just been recovered said hello and was told someone needed to approve
+# something.
+open_session = f"hc_mem_{uuid.uuid4().hex[:8]}"
+open_bag = call("POST", f"/api/shop/{KETTLE}/cart")
+call(
+    "POST",
+    f"/api/shop/{KETTLE}/cart/{open_bag['cart_id']}/lines",
+    {
+        "product_id": "KB-COL-02",
+        "variant_id": "KB-COL-02::250g whole bean",
+        "quantity": 1,
+    },
+)
+open_paid = call(
+    "POST",
+    f"/api/shop/{KETTLE}/cart/{open_bag['cart_id']}/checkout",
+    {"card_last4": "0002"},
+)
+call(
+    "POST",
+    "/api/chat",
+    {
+        "connection_id": KETTLE,
+        "session_id": open_session,
+        "message": "my payment failed",
+        "friction": "PAYMENT_DECLINED",
+        "order_id": (open_paid.get("order") or {}).get("order_id"),
+    },
+)
+
 mem = call(
     "POST",
     "/api/chat",
-    {"connection_id": KETTLE, "session_id": session, "message": "what now?"},
+    {
+        "connection_id": KETTLE,
+        "session_id": open_session,
+        "message": "what now?",
+    },
 )
 check(
-    "friction is remembered across surfaces",
+    "an open problem is remembered across surfaces",
     (mem.get("remembered_friction") or 0) > 0,
     f"friction={mem.get('remembered_friction')}, turns={mem.get('remembered_turns')}",
     "engine/session/store.py",
+)
+
+resolved = call(
+    "POST",
+    "/api/chat",
+    {"connection_id": KETTLE, "session_id": session, "message": "hello again"},
+)
+check(
+    "a resolved problem is not",
+    (resolved.get("remembered_friction") or 0) == 0,
+    f"friction={resolved.get('remembered_friction')} on a session whose case closed",
+    "engine/session/store.py::recent_friction",
 )
 
 # ---------------------------------------------------------------------------
@@ -683,7 +824,21 @@ if backdated:
 
 section("Operations console")
 
-ops = call("GET", "/api/ops/stats")
+if OPERATOR is None:
+    print("  SKIP  operations checks (no .env.keys - run mint_keys.py)")
+else:
+    # Explicitly keyless: this check exists to prove the door is shut.
+    refused = call("GET", "/api/ops/stats", key=NO_KEY)
+    check(
+        "the operations queue is locked",
+        # 401 specifically, not merely "it failed". A 500 that happened to stop the
+        # request would otherwise read as a working lock.
+        refused.get("_status") == 401,
+        f"an unauthenticated request returned {refused}",
+        "engine/api/auth.py",
+    )
+
+ops = call("GET", "/api/ops/stats", key=OPERATOR)
 check(
     "cross-merchant workload",
     "waiting" in ops and "by_merchant" in ops,
@@ -691,7 +846,7 @@ check(
     "engine/api/routes.py::ops_overview",
 )
 
-ops_q = call("GET", "/api/ops/queue")
+ops_q = call("GET", "/api/ops/queue", key=OPERATOR)
 q_rows = ops_q.get("approvals")
 check(
     "one queue across every merchant",
@@ -713,7 +868,7 @@ if isinstance(q_rows, list) and q_rows:
         "engine/db/repository.py::pending_across",
     )
 
-hist = call("GET", "/api/ops/history")
+hist = call("GET", "/api/ops/history", key=OPERATOR)
 rows = hist.get("decisions") or []
 check(
     "decided work is visible",

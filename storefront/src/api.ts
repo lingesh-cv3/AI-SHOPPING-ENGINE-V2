@@ -314,10 +314,36 @@ export class EngineError extends Error {
   }
 }
 
+/** The publishable key for a merchant.
+ *
+ *  Built into the bundle on purpose. A publishable key is not a secret - it ships to
+ *  every browser and anyone can read it, which is true of every provider that issues
+ *  one. What makes it safe is what it cannot do: it speaks for one merchant, and it
+ *  cannot change a policy or decide an approval.
+ *
+ *  Chosen by connection, so switching merchant switches keys - and Kettle's key
+ *  against Northfield is refused, which is the point of the whole exercise.
+ */
+function publishableKey(connectionId: string): string {
+  const keys: Record<string, string | undefined> = {
+    conn_demo: import.meta.env.VITE_CV3_PK_CONN_DEMO,
+    conn_kettle: import.meta.env.VITE_CV3_PK_CONN_KETTLE,
+  };
+  return keys[connectionId] || "";
+}
+
+
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${ENGINE}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: {
+      "Content-Type": "application/json",
+      // Every shopper request carries the current merchant's publishable
+      // key. The engine no longer takes the request's word for which
+      // merchant it speaks for.
+      Authorization: `Bearer ${publishableKey(getConnection())}`,
+      ...init?.headers,
+    },
   });
 
   if (!res.ok) {
@@ -547,14 +573,66 @@ export interface ActionInfo {
   can_ever_be_automatic: boolean;
 }
 
+/** The secret key for one merchant, held for the browser session.
+ *
+ *  Keyed by connection, because a secret key speaks for exactly one merchant. That
+ *  is why switching merchant asks again: holding Kettle's credentials tells you
+ *  nothing about Northfield, and pretending otherwise would undo the isolation the
+ *  engine now enforces.
+ *
+ *  Typed rather than built into the bundle. Unlike a publishable key, this one can
+ *  change a policy and decide an approval, so it must never ship to a shopper.
+ */
+export function merchantKey(connectionId: string): string | null {
+  return sessionStorage.getItem(`cv3_merchant_key_${connectionId}`);
+}
+
+export function setMerchantKey(connectionId: string, key: string) {
+  sessionStorage.setItem(`cv3_merchant_key_${connectionId}`, key.trim());
+}
+
+export function clearMerchantKey(connectionId: string) {
+  sessionStorage.removeItem(`cv3_merchant_key_${connectionId}`);
+}
+
+async function merchantCall<T>(path: string, init?: RequestInit): Promise<T> {
+  const connection = getConnection();
+  const key = merchantKey(connection);
+  if (!key) throw new NotAuthorised();
+
+  const res = await fetch(`${ENGINE}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${key}`,
+      ...init?.headers,
+    },
+  });
+
+  if (res.status === 401) {
+    // Forgotten rather than retried. A key the engine refuses will fail every
+    // subsequent request, and leaving it in place gives the merchant no way to
+    // correct course - it just looks broken.
+    clearMerchantKey(connection);
+    throw new NotAuthorised();
+  }
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.detail || `request failed (${res.status})`);
+  }
+
+  return res.json();
+}
+
 export const console_api = {
   capabilities: () =>
-    call<Capabilities>(`/api/connections/${getConnection()}/capabilities`),
+    merchantCall<Capabilities>(`/api/connections/${getConnection()}/capabilities`),
 
-  policy: () => call<Policy>(`/api/policy/${getConnection()}`),
+  policy: () => merchantCall<Policy>(`/api/policy/${getConnection()}`),
 
   savePolicy: (mode: string, autoAllowed: string[], blocked: string[]) =>
-    call<Policy>(`/api/policy/${getConnection()}`, {
+    merchantCall<Policy>(`/api/policy/${getConnection()}`, {
       method: "PUT",
       body: JSON.stringify({ mode, auto_allowed: autoAllowed, blocked }),
     }),
@@ -564,7 +642,7 @@ export const console_api = {
   actions: () => call<ActionInfo[]>("/api/policy/actions"),
 
   testAction: (actionType: string) =>
-    call<Pipeline>("/api/simulate", {
+    merchantCall<Pipeline>("/api/simulate", {
       method: "POST",
       body: JSON.stringify({
         connection_id: getConnection(),
@@ -573,10 +651,10 @@ export const console_api = {
       }),
     }),
 
-  queue: () => call<{ approvals: QueueItem[] }>(`/api/approvals/${getConnection()}`),
+  queue: () => merchantCall<{ approvals: QueueItem[] }>(`/api/approvals/${getConnection()}`),
 
   decide: (approvalId: string, approved: boolean, note?: string) =>
-    call<Decision>(`/api/approvals/${getConnection()}/${approvalId}`, {
+    merchantCall<Decision>(`/api/approvals/${getConnection()}/${approvalId}`, {
       method: "POST",
       body: JSON.stringify({
         approved,
@@ -585,9 +663,9 @@ export const console_api = {
       }),
     }),
 
-  stats: () => call<Stats>(`/api/stats/${getConnection()}`),
+  stats: () => merchantCall<Stats>(`/api/stats/${getConnection()}`),
 
-  report: () => call<MerchantReport>(`/api/report/${getConnection()}`),
+  report: () => merchantCall<MerchantReport>(`/api/report/${getConnection()}`),
 };
 
 export interface MerchantReport {
@@ -670,12 +748,70 @@ export interface OpsStats {
  *  deliberately are not, because an operator covering several clients should not
  *  have to switch between them to find their work.
  */
+/** The operator key, held for the browser session only.
+ *
+ *  Deliberately not a build-time constant. The operations console shares a bundle
+ *  with the shopper storefront, so a key compiled in would ship to every shopper -
+ *  and any of them could then approve their own refund. Typed once, kept in
+ *  sessionStorage, never in the code anybody downloads.
+ *
+ *  The permanent answer is a separate application, which is on the roadmap. This is
+ *  the honest version until then.
+ */
+export function operatorKey(): string | null {
+  return sessionStorage.getItem("cv3_operator_key");
+}
+
+export function setOperatorKey(key: string) {
+  sessionStorage.setItem("cv3_operator_key", key.trim());
+}
+
+export function clearOperatorKey() {
+  sessionStorage.removeItem("cv3_operator_key");
+}
+
+/** Thrown when the engine refuses the key, so the console can ask again rather
+ *  than showing a generic failure. */
+export class NotAuthorised extends Error {
+  constructor() {
+    super("that key was refused");
+  }
+}
+
+async function opsCall<T>(path: string, init?: RequestInit): Promise<T> {
+  const key = operatorKey();
+  if (!key) throw new NotAuthorised();
+
+  const res = await fetch(`${ENGINE}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${key}`,
+      ...(init?.headers || {}),
+    },
+  });
+
+  if (res.status === 401) {
+    // A refused key is worth forgetting. Keeping it would fail every subsequent
+    // request with no way for the operator to correct it.
+    clearOperatorKey();
+    throw new NotAuthorised();
+  }
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.detail || `request failed (${res.status})`);
+  }
+
+  return res.json();
+}
+
 export const ops_api = {
-  queue: () => call<{ approvals: OpsQueueItem[] }>("/api/ops/queue"),
+  queue: () => opsCall<{ approvals: OpsQueueItem[] }>("/api/ops/queue"),
 
-  history: () => call<{ decisions: OpsDecision[] }>("/api/ops/history"),
+  history: () => opsCall<{ decisions: OpsDecision[] }>("/api/ops/history"),
 
-  stats: () => call<OpsStats>("/api/ops/stats"),
+  stats: () => opsCall<OpsStats>("/api/ops/stats"),
 
   /** The connection id comes from the item, not from the current shop. */
   decide: (

@@ -36,3 +36,6 @@ env/
 start.txt
 
 patch*
+.env.keys
+
+fix*

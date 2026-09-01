@@ -284,3 +284,66 @@ class MerchantPolicy(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
+
+class ApiKey(Base):
+    """An API key, stored as a hash.
+
+    Three kinds, because three different callers need three different things:
+
+    **publishable** goes in a browser, so it is not a secret and never was. Anyone
+    who views source can read it. Its protection is that it is scoped to one
+    merchant and can only do shopper things - search, cart, chat. Treating it as
+    confidential would be a lie we tell ourselves.
+
+    **secret** is server to server. It can change policy and decide approvals, so it
+    must never reach a browser.
+
+    **operator** is CV3's own, and it spans merchants. Every other key is bound to
+    one connection; this is the exception that makes the operations console possible,
+    and it is the one worth being careful with.
+
+    The key itself is never stored. On creation it is shown once and then only the
+    hash remains, so a database dump does not hand somebody working credentials.
+    """
+
+    __tablename__ = "api_keys"
+
+    key_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    #: The first twelve characters, indexed, so a key can be found without scanning
+    #: every row and hashing each one. The prefix alone is not usable.
+    prefix: Mapped[str] = mapped_column(String(16), index=True)
+
+    #: SHA-256 of the whole key.
+    #:
+    #: Not bcrypt or argon2, and that is deliberate rather than an oversight. Those
+    #: exist to make guessing a human-chosen password expensive. A key here is 32
+    #: bytes from os.urandom, so there is no dictionary to attack and nothing to
+    #: slow down - a plain fast hash is the right tool, and it keeps verification
+    #: cheap on a path every request takes.
+    key_hash: Mapped[str] = mapped_column(String(64))
+
+    #: publishable, secret, or operator
+    kind: Mapped[str] = mapped_column(String(12))
+
+    #: The merchant this key speaks for. Null only for operator keys.
+    connection_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    #: Domains a publishable key may be used from, as a JSON list. Empty means any,
+    #: which is fine in development and should not be in production.
+    allowed_origins: Mapped[list] = mapped_column(JSON, default=list)
+
+    label: Mapped[str] = mapped_column(String(120), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    #: Revoked rather than deleted, so an audit trail keeps pointing at something.
+    #: 75% of merchants say being able to revoke access in real time is critical,
+    #: and a deleted row cannot explain why a request was refused.
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

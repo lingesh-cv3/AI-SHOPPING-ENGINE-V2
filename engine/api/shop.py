@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel
 
 from shared.models import CapabilityUnsupported, CommerceError, Money
 
+from .auth import shopper_scoped
 from .deps import engine
 
 router = APIRouter(prefix="/api/shop", tags=["shop"])
@@ -128,7 +129,10 @@ class CheckoutBody(BaseModel):
     card_last4: str = "1111"
 
 @router.get("/{connection_id}/departments")
-async def departments(connection_id: str) -> dict:
+async def departments(
+    connection_id: str,
+    _=Depends(shopper_scoped()),
+) -> dict:
     """Category list, where the platform supports the concept.
 
     Not on the Standard Commerce Interface, so this checks for the method rather
@@ -179,7 +183,10 @@ def _order(o) -> dict:
 
 
 @router.get("/{connection_id}/order/{order_id}")
-async def get_order(connection_id: str, order_id: str) -> dict:
+async def get_order(
+    connection_id: str, order_id: str,
+    _=Depends(shopper_scoped()),
+) -> dict:
     """Look up an order.
 
     Works for paid and unpaid orders alike. A shopper whose card was declined
@@ -194,7 +201,8 @@ async def get_order(connection_id: str, order_id: str) -> dict:
 
 @router.get("/{connection_id}/search")
 async def search(
-    connection_id: str, q: str = "", limit: int = 24, dept: str | None = None
+    connection_id: str, q: str = "", limit: int = 24, dept: str | None = None,
+    _=Depends(shopper_scoped()),
 ) -> dict:
     """Search or browse the catalog.
 
@@ -219,7 +227,10 @@ async def search(
     }
 
 @router.get("/{connection_id}/product/{product_id}")
-async def product(connection_id: str, product_id: str) -> dict:
+async def product(
+    connection_id: str, product_id: str,
+    _=Depends(shopper_scoped()),
+) -> dict:
     adapter = _adapter(connection_id)
     try:
         return _product(await adapter.get_product(product_id))
@@ -228,7 +239,10 @@ async def product(connection_id: str, product_id: str) -> dict:
 
 
 @router.post("/{connection_id}/cart")
-async def create_cart(connection_id: str) -> dict:
+async def create_cart(
+    connection_id: str,
+    _=Depends(shopper_scoped()),
+) -> dict:
     adapter = _adapter(connection_id)
     try:
         return _cart(await adapter.create_cart())
@@ -237,7 +251,10 @@ async def create_cart(connection_id: str) -> dict:
 
 
 @router.get("/{connection_id}/cart/{cart_id}")
-async def get_cart(connection_id: str, cart_id: str) -> dict:
+async def get_cart(
+    connection_id: str, cart_id: str,
+    _=Depends(shopper_scoped()),
+) -> dict:
     adapter = _adapter(connection_id)
     try:
         return _cart(await adapter.get_cart(cart_id))
@@ -246,7 +263,10 @@ async def get_cart(connection_id: str, cart_id: str) -> dict:
 
 
 @router.post("/{connection_id}/cart/{cart_id}/lines")
-async def add_line(connection_id: str, cart_id: str, body: AddLine) -> dict:
+async def add_line(
+    connection_id: str, cart_id: str, body: AddLine,
+    _=Depends(shopper_scoped()),
+) -> dict:
     adapter = _adapter(connection_id)
     try:
         cart = await adapter.add_to_cart(
@@ -261,7 +281,10 @@ async def add_line(connection_id: str, cart_id: str, body: AddLine) -> dict:
 
 
 @router.post("/{connection_id}/cart/{cart_id}/promotion")
-async def apply_promotion(connection_id: str, cart_id: str, body: PromoBody) -> dict:
+async def apply_promotion(
+    connection_id: str, cart_id: str, body: PromoBody,
+    _=Depends(shopper_scoped()),
+) -> dict:
     """Apply a coupon.
 
     WELCOME10 works. SUMMER25 is expired, which is what drives the
@@ -276,7 +299,10 @@ async def apply_promotion(connection_id: str, cart_id: str, body: PromoBody) -> 
 
 
 @router.post("/{connection_id}/cart/{cart_id}/checkout")
-async def checkout(connection_id: str, cart_id: str, body: CheckoutBody) -> dict:
+async def checkout(
+    connection_id: str, cart_id: str, body: CheckoutBody,
+    _=Depends(shopper_scoped()),
+) -> dict:
     """Complete the order.
 
     A decline returns HTTP 200 with succeeded false and a real order. It is not an

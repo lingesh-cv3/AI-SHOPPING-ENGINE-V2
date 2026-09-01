@@ -1,4 +1,6 @@
 ﻿import { useCallback, useEffect, useState } from "react";
+import { NotAuthorised, operatorKey } from "./api";
+import { OperatorSignIn } from "./OperatorSignIn";
 import {
   ops_api,
   type Decision,
@@ -35,6 +37,9 @@ export function OpsConsole() {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Whether we hold a key at all. Separate from `error` because being
+  // signed out is not a failure - it is the normal first state.
+  const [signedIn, setSignedIn] = useState(() => operatorKey() !== null);
 
   const refresh = useCallback(async () => {
     try {
@@ -47,18 +52,25 @@ export function OpsConsole() {
       setHistory(h.decisions);
       setStats(s);
       setError(null);
-    } catch {
+    } catch (e) {
+      // A refused key is not an outage. Conflating them would have an operator
+      // restarting services when they simply need to sign in again.
+      if (e instanceof NotAuthorised) {
+        setSignedIn(false);
+        return;
+      }
       setError("Could not reach the engine.");
     }
   }, []);
 
   useEffect(() => {
+    if (!signedIn) return;
     refresh();
     // Twenty seconds. Fast enough that a case appears while an operator is still
     // looking at the page, slow enough not to redraw under their cursor.
     const id = window.setInterval(refresh, 20000);
     return () => window.clearInterval(id);
-  }, [refresh]);
+  }, [refresh, signedIn]);
 
   async function decide(item: OpsQueueItem, approved: boolean, why?: string) {
     setBusy(item.approval_id);
@@ -78,6 +90,17 @@ export function OpsConsole() {
     } finally {
       setBusy(null);
     }
+  }
+
+  if (!signedIn) {
+    return (
+      <OperatorSignIn
+        onSignedIn={() => {
+          setSignedIn(true);
+          setError(null);
+        }}
+      />
+    );
   }
 
   if (error) return <p className="empty">{error}</p>;
