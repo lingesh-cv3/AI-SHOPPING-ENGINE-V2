@@ -89,7 +89,15 @@ export function ChatWidget({
     api
       .transcript(sessionId)
       .then(({ turns: stored }) => {
-        if (stored.length === 0) return;
+        // Replaces rather than merges, and runs even when the result is empty.
+        //
+        // Returning early on an empty result left the previous merchant's
+        // conversation on screen after a switch, which is worse than showing
+        // nothing: a shopper on Northfield reading their coffee order.
+        if (stored.length === 0) {
+          onTurns([]);
+          return;
+        }
         // Both speakers. The poll filters to assistant turns because a shopper's
         // own messages are already on screen when they send them; on a restore
         // nothing is on screen, and reusing that filter made the conversation read

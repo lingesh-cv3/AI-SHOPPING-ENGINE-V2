@@ -139,8 +139,18 @@ class ReasoningService:
         catalog_sample: list[Product] | None = None,
         history: list[str] | None = None,
         recorded_friction: list[str] | None = None,
+        skip_model: bool = False,
     ) -> Reasoning:
         """Produce proposals for one situation, or one shopper message."""
+        # Asked not to wait, so do not.
+        #
+        # Set by a caller who cannot leave somebody hanging - a declined payment,
+        # where the recovery options come from the capability table rather than
+        # from judgement. The model would only have phrased them, and a fixed
+        # sentence now beats a nicer one in thirty seconds.
+        if skip_model:
+            return self._fallback(friction, "caller asked not to wait")
+
         if self._client is None:
             return self._fallback(friction, "no model configured")
 

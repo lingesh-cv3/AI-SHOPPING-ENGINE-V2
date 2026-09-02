@@ -406,6 +406,17 @@ export const api = {
 
   product: (id: string) => call<Product>(shop(`/product/${id}`)),
 
+  /** Change how many of a line is in the cart. Zero takes it out.
+   *
+   *  No model involved, like the tap paths - a shopper emptying their own basket
+   *  should not depend on a provider being available.
+   */
+  changeLine: (cartId: string, lineId: string, quantity: number) =>
+    call<Cart>(shop(`/cart/${cartId}/lines/${lineId}`), {
+      method: "PATCH",
+      body: JSON.stringify({ quantity }),
+    }),
+
   createCart: () => call<Cart>(shop("/cart"), { method: "POST" }),
 
   getCart: (cartId: string) => call<Cart>(shop(`/cart/${cartId}`)),

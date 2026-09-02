@@ -84,15 +84,25 @@ export default function App() {
   const [openProduct, setOpenProduct] = useState<string | null>(null);
   const [openOrder, setOpenOrder] = useState<string | null>(null);
 
-  // One session id for the visit, shared by the friction path and the chat. This is
-  // the mechanism behind shared memory - both report against it, so the assistant
-  // knows about a declined payment nobody mentioned.
-  const [sessionId, setSessionId] = useState(() =>
-    sessionFor(getConnection()),
-  );
 
   const [connections, setConnections] = useState<Connection[]>([]);
   const [connection, setConnectionState] = useState(getConnection());
+
+  // One session id for the visit, shared by the friction path and the chat. This is
+  // the mechanism behind shared memory - both report against it, so the assistant
+  // knows about a declined payment nobody mentioned.
+  // Read from storage rather than held in state.
+  //
+  // This was useState, initialised at mount from whichever merchant loaded
+  // first. The first switch then lost the chat and every switch afterwards
+  // worked - because setSessionId had not applied when the message went out,
+  // and after that the two agreed.
+  //
+  // Third bug today from two places holding one value. Storage is the source
+  // now: it cannot be stale because there is nothing to be stale against, and
+  // the first switch behaves like every other one because nothing has to
+  // catch up.
+  const sessionId = sessionFor(connection);
   const merchant = themeFor(connection);
     // Unread assistant messages while the chat is shut. Drives the badge, so a
   // shopper who closed the chat still knows something arrived for them.
@@ -383,7 +393,15 @@ export default function App() {
     setResult(null);
     setOpenOrder(null);
     setOpenProduct(null);
-    setChatTurns([]);
+    // Not cleared here on purpose.
+    //
+    // Clearing the turns and changing the session id are separate updates, and the
+    // widget's restore could land between them - so the clear wiped a conversation
+    // that had just been reloaded. It worked or it did not depending on which won.
+    //
+    // Changing the session id is what reloads the chat, and it fetches that
+    // merchant's own conversation. Removing the clear removes the race rather than
+    // trying to order it.
     setChatOpen(false);
     setOpenedForDeadSearch(false);
     setView("shop");
@@ -397,8 +415,9 @@ export default function App() {
     // disagreed: turns were written under an id no longer in storage, and the next
     // reload generated a third id with nothing attached. The conversation was not
     // lost, it was orphaned.
-    // That merchant's own conversation, resumed rather than replaced.
-    setSessionId(sessionFor(id));
+    // Nothing to set. sessionId is derived from the connection, so changing the
+    // connection changes it - which is the point of having one source.
+    sessionFor(id);
     setUnread(0);
 
     try {

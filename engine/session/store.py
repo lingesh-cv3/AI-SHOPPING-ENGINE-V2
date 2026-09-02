@@ -26,13 +26,25 @@ import uuid
 
 from sqlalchemy import select
 
+from engine.db.models import Case
+
 from ..db.models import Case, SessionTurn
 from ..db.session import session_scope
 
 #: How many turns of conversation to carry. Six is roughly three exchanges, which
 #: covers "no, cheaper than that" style follow-ups without spending the token
 #: budget on a whole visit's history.
-HISTORY_TURNS = 6
+#: How many turns the model sees.
+#:
+#: Was 6, which meant an add and a remove early in a visit fell
+#: outside it - so "what was previously in my cart" answered sometimes
+#: and not others, which reads as unreliable rather than as a limit.
+#:
+#: Widened, but not far, and this is a trade rather than a fix. Every
+#: turn here is tokens against a per-minute budget that is already the
+#: main thing slowing development down: remember more, throttle sooner.
+#: Fourteen covers a browse-and-decide without doubling the cost.
+HISTORY_TURNS = 14
 
 #: How many recent friction events to surface. Two is enough for "my payment failed
 #: and then my coupon didn't work"; more starts to read as a complaint log.
@@ -188,3 +200,28 @@ async def turns(
         }
         for t in rows
     ]
+
+async def latest_order(session_id: str, connection_id: str) -> str | None:
+    """The most recent order this visit produced, or None.
+
+    There is no shopper identity, so "my last order" cannot mean their history - we
+    have no way to know which orders are theirs. What we do know is which orders
+    this session created, and for somebody who just bought something that is the
+    order they mean.
+
+    Honest about its limits: a shopper returning tomorrow gets None, and the
+    assistant then asks for the number rather than pretending to have looked.
+    """
+    async with session_scope() as db:
+        result = await db.execute(
+            select(Case.order_id)
+            .where(
+                Case.session_id == session_id,
+                Case.connection_id == connection_id,
+                Case.order_id.is_not(None),
+            )
+            .order_by(Case.created_at.desc())
+            .limit(1)
+        )
+        row = result.first()
+        return row[0] if row else None

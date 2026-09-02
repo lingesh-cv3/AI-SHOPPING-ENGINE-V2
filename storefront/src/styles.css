@@ -2050,3 +2050,175 @@ select.card-picker {
   background: var(--surface);
   color: var(--ink);
 }
+
+
+/* ---- the opening ---- */
+/* One sentence, one question, and the answers. The question is the structure, so
+ * there is no label above the headline - that was furniture applied to every
+ * heading rather than a choice made for this one. */
+
+.landing {
+  background: var(--hero);
+  color: var(--hero-ink);
+  padding: 64px 28px 48px;
+  transition: background 0.4s var(--ease);
+}
+
+.landing-inner {
+  max-width: var(--measure);
+  margin: 0 auto;
+}
+
+.landing-head {
+  font-size: var(--step-5);
+  line-height: 1.03;
+  max-width: 20ch;
+  margin: 0 0 16px;
+  color: var(--hero-ink);
+}
+
+.landing-sub {
+  font-family: var(--body);
+  font-size: var(--step-1);
+  line-height: 1.5;
+  max-width: 48ch;
+  margin: 0;
+  color: var(--hero-ink-2);
+}
+
+/* The question sits below the standfirst with real space around it, because it is
+ * the thing being asked rather than a caption. */
+.asked {
+  margin-top: 44px;
+}
+
+.asked-question {
+  font-family: var(--body);
+  font-size: var(--step-2);
+  font-weight: 600;
+  letter-spacing: 0;
+  margin: 0 0 16px;
+  color: var(--hero-ink);
+}
+
+.answers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+  max-width: 900px;
+}
+
+/* An answer, not a chip. Big enough to carry a line about what it is for, because
+ * a shopper choosing between road and trail may not know which they are. */
+.answer {
+  text-align: left;
+  border: 1px solid color-mix(in srgb, var(--hero-ink) 24%, transparent);
+  background: transparent;
+  color: var(--hero-ink);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+
+.answer:hover {
+  border-color: var(--hero-ink);
+  background: color-mix(in srgb, var(--hero-ink) 7%, transparent);
+}
+
+.answer.chosen {
+  background: var(--hero-ink);
+  border-color: var(--hero-ink);
+  color: var(--hero);
+}
+
+.answer-label {
+  font-family: var(--display);
+  font-weight: var(--display-weight);
+  font-size: var(--step-1);
+  letter-spacing: var(--display-tracking);
+}
+
+.answer-note {
+  font-size: 12.5px;
+  line-height: 1.4;
+  opacity: 0.72;
+}
+
+/* The practical facts, below the question rather than beside the headline. They
+ * answer the second thing a shopper wants to know, so they should not compete with
+ * the first. */
+.landing .facts {
+  display: flex;
+  gap: 44px;
+  flex-wrap: wrap;
+  margin: 44px 0 0;
+  padding-top: 22px;
+  border-top: 1px solid color-mix(in srgb, var(--hero-ink) 16%, transparent);
+}
+
+.landing .facts dt {
+  font-family: var(--body);
+  font-size: 12px;
+  color: var(--hero-ink-2);
+  margin-bottom: 3px;
+}
+
+.landing .facts dd {
+  font-size: 15px;
+  color: var(--hero-ink);
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  .landing {
+    padding: 36px 20px 30px;
+  }
+  .landing-head {
+    font-size: var(--step-3);
+  }
+  .asked {
+    margin-top: 30px;
+  }
+  .landing .facts {
+    gap: 24px;
+    margin-top: 30px;
+  }
+}
+
+
+/* Removing a line. Quiet until hovered - it is a destructive control sitting next
+ * to a price, and a red cross beside every item makes a basket look like a warning
+ * rather than a purchase. */
+
+.line-right {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.line-remove {
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--ink-3);
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.13s var(--ease), color 0.13s var(--ease);
+}
+
+.line-remove:hover {
+  opacity: 1;
+  color: var(--friction);
+}
+
+.line-remove:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

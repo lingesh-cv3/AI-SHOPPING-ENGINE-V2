@@ -158,6 +158,14 @@ class ChatReply(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
 
+    #: Handle this without calling the model.
+    #:
+    #: Set when the answer does not depend on judgement and the shopper
+    #: cannot be kept waiting - a declined payment, where the recovery
+    #: options come from the capability table and the model would only
+    #: have phrased them.
+    skip_model: bool = False
+
 
 @router.post("", response_model=ChatReply)
 async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
@@ -202,6 +210,7 @@ async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
             friction_type = None
 
     reasoning = await engine.reasoning.reason(
+        skip_model=req.skip_model,
         friction=friction_type,
         message=req.message,
         query=req.query,
@@ -214,6 +223,22 @@ async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
     # Merge what we already know into the proposals. Never overwrite: if the model
     # did supply a value, it saw context we did not pass here and should be trusted
     # over our guess.
+    # An order question with no number means this visit's most recent order.
+    #
+    # "What was my last order" answered "I can't find that order" for somebody who
+    # had just bought something, because the model correctly left the field blank -
+    # they had not given a number - and nothing filled it in. There is no shopper
+    # identity to search a history against, but the session knows what it created.
+    for candidate in reasoning.actions:
+        if str(candidate.action_type) == "CHECK_ORDER_STATUS" and not candidate.parameters.get(
+            "order_id"
+        ):
+            recent = await session_store.latest_order(
+                req.session_id, req.connection_id
+            )
+            if recent:
+                candidate.parameters["order_id"] = recent
+
     if req.known:
         for candidate in reasoning.actions:
             for field, value in req.known.items():
@@ -860,6 +885,13 @@ async def pay(req: PayRequest, key=Depends(any_key)) -> ChatReply:
         #
         # This also means Kettle offers a recovery and Northfield escalates, from
         # the platform capabilities rather than from a branch in this handler.
+        # skip_model, because a shopper whose card was just refused is the last
+        # person who should be left waiting.
+        #
+        # The recovery still runs: the engine works out that Kettle can retry a
+        # payment and Northfield cannot from the capability table, not from the
+        # model. The model would only have phrased it, and a fixed sentence now
+        # beats a nicely worded one in thirty seconds - or never, while throttled.
         recovered = await chat(
             ChatRequest(
                 connection_id=req.connection_id,
@@ -868,6 +900,7 @@ async def pay(req: PayRequest, key=Depends(any_key)) -> ChatReply:
                 friction=FrictionType.PAYMENT_DECLINED,
                 cart_id=req.cart_id,
                 order_id=order_id,
+                skip_model=True,
             ),
             key=key,
         )

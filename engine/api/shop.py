@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import Depends, APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from shared.models import CapabilityUnsupported, CommerceError, Money
 
@@ -111,6 +111,12 @@ def _cart(c) -> dict:
             for ln in c.lines
         ],
     }
+
+
+class ChangeLine(BaseModel):
+    """How many of a line the shopper wants. Zero means take it out."""
+
+    quantity: int = Field(ge=0, le=99)
 
 
 class AddLine(BaseModel):
@@ -275,6 +281,32 @@ async def add_line(
             variant_id=body.variant_id,
             quantity=body.quantity,
         )
+    except CommerceError as exc:
+        raise _handle(exc) from exc
+    return _cart(cart)
+
+
+@router.patch("/{connection_id}/cart/{cart_id}/lines/{line_id}")
+async def change_line(
+    connection_id: str,
+    cart_id: str,
+    line_id: str,
+    body: ChangeLine,
+    _=Depends(shopper_scoped()),
+) -> dict:
+    """Change how many of something is in the cart. Zero removes it.
+
+    There was no way to do this without the model, so a shopper could add things
+    and not remove them - and when the provider was busy, a cart was a one-way
+    door.
+
+    Zero rather than a separate delete, because that is what the commerce
+    interface offers and inventing a second verb for the same operation would mean
+    two code paths where one will do.
+    """
+    adapter = _adapter(connection_id)
+    try:
+        cart = await adapter.update_cart(cart_id, line_id, quantity=body.quantity)
     except CommerceError as exc:
         raise _handle(exc) from exc
     return _cart(cart)
