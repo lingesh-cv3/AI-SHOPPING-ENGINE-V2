@@ -45,6 +45,7 @@ export function CartPanel({
   couponHint,
   onPromo,
   onCheckout,
+  onRemoveLine,
 }: {
   cart: Cart | null;
   result: CheckoutResult | null;
@@ -53,6 +54,9 @@ export function CartPanel({
   couponHint?: string;
   onPromo: (code: string) => void;
   onCheckout: (cardLast4: string) => void;
+  /** Take a line out. Undefined hides the control, so the panel
+   *  still works anywhere it is rendered without one. */
+  onRemoveLine?: (lineId: string) => void;
 }) {
   const [code, setCode] = useState("");
   const [card, setCard] = useState("1111");
@@ -84,7 +88,19 @@ export function CartPanel({
                     {line.quantity} &times; {line.unit_price.display}
                   </div>
                 </div>
-                <span className="num">{line.line_total.display}</span>
+                <span className="line-right">
+                  <span className="num">{line.line_total.display}</span>
+                  {onRemoveLine && (
+                    <button
+                      className="line-remove"
+                      aria-label={`Remove ${line.title}`}
+                      title="Remove"
+                      onClick={() => onRemoveLine(line.line_id)}
+                    >
+                      &times;
+                    </button>
+                  )}
+                </span>
               </div>
             ))}
 

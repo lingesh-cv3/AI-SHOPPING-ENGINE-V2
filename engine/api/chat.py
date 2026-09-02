@@ -66,6 +66,15 @@ class ChatRequest(BaseModel):
     #: structured field - which is what open models reliably do - then leaves an
     #: approval nobody can action. Supplying it directly cannot fail.
     known: dict[str, str] = Field(default_factory=dict)
+
+    #: Handle this without calling the model.
+    #:
+    #: Set when the answer does not need judgement and the shopper cannot be
+    #: kept waiting. A declined payment is the case: the recovery options come
+    #: from the capability table, so the model would only have phrased them -
+    #: and a fixed sentence now beats a nicer one in thirty seconds, or never,
+    #: while the provider is busy.
+    skip_model: bool = False
 class ChatReply(BaseModel):
     """One assistant turn.
 
@@ -158,13 +167,11 @@ class ChatReply(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
 
-    #: Handle this without calling the model.
     #:
     #: Set when the answer does not depend on judgement and the shopper
     #: cannot be kept waiting - a declined payment, where the recovery
     #: options come from the capability table and the model would only
     #: have phrased them.
-    skip_model: bool = False
 
 
 @router.post("", response_model=ChatReply)

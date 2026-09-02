@@ -468,6 +468,13 @@ export default function App() {
         onPromo={applyPromo}
         onCheckout={checkout}
         couponHint={merchant.couponHint}
+        onRemoveLine={async (lineId) => {
+          if (!cart) return;
+          // No model involved. Emptying your own basket should not depend on a
+          // provider being available, which until now it did - the only way out
+          // of a cart was to ask the assistant.
+          setCart(await api.changeLine(cart.cart_id, lineId, 0));
+        }}
       />
     </div>
   );
