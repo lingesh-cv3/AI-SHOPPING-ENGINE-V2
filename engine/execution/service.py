@@ -822,6 +822,10 @@ class ExecutionService:
                         "lines": [
                             {
                                 "title": line.title,
+                                # Two lines of the same product with different
+                                # variants are correct and were indistinguishable,
+                                # which is what made a right answer look wrong.
+                                "variant": line.variant_id,
                                 "quantity": line.quantity,
                                 "total": str(line.line_total),
                             }

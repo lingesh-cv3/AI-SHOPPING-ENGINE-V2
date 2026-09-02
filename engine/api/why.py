@@ -95,6 +95,11 @@ def explain(
     # says what it declined to do is making a claim a shopper can check against
     # its own behaviour.
     declined: list[str] = []
+    # Deduplicated. The model proposes several actions and more than one can be
+    # rejected for the same reason, so the same sentence came out twice - and
+    # repeated text in a transparency feature reads as though nobody checked it.
+    seen_declined: set[str] = set()
+
     for item in rejected or []:
         reason_code = str(item.get("reason") or "")
         if reason_code in INTERNAL_REASONS:
@@ -102,6 +107,15 @@ def explain(
 
         action = ACTION_IN_WORDS.get(str(item.get("action_type") or ""))
         reason = SHOPPER_REASONS.get(reason_code)
+
+        line = f"{action}, because {reason}" if action and reason else action
+        if line and line not in seen_declined:
+            seen_declined.add(line)
+            declined.append(line)
+            continue
+
+        if line:
+            continue
 
         if action and reason:
             declined.append(f"{action}, because {reason}")

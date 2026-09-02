@@ -14,6 +14,29 @@ import type { Cart, CheckoutResult } from "./api";
  * is what it is: the order exists, the money did not move, and the sale is still
  * recoverable.
  */
+/** The readable part of a variant id.
+ *
+ *  Ids are the platform's own and they are not built to be read: Kettle's look
+ *  like "KB-ETH-01::250g whole bean" and Northfield's like "P1001-8". The bit
+ *  after the separator is the useful half.
+ *
+ *  This exists because the cart showed two lines both labelled "Trailblazer
+ *  Running Shoe" - correct, since the variants differed, and indistinguishable,
+ *  which is what made it look like a bug.
+ */
+function variantLabel(variantId: string | null | undefined): string | null {
+  if (!variantId) return null;
+
+  if (variantId.includes("::")) {
+    return variantId.split("::").pop() || null;
+  }
+
+  // Northfield appends the size after a dash: P1001-8. Only the trailing segment,
+  // and only when it looks like a size rather than part of the product code.
+  const match = variantId.match(/-([\dA-Za-z.]{1,6})$/);
+  return match ? match[1] : null;
+}
+
 export function CartPanel({
   cart,
   result,
@@ -52,6 +75,12 @@ export function CartPanel({
                 <div>
                   {line.title}
                   <div className="line-qty">
+                    {variantLabel(line.variant_id) && (
+                      <>
+                        {variantLabel(line.variant_id)}
+                        {" \u00b7 "}
+                      </>
+                    )}
                     {line.quantity} &times; {line.unit_price.display}
                   </div>
                 </div>

@@ -134,3 +134,11 @@ class HandoverDone(BaseModel):
     """
 
     handled_by: str
+
+    #: What the operator did, in their words, sent to the shopper verbatim.
+    #:
+    #: Optional, though the interface asks for it. Making it mandatory would
+    #: mean somebody in a hurry typing a full stop, which is worse than an
+    #: honest blank - a handover closed without a note still resolves, and the
+    #: shopper simply hears nothing.
+    note: str | None = None
