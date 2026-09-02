@@ -120,6 +120,25 @@ class Case(Base):
     )
 
 
+    #: When somebody at the shop dealt with a handover, and who.
+    #:
+    #: Null means still waiting. Escalations used to have nowhere to record this,
+    #: which is why twelve of them sat unseen: there was no difference between a
+    #: handover nobody had touched and one that was finished.
+    handled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    handled_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    #: What the operator did about it, in their words.
+    #:
+    #: Sent to the shopper and kept in the record. The engine cannot know whether
+    #: somebody phoned them or sent a payment link, so it asks rather than
+    #: inventing a message - and a handover closed with no explanation leaves the
+    #: shopper exactly where they were when we promised them help.
+    handled_note: Mapped[str | None] = mapped_column(String(400), nullable=True)
+
+
 class Approval(Base):
     """A case waiting on a person, and what they decided.
 

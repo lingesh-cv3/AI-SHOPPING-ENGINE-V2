@@ -760,3 +760,85 @@ async def ops_stats(connection_ids: list[str]) -> dict:
         "by_merchant": by_merchant,
         "today": settled_today or 0,
     }
+
+
+async def handovers_across(
+    connection_ids: list[str], *, limit: int = 50
+) -> list[dict]:
+    """Cases handed to a person, that nobody has picked up.
+
+    Escalations never reached the queue because the queue lists approvals, and an
+    escalation is not waiting for a decision - the decision was that a person should
+    handle it. So it auto-cleared, executed, and appeared nowhere, while the shopper
+    was told somebody would help.
+
+    A handover needs no approve button. It needs somebody to see it, do whatever it
+    needs, and mark it done. The distinction matters: an approval asks "may I?", and
+    a handover says "your turn".
+    """
+    if not connection_ids:
+        return []
+
+    now = datetime.now(UTC)
+
+    async with session_scope() as db:
+        result = await db.execute(
+            select(Case)
+            .where(
+                Case.connection_id.in_(connection_ids),
+                Case.state == str(CaseState.ESCALATED),
+                # Not yet dealt with. handled_at is set when an operator closes it.
+                Case.handled_at.is_(None),
+            )
+            .order_by(Case.created_at.asc())
+            .limit(limit)
+        )
+
+        rows = []
+        for case in result.scalars():
+            created = _aware(case.created_at)
+            rows.append(
+                {
+                    "case_id": case.case_id,
+                    "connection_id": case.connection_id,
+                    "friction_type": case.friction_type,
+                    "diagnosis": case.diagnosis,
+                    "evidence": case.evidence,
+                    "shopper_reply": case.shopper_reply,
+                    "rejected": case.rejected,
+                    "order_id": case.order_id,
+                    "query": case.query,
+                    "used_model": case.used_model,
+                    "created_at": created.isoformat(),
+                    "waiting_minutes": int((now - created).total_seconds() / 60),
+                }
+            )
+        return rows
+
+
+async def mark_handled(
+    connection_id: str, case_id: str, by: str, note: str | None = None
+) -> dict | None:
+    """Close a handover. Returns whether anything changed.
+
+    Scoped by connection like everything else here, so one merchant's operator
+    cannot close another's work.
+    """
+    async with session_scope() as db:
+        case = await db.get(Case, case_id)
+        if case is None or case.connection_id != connection_id:
+            return False
+        if case.handled_at is not None:
+            return None
+        case.handled_at = datetime.now(UTC)
+        case.handled_by = by
+        case.handled_note = note
+
+        # Returned so the caller can tell the shopper. The session id is the whole
+        # reason this is worth returning rather than a bare True: without it, an
+        # operator resolves something and the shopper never learns.
+        return {
+            "case_id": case.case_id,
+            "session_id": case.session_id,
+            "connection_id": case.connection_id,
+        }

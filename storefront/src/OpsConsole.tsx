@@ -5,6 +5,7 @@ import {
   ops_api,
   type Decision,
   type OpsDecision,
+  type OpsHandover,
   type OpsQueueItem,
   type OpsStats,
 } from "./api";
@@ -30,10 +31,16 @@ import {
  */
 export function OpsConsole() {
   const [queue, setQueue] = useState<OpsQueueItem[]>([]);
+  const [handovers, setHandovers] = useState<OpsHandover[]>([]);
   const [history, setHistory] = useState<OpsDecision[]>([]);
   const [stats, setStats] = useState<OpsStats | null>(null);
   const [results, setResults] = useState<Record<string, Decision>>({});
   const [rejecting, setRejecting] = useState<string | null>(null);
+  // The handover being closed, and what the operator is writing about it.
+  // Kept separate from the rejection note: one is a reason for saying no,
+  // the other is a message to a customer, and they read very differently.
+  const [closing, setClosing] = useState<string | null>(null);
+  const [closingNote, setClosingNote] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -43,14 +50,16 @@ export function OpsConsole() {
 
   const refresh = useCallback(async () => {
     try {
-      const [q, h, s] = await Promise.all([
+      const [q, h, s, hand] = await Promise.all([
         ops_api.queue(),
         ops_api.history(),
         ops_api.stats(),
+        ops_api.handovers(),
       ]);
       setQueue(q.approvals);
       setHistory(h.decisions);
       setStats(s);
+      setHandovers(hand.handovers);
       setError(null);
     } catch (e) {
       // A refused key is not an outage. Conflating them would have an operator
@@ -71,6 +80,31 @@ export function OpsConsole() {
     const id = window.setInterval(refresh, 20000);
     return () => window.clearInterval(id);
   }, [refresh, signedIn]);
+
+
+  /** Mark a handover dealt with.
+   *
+   *  No approve or reject here, because there is nothing to decide. The engine has
+   *  already said a person should handle this; the only question is whether one
+   *  has. So the button says done.
+   */
+  async function closeHandover(item: OpsHandover, note: string) {
+    setBusy(item.case_id);
+    try {
+      await ops_api.closeHandover(
+        item.connection_id,
+        item.case_id,
+        note.trim() || undefined,
+      );
+      setClosing(null);
+      setClosingNote("");
+      await refresh();
+    } catch {
+      setError("Could not close that one.");
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function decide(item: OpsQueueItem, approved: boolean, why?: string) {
     setBusy(item.approval_id);
@@ -122,6 +156,128 @@ export function OpsConsole() {
             value={Object.keys(stats.by_merchant).length || 0}
           />
         </div>
+      )}
+
+      {handovers.length > 0 && (
+        <section className="panel handovers">
+          <div className="panel-head">
+            <span className="eyebrow">Needs someone to contact the shopper</span>
+            <span className="eyebrow">
+              {handovers.length} {handovers.length === 1 ? "person" : "people"} were
+              promised help and have not had it
+            </span>
+          </div>
+          <div className="panel-body">
+            {handovers.map((item) => (
+              <article key={item.case_id} className="handcard">
+                <div className="qhead">
+                  <div>
+                    <span className="eyebrow">{item.merchant_name}</span>
+                    <h3 className="qaction">
+                      {item.friction_type
+                        ? item.friction_type.replace(/_/g, " ").toLowerCase()
+                        : "needs a person"}
+                    </h3>
+                  </div>
+                  <span
+                    className={
+                      item.waiting_minutes > 30 ? "waitbadge late" : "waitbadge"
+                    }
+                  >
+                    {item.waiting_minutes}m
+                  </span>
+                </div>
+
+                {item.diagnosis && <p className="qdiag">{item.diagnosis}</p>}
+
+                {item.evidence?.length > 0 && (
+                  <ul className="evidence">
+                    {item.evidence.map((e) => (
+                      <li key={e}>{e}</li>
+                    ))}
+                  </ul>
+                )}
+
+                {item.shopper_reply && (
+                  <>
+                    <div className="gate-label">The shopper was told</div>
+                    <p className="said">{item.shopper_reply}</p>
+                  </>
+                )}
+
+                {item.rejected?.length > 0 && (
+                  <>
+                    <div className="gate-label" style={{ marginTop: 10 }}>
+                      The engine could not do this itself
+                    </div>
+                    {item.rejected.map((r) => (
+                      <div key={r.action_type} className="gate-note">
+                        <strong>
+                          {r.action_type.replace(/_/g, " ").toLowerCase()}
+                        </strong>{" "}
+                        &mdash; {r.detail}
+                      </div>
+                    ))}
+                  </>
+                )}
+
+                {item.order_id && (
+                  <div className="rule">order {item.order_id}</div>
+                )}
+
+                {closing === item.case_id ? (
+                  <div className="closebox">
+                    <div className="gate-label" style={{ marginBottom: 6 }}>
+                      What should the shopper be told?
+                    </div>
+                    <input
+                      value={closingNote}
+                      onChange={(e) => setClosingNote(e.target.value)}
+                      placeholder="We have sent you a payment link by email"
+                      aria-label="Message to the shopper"
+                      autoFocus
+                    />
+                    <div className="qbuttons" style={{ border: 0, paddingTop: 10 }}>
+                      <button
+                        className="add"
+                        disabled={busy === item.case_id}
+                        onClick={() => closeHandover(item, closingNote)}
+                      >
+                        {busy === item.case_id ? "Sending..." : "Send and close"}
+                      </button>
+                      <button
+                        className="reject"
+                        onClick={() => {
+                          setClosing(null);
+                          setClosingNote("");
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    <p className="note">
+                      This goes straight to the shopper, so write it to them rather
+                      than about them. Leave it blank to close without telling them
+                      anything.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="qbuttons">
+                    <button
+                      className="add"
+                      onClick={() => {
+                        setClosing(item.case_id);
+                        setClosingNote("");
+                      }}
+                    >
+                      Mark as handled
+                    </button>
+                  </div>
+                )}
+              </article>
+            ))}
+          </div>
+        </section>
       )}
 
       <section className="panel">

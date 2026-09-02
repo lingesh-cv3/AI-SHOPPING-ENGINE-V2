@@ -52,7 +52,22 @@ class ActionType(StrEnum):
     #: reach the endpoint that takes payment. That split is what lets
     #: checkout happen in the conversation without the AI ever being able to
     #: spend anybody's money.
+    #: Empty the cart.
+    #:
+    #: Added because a shopper said "remove all" and the model, having only
+    #: REMOVE_CART_LINE available, said it had cleared the cart and removed
+    #: one line. Reversible - anything removed can go back - and charges
+    #: nothing.
+    CLEAR_CART = "CLEAR_CART"
+
     PREPARE_CHECKOUT = "PREPARE_CHECKOUT"
+
+    #: Look up an order the shopper names, and report its status.
+    #:
+    #: Reads and reports. What it may say is deliberately thin - status and
+    #: total, nothing else - because an order id is guessable and there is
+    #: no shopper identity to check it against yet.
+    CHECK_ORDER_STATUS = "CHECK_ORDER_STATUS"
     REMOVE_CART_LINE = "REMOVE_CART_LINE"
     NOTIFY_BACK_IN_STOCK = "NOTIFY_BACK_IN_STOCK"
 
@@ -99,6 +114,8 @@ ACTION_RISK_PROPERTIES: dict[ActionType, RiskProperties] = {
     ActionType.ADD_TO_CART: RiskProperties(financial=False, reversible=True),
     ActionType.UPDATE_CART_QUANTITY: RiskProperties(financial=False, reversible=True),
     ActionType.PREPARE_CHECKOUT: RiskProperties(financial=False, reversible=True),
+    ActionType.CLEAR_CART: RiskProperties(financial=False, reversible=True),
+    ActionType.CHECK_ORDER_STATUS: RiskProperties(financial=False, reversible=True),
     ActionType.REMOVE_CART_LINE: RiskProperties(financial=False, reversible=True),
     ActionType.NOTIFY_BACK_IN_STOCK: RiskProperties(
         financial=False, reversible=False, touches_customer_data=True

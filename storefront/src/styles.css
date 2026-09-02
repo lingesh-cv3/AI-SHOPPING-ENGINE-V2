@@ -1913,3 +1913,140 @@ select.card-picker {
   padding: 9px;
   font-size: 10.5px;
 }
+
+
+/* ---- why this ---- */
+/* Quiet by default. A shopper happy with the answer should not have to read past
+ * the reasoning to get to it, and one who is suspicious should reach it in a tap. */
+
+.whyblock {
+  margin-top: 8px;
+}
+
+.whytoggle {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.whytoggle:hover {
+  color: var(--ink);
+}
+
+.whybody {
+  margin-top: 8px;
+  padding: 10px 11px;
+  background: var(--paper);
+  border-left: 2px solid var(--line);
+  animation: rise 0.18s var(--ease);
+}
+
+.whyline {
+  font-size: 12.5px;
+  margin: 0 0 6px;
+  line-height: 1.45;
+}
+
+.whyevidence {
+  margin: 0 0 8px;
+  padding-left: 16px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  line-height: 1.5;
+}
+
+/* The part worth reading. Set apart because "what I chose not to do" is the claim
+ * a shopper can check against our behaviour, and the one a seller's assistant
+ * cannot make. */
+.whydeclined {
+  border-top: 1px dashed var(--line);
+  padding-top: 7px;
+}
+
+.whylabel {
+  display: block;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 3px;
+}
+
+.whydeclinedline {
+  font-size: 12px;
+  color: var(--ink-2);
+  padding: 1px 0;
+}
+
+
+/* ---- handovers ---- */
+/* Above the approvals and marked more urgently, because the difference matters. An
+ * approval is somebody asking permission. A handover is somebody who has already
+ * been told a person would help them, with the clock running since we said so. */
+
+.handovers {
+  border-color: var(--friction);
+  margin-bottom: 20px;
+}
+
+.handcard {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--friction);
+  border-radius: var(--radius-card);
+  padding: 18px;
+  margin-bottom: 14px;
+  background: var(--surface);
+}
+
+.handcard:last-child {
+  margin-bottom: 0;
+}
+
+/* The number that makes this uncomfortable enough to act on. */
+.waitbadge {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 9px;
+  border-radius: 2px;
+  background: var(--paper);
+  color: var(--ink-2);
+}
+
+.waitbadge.late {
+  background: var(--friction-soft);
+  color: var(--friction);
+}
+
+
+/* The box an operator types a message to a shopper into. Same shape as the
+ * rejection note, because both are somebody writing rather than clicking - but
+ * this one reaches a customer, and the copy above it says so. */
+
+.closebox {
+  margin-top: 16px;
+  padding-top: 15px;
+  border-top: 1px solid var(--line);
+}
+
+.closebox input {
+  width: 100%;
+  border: 1px solid var(--line);
+  padding: 10px 12px;
+  font-family: var(--body);
+  font-size: 13.5px;
+  border-radius: 2px;
+  background: var(--surface);
+  color: var(--ink);
+}

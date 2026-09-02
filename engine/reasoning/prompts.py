@@ -36,7 +36,9 @@ PROPOSABLE: tuple[ActionType, ...] = (
     ActionType.SUGGEST_ALTERNATIVE,
     ActionType.ADD_TO_CART,
     ActionType.UPDATE_CART_QUANTITY,
+    ActionType.CLEAR_CART,
     ActionType.PREPARE_CHECKOUT,
+    ActionType.CHECK_ORDER_STATUS,
     ActionType.REMOVE_CART_LINE,
     ActionType.NOTIFY_BACK_IN_STOCK,
     ActionType.APPLY_PROMOTION,
@@ -151,6 +153,16 @@ def propose_tool() -> dict[str, Any]:
                                         "REMOVE_CART_LINE."
                                     ),
                                 },
+                                "order_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "For CHECK_ORDER_STATUS: the "
+                                        "order number the shopper "
+                                        "gave you, exactly as they "
+                                        "wrote it. Never one you "
+                                        "inferred or remembered."
+                                    ),
+                                },
                                 "code": {
                                     "type": "string",
                                     "description": (
@@ -215,11 +227,34 @@ Rules that matter:
   there is no checkout page, and nobody says "prepare your checkout". Do not
   name a card either. The shopper has not chosen one yet, and the ones in
   your context are the options rather than their decision.
+- Never say you will look something up and report back. You write before
+  the action runs, so you cannot know whether it will succeed - and the
+  answer appears in the same message as your promise, which reads as a
+  system talking to itself. One short line and stop: "Let me check that."
+- Propose CHECK_ORDER_STATUS when the shopper asks about an order and gives
+  you a number, and put that number in the order_id field exactly as they
+  wrote it. If they ask about an order without naming one, ask for the
+  number rather than guessing - there is no way to tell whose order is
+  whose, and answering about the wrong one is worse than asking.
 - Propose PREPARE_CHECKOUT only when the shopper says they are ready to pay,
   or asks how to. It shows them their total and their payment options and
   charges nothing. Never offer it to hurry somebody along: a shopper who is
   still choosing does not want a payment form pushed at them, and that is
   exactly the behaviour that makes people distrust these assistants.
+- Never name a card number. The cards in your context are the options a
+  shopper can choose from, not a choice they have made, and telling them
+  which one they are about to use is putting words in their mouth.
+- Answer the message in front of you. Anything listed as earlier in the
+  visit is background: it tells you what the shopper has been through, and
+  it is not what they just said. Somebody who types "hi" after a failed
+  payment is saying hello - offering to retry their card is answering a
+  question they did not ask, and it reads as though nothing else has
+  registered. If they want to come back to it they will say so.
+- CLEAR_CART empties the whole cart; REMOVE_CART_LINE takes out one thing.
+  "Remove all", "clear my cart" and "start again" mean the first. Never say
+  you have cleared a cart when you proposed removing one line - a shopper
+  told their cart is empty who then pays for four items has been misled, and
+  that is worse than any failure.
 - Say less rather than more. Two sentences to the shopper is plenty.
 - Never mention action names, approval, risk, policies, or any internal system.
   The shopper is buying running gear, not reading an audit log.

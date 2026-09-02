@@ -52,6 +52,10 @@ export function ChatWidget({
   // The card a shopper has selected but not yet confirmed. Every other tap
   // in this widget is reversible; this one is not, so it asks twice.
   const [confirming, setConfirming] = useState<string | null>(null);
+  // Which message has its reasoning open. One at a time: a shopper checking
+  // why is checking one thing, and leaving several expanded turns the
+  // conversation into a log.
+  const [openWhy, setOpenWhy] = useState<number | null>(null);
   const [memory, setMemory] = useState<{ turns: number; friction: number } | null>(
     null,
   );
@@ -117,8 +121,17 @@ export function ChatWidget({
     async function poll() {
       try {
         const { turns: stored } = await api.transcript(sessionId);
+        // Matched on a prefix as well as the whole string. The pay endpoint
+        // prepends a sentence to what the pipeline said, so the stored turn is a
+        // suffix of what is already on screen - identical in substance, different
+        // in bytes, and the naive check let it through as a new message.
         const fresh = stored
-          .filter((t) => t.speaker === "assistant" && !seen.has(t.text))
+          .filter(
+            (t) =>
+              t.speaker === "assistant" &&
+              !seen.has(t.text) &&
+              ![...seen].some((shown) => shown.endsWith(t.text)),
+          )
           .map((t) => ({ speaker: "assistant" as const, text: t.text }));
 
         if (fresh.length > 0) {
@@ -155,6 +168,13 @@ export function ChatWidget({
       });
       setMemory({ turns: r.remembered_turns, friction: r.remembered_friction });
       onReply?.(r);
+
+      // Put their message back. The model was never reached, so nothing was
+      // answered - and retyping a sentence into a limit that has not lifted is
+      // what makes this feel broken rather than busy.
+      if (r.rate_limited) {
+        setDraft(said);
+      }
       if (r.cart_changed) onCartChanged?.();
       onTurns([
         ...withShopper,
@@ -166,6 +186,7 @@ export function ChatWidget({
           usedModel: r.used_model,
           choices: r.choices,
           payment: r.payment,
+          why: r.why,
         },
       ]);
     } catch (e) {
@@ -201,6 +222,7 @@ export function ChatWidget({
           awaitingPerson: r.awaiting_person,
           choices: r.choices,
           payment: r.payment,
+          why: r.why,
         },
       ]);
     } catch (e) {
@@ -266,6 +288,9 @@ export function ChatWidget({
     setDraft("");
     return act(text);
   }
+
+  // Restoring the draft is handled inside act(), because only the reply knows
+  // whether the model was reached.
 
   if (!open) {
     return (
@@ -415,6 +440,49 @@ export function ChatWidget({
                 )}
               </div>
             )}
+
+
+            {turn.why &&
+              (turn.why.found.length > 0 || turn.why.declined.length > 0) && (
+                <div className="whyblock">
+                  <button
+                    className="whytoggle"
+                    aria-expanded={openWhy === i}
+                    onClick={() => setOpenWhy(openWhy === i ? null : i)}
+                  >
+                    {openWhy === i ? "Hide" : "Why this?"}
+                  </button>
+
+                  {openWhy === i && (
+                    <div className="whybody">
+                      {turn.why.found.map((line) => (
+                        <p key={line} className="whyline">
+                          {line}
+                        </p>
+                      ))}
+
+                      {turn.why.evidence.length > 0 && (
+                        <ul className="whyevidence">
+                          {turn.why.evidence.map((e) => (
+                            <li key={e}>{e}</li>
+                          ))}
+                        </ul>
+                      )}
+
+                      {turn.why.declined.length > 0 && (
+                        <div className="whydeclined">
+                          <span className="whylabel">I did not offer</span>
+                          {turn.why.declined.map((d) => (
+                            <div key={d} className="whydeclinedline">
+                              {d}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
             {turn.awaitingPerson && (
               <div className="chatwait">Waiting on someone at the shop</div>

@@ -115,6 +115,9 @@ PREFERENCE: dict[FrictionType, tuple[ActionType, ...]] = {
 ASSISTANCE_PREFERENCE: tuple[ActionType, ...] = (
     # Above add-to-cart on purpose. A shopper who has said they are ready to
     # pay should not be offered another product first.
+    # Above checkout: somebody asking where their order is has not come to
+    # buy something else.
+    ActionType.CHECK_ORDER_STATUS,
     ActionType.PREPARE_CHECKOUT,
     ActionType.ADD_TO_CART,
     ActionType.RECOMMEND_PRODUCTS,

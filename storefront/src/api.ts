@@ -133,6 +133,8 @@ export interface CheckoutResult {
 
 
 export interface ChatTurn {
+  /** How this was decided, offered behind a toggle rather than shown. */
+  why?: WhyBlock | null;
   /** A total and the ways to pay it. Rendered as buttons; tapping one is
    *  what charges. */
   payment?: PaymentOffer;
@@ -173,6 +175,16 @@ export interface PaymentOffer {
   order_id?: string | null;
 }
 
+export interface WhyBlock {
+  /** What the engine established about the situation. */
+  found: string[];
+  /** What it considered and ruled out, in shopper words. The half a competitor's
+   *  assistant cannot write, because theirs is genuinely upselling. */
+  declined: string[];
+  /** Facts read from the platform, which is what makes the rest credible. */
+  evidence: string[];
+}
+
 export interface ChatReply {
   reply: string;
   session_id: string;
@@ -190,6 +202,11 @@ export interface ChatReply {
   }[];
   awaiting_person: boolean;
   payment: PaymentOffer;
+  why: WhyBlock | null;
+  /** The model was unreachable. The reply is a fallback and the shopper's
+   *  message is worth keeping so they need not retype it. */
+  rate_limited: boolean;
+  retry_after_seconds: number | null;
   /** Options the shopper must pick between. Rendered as buttons - tapping is
    *  unambiguous where typing is not. */
   choices: {
@@ -775,6 +792,22 @@ export interface OpsDecision {
   currency: string | null;
 }
 
+export interface OpsHandover {
+  case_id: string;
+  connection_id: string;
+  merchant_name: string;
+  friction_type: string | null;
+  diagnosis: string | null;
+  evidence: string[];
+  shopper_reply: string | null;
+  rejected: { action_type: string; reason: string; detail: string }[];
+  order_id: string | null;
+  query: string | null;
+  used_model: boolean;
+  created_at: string;
+  waiting_minutes: number;
+}
+
 export interface OpsStats {
   waiting: number;
   oldest_wait_minutes: number;
@@ -848,6 +881,23 @@ async function opsCall<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const ops_api = {
   queue: () => opsCall<{ approvals: OpsQueueItem[] }>("/api/ops/queue"),
+
+  handovers: () =>
+    opsCall<{ handovers: OpsHandover[] }>("/api/ops/handovers"),
+
+  closeHandover: (connectionId: string, caseId: string, note?: string) =>
+    opsCall<{ changed: boolean }>(
+      `/api/ops/handovers/${connectionId}/${caseId}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          handled_by: "cv3-operator",
+          // Passed to the shopper verbatim, so the operator is writing to a
+          // customer rather than to a log.
+          note: note ?? null,
+        }),
+      },
+    ),
 
   history: () => opsCall<{ decisions: OpsDecision[] }>("/api/ops/history"),
 

@@ -552,6 +552,55 @@ class ExecutionService:
                     },
                 )
 
+            case ActionType.CLEAR_CART:
+                if not case.cart_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="There is no cart to clear.",
+                        error_code="CART_NOT_FOUND",
+                        final_state=str(CaseState.FAILED),
+                    )
+
+                cart = await adapter.get_cart(case.cart_id)
+
+                if cart.is_empty:
+                    return Executed(
+                        succeeded=True,
+                        action_type=str(action_type),
+                        summary="The cart was already empty.",
+                        shopper_summary="Your cart is already empty.",
+                        payload={"cart_id": case.cart_id, "item_count": 0},
+                    )
+
+                # Every line, one at a time. There is no clear-cart operation in the
+                # commerce interface and adding one would mean an adapter change per
+                # platform for something every platform can already do with the
+                # operation it has.
+                removed = [line.title for line in cart.lines]
+                for line in cart.lines:
+                    cart = await adapter.update_cart(
+                        case.cart_id, line.line_id, quantity=0
+                    )
+
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f"Cleared {len(removed)} line(s): " + ", ".join(removed[:3])
+                    ),
+                    shopper_summary=(
+                        f"Your cart is empty now - I took out "
+                        f"{len(removed)} item{'' if len(removed) == 1 else 's'}."
+                    ),
+                    payload={
+                        "cart_id": cart.cart_id,
+                        "item_count": cart.item_count,
+                        "grand_total": str(cart.grand_total),
+                        "cleared": removed,
+                    },
+                )
+
             case ActionType.REMOVE_CART_LINE | ActionType.UPDATE_CART_QUANTITY:
                 # The model names a product; the platform wants a line id. Reading
                 # the cart to translate is the adapter boundary working as intended -
@@ -618,7 +667,118 @@ class ExecutionService:
                         "removed": line.title if quantity == 0 else None,
                     },
                 )
+            case ActionType.CHECK_ORDER_STATUS:
+                # The number the shopper gave, or the one this session already
+                # knows about. Never a number the model produced on its own - it
+                # has no way to know whose order is whose, and a plausible-looking
+                # id is the easiest thing in the world for it to invent.
+                wanted = str(params.get("order_id") or case.order_id or "").strip()
+
+                if not wanted:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="No order number was given, so nothing was looked up.",
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+
+                try:
+                    order = await adapter.get_order(wanted)
+                except CommerceError:
+                    # The same answer whether the order does not exist or the
+                    # platform refused. Distinguishing them would let somebody
+                    # walk the numbering and learn which ids are real.
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=f"No order found for {wanted}.",
+                        error_code="ORDER_NOT_FOUND",
+                        final_state=str(CaseState.FAILED),
+                    )
+
+                paid = str(order.payment_status) == "CAPTURED"
+
+                # Deliberately thin. Status, payment state and total - no address,
+                # no card, no line items. An order id is guessable and there is no
+                # shopper identity to check it against, so what a stranger bought
+                # is not something to hand out on the strength of a number.
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f"{order.order_id}: {order.status}, payment "
+                        f"{order.payment_status}, {order.grand_total}."
+                    ),
+                    shopper_summary=(
+                        f"Order {order.order_id} is "
+                        + (
+                            f"paid in full - {order.amount_paid}. It will be on its "
+                            "way shortly."
+                            if paid
+                            else f"still awaiting payment. The total is "
+                            f"{order.grand_total} and nothing has been charged yet."
+                        )
+                    ),
+                    payload={
+                        "order_id": order.order_id,
+                        "status": str(order.status),
+                        "payment_status": str(order.payment_status),
+                        "grand_total": str(order.grand_total)
+                        if order.grand_total
+                        else None,
+                        "amount_paid": str(order.amount_paid)
+                        if order.amount_paid
+                        else None,
+                        "paid": paid,
+                    },
+                )
+
             case ActionType.PREPARE_CHECKOUT:
+                # Did the shopper actually ask to pay?
+                #
+                # Checked here rather than in the prompt, because three prompt rules
+                # did not stop the model offering a payment form in reply to "hi".
+                # Prompting is advice; this needs to be a fact.
+                #
+                # The list is short and literal on purpose. It is not trying to
+                # understand intent - the model does that, and it is what got this
+                # wrong. It asks a narrower question: did this person mention paying
+                # at all? Somebody who did will have used one of these words.
+                #
+                # Erring toward refusing is the right direction. Missing a checkout
+                # costs one turn. Offering one unasked is the pushy behaviour that
+                # makes shoppers distrust these assistants.
+                said = str(params.get("said") or case.query or "").lower()
+                asked_to_pay = any(
+                    word in said
+                    for word in (
+                        "pay",
+                        "paying",
+                        "payment",
+                        "checkout",
+                        "check out",
+                        "buy",
+                        "purchase",
+                        "order this",
+                        "place my order",
+                        "card",
+                        "total",
+                    )
+                )
+
+                if not asked_to_pay:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=(
+                            "Did not offer a checkout: nothing in what the shopper "
+                            "said was about paying."
+                        ),
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+
                 # Reads and reports. Charges nothing, which is why this is
                 # non-financial and why the AI is allowed to propose it at all.
                 if not case.cart_id:

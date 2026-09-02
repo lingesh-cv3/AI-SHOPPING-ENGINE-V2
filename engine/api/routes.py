@@ -35,6 +35,7 @@ from shared.models import (
 from .auth import any_key, belongs_to, merchant_scoped, operator
 from .deps import DEV_MERCHANT_NAME, MERCHANT_NAMES, engine
 from .schemas import (
+    HandoverDone,
     ActionInfo,
     ApprovalDecision,
     ConnectionSummary,
@@ -752,3 +753,62 @@ async def ops_overview(_=Depends(operator)) -> dict:
         for cid, count in stats["by_merchant"].items()
     }
     return stats
+
+
+@app.get(f"{API}/ops/handovers")
+async def ops_handovers(_=Depends(operator)) -> dict:
+    """Cases handed to a person that nobody has picked up.
+
+    Separate from the approval queue because they are different work. An approval
+    asks "may I?" and waits for an answer. A handover says "your turn" - the
+    decision is made, and somebody has to act.
+
+    Conflating them is what hid these: the queue listed approvals, escalations
+    created none, and twelve shoppers were told a person would help while nobody
+    knew. Oldest first, because each one is somebody waiting.
+    """
+    rows = await db.handovers_across(_operator_connections())
+    for row in rows:
+        row["merchant_name"] = MERCHANT_NAMES.get(
+            row["connection_id"], row["connection_id"]
+        )
+    return {"handovers": rows}
+
+
+@app.post(f"{API}/ops/handovers/{{connection_id}}/{{case_id}}")
+async def close_handover(
+    connection_id: str,
+    case_id: str,
+    body: HandoverDone,
+    _=Depends(operator),
+) -> dict:
+    """Mark a handover dealt with.
+
+    Records who and when rather than deleting the row, so "was this ever picked
+    up, and by whom" stays answerable. That question is the reason this exists.
+    """
+    closed = await db.mark_handled(
+        connection_id, case_id, body.handled_by, body.note
+    )
+
+    if closed is None:
+        # Already handled, or not this merchant's to handle. Same answer either
+        # way, so an operator cannot probe another merchant's case ids.
+        return {"case_id": case_id, "changed": False}
+
+    # The shopper hears what happened. This is the point of the whole exercise:
+    # they were told a person would help, a person did something, and until now
+    # they heard nothing.
+    if closed.get("session_id") and body.note:
+        try:
+            await session_store.add_turn(
+                session_id=closed["session_id"],
+                connection_id=connection_id,
+                speaker="assistant",
+                text=f"An update from the shop: {body.note}",
+                case_id=case_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("could not pass an update to the shopper")
+
+    return {"case_id": case_id, "changed": True}

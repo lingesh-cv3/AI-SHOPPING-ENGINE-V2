@@ -124,3 +124,13 @@ class ActionInfo(BaseModel):
     reversible: bool
     touches_customer_data: bool
     can_ever_be_automatic: bool
+
+class HandoverDone(BaseModel):
+    """Who dealt with a handover.
+
+    Required rather than optional. "Somebody closed this" is not much better than
+    nobody having closed it, and an audit trail with anonymous entries is one
+    nobody trusts.
+    """
+
+    handled_by: str

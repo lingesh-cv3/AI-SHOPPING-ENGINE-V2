@@ -71,9 +71,14 @@ async def main() -> None:
     print()
     print(f"  {len(minted)} keys minted and written to .env.keys")
     print()
-    for name, value in minted:
+    # The names only. The values are not printed here on purpose: they were, and
+    # that is how all five ended up pasted into a chat log twice. The file is the
+    # right place for key material; a terminal is a place people copy from without
+    # thinking about what they are copying.
+    for name, _ in minted:
         print(f"    {name}")
-        print(f"      {value}")
+    print()
+    print("  The keys themselves are in .env.keys and nowhere else.")
     print()
     print("  These are shown once. Only the hashes are in the database now.")
     print()

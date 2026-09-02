@@ -68,6 +68,12 @@ def status(method: str, path: str, key=None, body=None) -> int:
         return e.code
     except urllib.error.URLError:
         return 0
+    except TimeoutError:
+        # Reported as timed out rather than crashing the run. One slow route
+        # should not cost the other fourteen their check - and the reason this
+        # happened is that a probe waited on the model, which an audit never
+        # should.
+        return -1
 
 
 # (label, method, path, right key, a wrong key that must be refused, body)
@@ -86,13 +92,17 @@ PROBES = [
     ("ops history", "GET", "/api/ops/history", OPERATOR, SK_DEMO, None),
     ("ops stats", "GET", "/api/ops/stats", OPERATOR, SK_DEMO, None),
     ("expiry sweep", "POST", "/api/admin/expire", OPERATOR, SK_DEMO, None),
+    # Reads a transcript rather than sending a message. Same router, same guard,
+    # and no model call - an audit that waits on a provider is one that cannot be
+    # run when the provider is busy, which is exactly when somebody might want to
+    # check whether the doors are shut.
     (
-        "chat",
-        "POST",
-        "/api/chat",
+        "chat transcript",
+        "GET",
+        "/api/chat/conn_kettle/audit-probe",
         PK_KETTLE,
         PK_DEMO,
-        {"connection_id": "conn_kettle", "session_id": "audit", "message": "hi"},
+        None,
     ),
 ]
 
@@ -121,7 +131,9 @@ for label, method, path, right, wrong, body in PROBES:
     with_wrong = status(method, path, wrong, body) if wrong else None
 
     notes = []
-    if no_key != 401:
+    if no_key == -1:
+        notes.append("timed out")
+    elif no_key != 401:
         notes.append(f"open without a key ({no_key})")
     if with_right is not None and with_right == 401:
         notes.append("refuses its own key")

@@ -36,6 +36,7 @@ from engine import session as session_store
 from shared.models import CommerceError
 
 from .auth import any_key, belongs_to
+from .why import explain
 from .deps import engine
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,21 @@ class ChatReply(BaseModel):
     #: A total and the ways to pay it, when the shopper asked to check out.
     #: Rendered as buttons. Tapping one is what charges - nothing here does.
     payment: dict = Field(default_factory=dict)
+
+    #: A shopper-safe account of how this was decided, including what was
+    #: ruled out. Shown behind a toggle rather than in the reply, because a
+    #: shopper who is happy with the answer should not have to read the
+    #: reasoning to get to it.
+    why: dict | None = None
+
+    #: The model was unreachable because of rate limiting, so this reply is
+    #: a fallback rather than an answer. The storefront keeps the shopper's
+    #: message when this is set, so pressing send again is one key rather
+    #: than retyping a sentence.
+    rate_limited: bool = False
+
+    #: How many seconds the provider asked us to wait.
+    retry_after_seconds: int | None = None
 
     #: Options the shopper must pick between before the action can run. Rendered
     #: as buttons rather than asked in prose - "which size?" followed by a list
@@ -234,9 +250,20 @@ async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
     if rate_limited:
         # Say what actually happened. A held action is not the story when we could
         # not reach our model provider at all.
+        # Specific where we can be. A shopper told a number will wait; one told
+        # "a few seconds" tries immediately, fails again, and concludes the thing
+        # is broken.
+        wait = getattr(reasoning, "retry_after_seconds", None)
         reply = (
-            "I'm getting a lot of questions right now - give me a few seconds and "
-            "ask again."
+            (
+                f"I'm handling a lot of questions right now - give me about "
+                f"{wait} seconds and send that again."
+                if wait
+                else "I'm handling a lot of questions right now - give me a few "
+                "seconds and send that again."
+            )
+            + " You can still tap anything on screen in the meantime, that part "
+            "does not wait for me."
         )
     elif trace.escalated_because_empty:
         # Everything proposed was unavailable, so the model's reply promises things
@@ -322,6 +349,10 @@ async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
     choices: list[dict] = []
     cart_changed = False
 
+    # The parameters of whatever was selected, so a failed lookup can
+    # name the number the shopper actually typed.
+    params_for_reply = dict(trace.selected.action.parameters or {})
+
     if not awaiting and case_id:
         executed = await engine.execution.execute_case(req.connection_id, case_id)
         action_taken = executed.action_type
@@ -333,7 +364,6 @@ async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
             # Not a failure. The shopper has not said enough yet, and asking is the
             # right answer - a guessed size is a return waiting to happen.
             choices = executed.choices
-            first = executed.choices[0] if executed.choices else {}
             first = executed.choices[0] if executed.choices else {}
             # Only ask if the model has not. It usually says "which size
             # would you like?" itself, and following that with our own
@@ -351,14 +381,59 @@ async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
                     + str(first.get("product_title", "item"))
                     + "?"
                 )
+        elif executed.action_type == "CLEAR_CART":
+            # Written by the engine, not the model.
+            #
+            # A shopper said "remove all", the model said "your cart is now empty",
+            # and three items remained - because it described what it intended
+            # rather than what happened. The reply is composed from the result here
+            # so it can only say what actually occurred.
+            if executed.succeeded:
+                cart_changed = True
+                reply = executed.shopper_summary or "Your cart is empty now."
+            else:
+                reply = (
+                    "I could not change your cart just then. Have another go, or "
+                    "use the cart on the right."
+                )
+        elif executed.action_type == "CHECK_ORDER_STATUS":
+            # Replaces the model's sentence rather than appending to it.
+            #
+            # The model guesses at an answer before the lookup runs, so on a
+            # success the shopper got the same fact twice in different words, and
+            # on a failure they got the generic search message - "I couldn't turn
+            # anything up" - when an order number is not a search term and finding
+            # nothing means something specific.
+            if executed.succeeded:
+                reply = executed.shopper_summary or executed.summary
+            else:
+                wanted = str(
+                    (executed.payload or {}).get("order_id")
+                    or params_for_reply.get("order_id")
+                    or ""
+                ).strip()
+                reply = (
+                    (
+                        f"I can't find an order numbered {wanted}. "
+                        if wanted
+                        else "I can't find that order. "
+                    )
+                    + "Check the number on your confirmation, or someone at the "
+                    "shop can look it up for you."
+                )
         elif executed.action_type == "PREPARE_CHECKOUT" and executed.succeeded:
             payment = executed.payload
-            # Appends nothing about the amount: the block below already shows
-            # the total and every line, and saying it twice in different words
-            # reads as a system talking over itself. Only the question is added,
-            # and only when the model has not already asked one.
-            if not reply.rstrip().endswith("?"):
-                reply = f"{reply}\n\nHow would you like to pay?"
+            # Replaces the model's sentence rather than appending to it.
+            #
+            # It writes before the action runs, so it cannot know the cart was
+            # readable or what the total came to - and it hedges accordingly:
+            # "I'll get your checkout ready, you'll see the total shortly." Then
+            # the total appears in the same message.
+            #
+            # Where the engine has a fact and the model has a guess, the fact wins.
+            # The block below shows the total and every line, so this is one short
+            # sentence and a question.
+            reply = "Here's your total. How would you like to pay?"
         elif executed.succeeded:
             if executed.action_type in {
                 "ADD_TO_CART",
@@ -406,6 +481,26 @@ async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
         products=products,
         choices=choices,
         payment=payment,
+        rate_limited=rate_limited,
+        retry_after_seconds=getattr(reasoning, "retry_after_seconds", None),
+        why=explain(
+            diagnosis=(
+                reasoning.diagnosis.cause
+                if reasoning and reasoning.diagnosis
+                else None
+            ),
+            evidence=(
+                reasoning.diagnosis.evidence
+                if reasoning and reasoning.diagnosis
+                else None
+            ),
+            rejected=[
+                {"action_type": str(r.action_type), "reason": r.reason}
+                for r in trace.rejected
+            ],
+            selected_action=str(trace.selected.action.action_type),
+            risk_rule=decision.policy_rule,
+        ),
         awaiting_person=awaiting,
         risk_rule=decision.policy_rule,
         cart_changed=cart_changed,
@@ -780,6 +875,13 @@ async def pay(req: PayRequest, key=Depends(any_key)) -> ChatReply:
         # Prefixed rather than replaced. The first sentence is the fact the shopper
         # needs immediately - nothing was taken - and the rest is whatever the
         # engine decided to do about it.
+        # The pipeline already wrote its own turn, so this is what the shopper
+        # sees on screen now and what the poll will find in the session a moment
+        # later. Prefixing here produced two messages for one decline: this one,
+        # and the pipeline's, arriving seconds apart in slightly different words.
+        #
+        # So the fact is prepended for the immediate reply only, and the stored
+        # turn is left as the pipeline wrote it.
         reply = (
             f"That card was declined, so nothing has been charged. "
             f"{recovered.reply}"
@@ -796,6 +898,11 @@ async def pay(req: PayRequest, key=Depends(any_key)) -> ChatReply:
             risk_rule=recovered.risk_rule,
             selected_action=recovered.selected_action,
             risk_outcome=recovered.risk_outcome,
+            # Carried through rather than rebuilt. The pipeline already worked out
+            # what it ruled out and why, and this is the turn where a shopper is
+            # most entitled to see it: their payment was refused and they are being
+            # told a person will handle it.
+            why=recovered.why,
             cart_changed=True,
             payment={
                 "paid": False,

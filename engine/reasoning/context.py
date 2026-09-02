@@ -109,7 +109,7 @@ def build_context(
     # The assistant should know a payment failed without claiming it was discussed.
     if recorded_friction:
         parts.append(
-            "THE STOREFRONT ALREADY RECORDED THIS VISIT (they have not necessarily "
+            "EARLIER IN THIS VISIT, AND NOT NECESSARILY WHAT THEY ARE ASKING ABOUT NOW (they have not necessarily "
             "mentioned it to you):\n"
             + "\n".join(f"  - {f}" for f in recorded_friction)
         )
