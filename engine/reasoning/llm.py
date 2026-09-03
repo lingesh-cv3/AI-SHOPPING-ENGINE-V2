@@ -73,7 +73,7 @@ class LLMConfig:
     #: different proposals.
     temperature: float = 0.2
     max_tokens: int = 1200
-    timeout_seconds: float = 20.0
+    timeout_seconds: float = 8.0
 
     @classmethod
     def from_env(cls) -> LLMConfig:
@@ -128,7 +128,7 @@ class LLMClient:
             timeout=self.config.timeout_seconds,
             # One retry only. A shopper is waiting, and a slow correct answer is
             # worse than a fast fallback to rules.
-            max_retries=1,
+            max_retries=0,
         )
 
     async def complete(

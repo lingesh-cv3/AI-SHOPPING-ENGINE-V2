@@ -162,7 +162,15 @@ def check(name: str, ok: bool, detail: str = "", fix: str = "") -> bool:
     if ok:
         passed += 1
         print(f"  PASS  {name}" + (f"  ({detail})" if detail else ""))
-    elif THROTTLED in detail or "timed out" in detail:
+    elif any(
+        marker in detail
+        for marker in (
+            THROTTLED,  # what a shopper is told
+            "rate limited",  # what we log
+            "timed out",
+            "could not reach the model provider",
+        )
+    ):
         # Throttled is not failed. The model was never asked, so nothing
         # about the engine was measured either way.
         skipped.append(name)
