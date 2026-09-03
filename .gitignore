@@ -39,3 +39,23 @@ patch*
 .env.keys
 
 fix*
+
+# One-off diagnostic scripts. Each existed to answer a single question - print me
+# these lines, tell me what that route returns - and answered it. Keeping them
+# makes the project root unreadable for whoever comes next.
+#
+# The tools that stay are named: healthcheck, fuzz, auditroutes, demo_reset,
+# mint_keys, testshopper. Anything matching below is scratch.
+show*.py
+find*.py
+check*.py
+test*.py
+fix*.py
+add*.py
+wire*.py
+patch*.py
+rm*.py
+what*.py
+list*.py
+
+!testshopper.py

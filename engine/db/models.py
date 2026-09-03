@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    UniqueConstraint,
     JSON,
     Boolean,
     DateTime,
@@ -364,5 +365,47 @@ class ApiKey(Base):
     #: 75% of merchants say being able to revoke access in real time is critical,
     #: and a deleted row cannot explain why a request was refused.
     revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class Shopper(Base):
+    """Somebody who signs in, so their conversation survives closing the tab.
+
+    Scoped to one merchant. An account at Kettle is not an account at Northfield,
+    because these are separate clients who happen to share an engine - and letting
+    one username span both would mean Northfield learning that its customer also
+    buys coffee. That is not ours to tell them.
+
+    So the constraint is on (connection_id, username) rather than username alone,
+    and the same person signing up at both shops is two rows that never meet.
+    """
+
+    __tablename__ = "shoppers"
+    __table_args__ = (
+        UniqueConstraint("connection_id", "username", name="uq_shopper_per_merchant"),
+    )
+
+    shopper_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+
+    #: A bcrypt hash, which carries its own salt and cost factor.
+    #:
+    #: Not SHA-256, unlike the API keys. Those are 32 random bytes with no
+    #: dictionary to attack, so a fast hash is correct there. A password is chosen
+    #: by a person, so it needs a slow one - the whole point is making guessing
+    #: expensive for somebody holding the database.
+    password_hash: Mapped[str] = mapped_column(String(200))
+
+    #: What to call them. Optional, because insisting on a real name in order to
+    #: remember a conversation is a strange thing to require.
+    display_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

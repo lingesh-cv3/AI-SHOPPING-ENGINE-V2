@@ -30,6 +30,10 @@ from .repository import (
 )
 from .session import create_schema, database_url, dispose, session_scope
 
+# Last, because it needs session_scope and Shopper from this package - and
+# importing it earlier asked a half-built module for both.
+from . import shoppers
+
 __all__ = [
     "ApiKey",
     "Approval",
@@ -38,6 +42,7 @@ __all__ = [
     "Outcome",
     "create_schema",
     "keys",
+    "shoppers",
     "database_url",
     "decide_approval",
     "decided_across",
