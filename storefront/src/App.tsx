@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { AccountMenu } from "./AccountMenu";
 import {
   api,
   getConnection,
@@ -12,6 +13,7 @@ import {
   type Connection,
   type Pipeline,
   type Product,
+  pathFor
 } from "./api";
 
 import { type Account, whoAmI } from "./account";
@@ -405,8 +407,14 @@ export default function App() {
    *  order shows up in a running shop.
    */
   const switchMerchant = async (id: string) => {
-    setConnection(id);
-    setConnectionState(id);
+    // Navigate rather than set state.
+    //
+    // The merchant comes from the address now, so changing it means going
+    // somewhere - and a full load rather than a router push, because the cart, the
+    // session and the theme all derive from it. Unpicking each by hand is how one
+    // of them ends up stale, which is the mistake behind three bugs this week.
+    window.location.assign(pathFor(id));
+    return;
     setDept(null);
     setQuery("");
     setProducts([]);
@@ -552,21 +560,8 @@ export default function App() {
           Show engine
         </label>
 
-                       <nav className="tabs">
-          {/* Only the shopper's own account.
-            *
-            * Merchant and Operations were links here, which meant a shopper
-            * browsing shoes could see a link to CV3's queue - and a client would
-            * reasonably ask why their customers can see our tooling. Those pages
-            * are reached by their own address by people who have a reason to.
-            *
-            * Not security: the engine refuses them without a key regardless. But a
-            * door nobody should knock on should not have a sign on it. */}
-          {account ? (
-            <span className="whoami">{account.display_name}</span>
-          ) : (
-            <Link to="/signin">Sign in</Link>
-          )}
+        <nav className="tabs">
+          <AccountMenu account={account} onAccount={setAccount} />
         </nav>
       </header>
 

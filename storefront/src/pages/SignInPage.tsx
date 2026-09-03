@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { AccountError, signIn, signUp } from "../account";
-import { getConnection } from "../api";
 import { useTheme } from "../useTheme";
+import { getConnection, pathFor } from "../api";
 /**
  * Signing in to a shop.
  *
@@ -49,7 +49,12 @@ export function SignInPage({ creating = false }: { creating?: boolean }) {
       // Cleared before navigating. Leaving a password in state for the rest of
       // the visit is careless in a way nothing here needs to be.
       setPassword("");
-      navigate("/");
+      // Back to the shop they came from, not to the default.
+      //
+      // This went to "/", which redirects to Northfield - so signing in at Kettle
+      // dropped somebody into another client's shop. The account is Kettle's and
+      // the address should be too.
+      navigate(pathFor(connection));
     } catch (e) {
       setError(e instanceof AccountError ? e.message : "That did not work.");
     } finally {
@@ -139,7 +144,7 @@ export function SignInPage({ creating = false }: { creating?: boolean }) {
 
         {/* The way past. Nothing here is locked, and a shop that insists on an
             account before you can look at a shoe is a shop you leave. */}
-        <Link className="authskip" to="/">
+        <Link className="authskip" to={pathFor(connection)}>
           Carry on without an account
         </Link>
       </div>

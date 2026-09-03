@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, getConnection, shopperMessage, type ChatReply, type ChatTurn } from "./api";
 import { type Account } from "./account";
-import { AccountStrip } from "./AccountStrip";
+
 /**
  * The always-on assistant.
  *
@@ -332,14 +332,7 @@ export function ChatWidget({
             </div>
           )}
 
-          {onAccount && (
-            <AccountStrip
-              connectionId={getConnection()}
-              guestSession={sessionId}
-              account={account ?? null}
-              onAccount={onAccount}
-            />
-          )}
+
         </div>
         <button className="chatclose" onClick={onClose}>
           ×

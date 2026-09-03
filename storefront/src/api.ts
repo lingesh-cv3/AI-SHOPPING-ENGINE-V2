@@ -28,18 +28,65 @@ const ENGINE = "";
 // back empty because the transcript endpoint filters by connection and honestly had
 // nothing, and the cart 404'd because Northfield had never issued it. Two symptoms,
 // one cause.
-let CONNECTION =
-  (typeof sessionStorage !== "undefined" &&
-    sessionStorage.getItem("cv3_connection")) ||
-  "conn_demo";
+/** Which merchant this page is for, taken from the address.
+ *
+ *  The URL is the source of truth rather than storage, and that is the point. It
+ *  lived in sessionStorage, which meant two places held one value - the same shape
+ *  as three separate bugs this week, where a reload reset the merchant while the
+ *  session and cart in storage still belonged to another one.
+ *
+ *  An address cannot get out of step with itself. /northfield is Northfield, and a
+ *  shopper who bookmarks it or sends it to somebody lands in the same shop.
+ */
+const BY_PATH: Record<string, string> = {
+  northfield: "conn_demo",
+  kettle: "conn_kettle",
+};
 
+//: Where a bare URL goes. A real deployment has one merchant per domain and no
+//: default at all; this exists because the demo carries two.
+const DEFAULT_CONNECTION = "conn_demo";
+
+let CONNECTION = readFromPath();
+
+function readFromPath(): string {
+  if (typeof window === "undefined") return DEFAULT_CONNECTION;
+
+  const first = window.location.pathname.split("/").filter(Boolean)[0] ?? "";
+  return BY_PATH[first.toLowerCase()] ?? DEFAULT_CONNECTION;
+}
+
+/** The path segment for a merchant, for building links. */
+export function pathFor(connectionId: string): string {
+  const found = Object.entries(BY_PATH).find(([, id]) => id === connectionId);
+  return found ? `/${found[0]}` : "/";
+}
+
+/** Kept for the merchant and operations consoles, which are reached directly and
+ *  have no merchant in their own path. */
 export function setConnection(id: string) {
   sessionStorage.setItem("cv3_connection", id);
   CONNECTION = id;
 }
 
 export function getConnection() {
-  return CONNECTION;
+  // Re-read on every call rather than cached at load.
+  //
+  // Router navigation changes the path without reloading the module, so a value
+  // captured once would be whichever merchant the tab opened on - stale in exactly
+  // the way this change exists to prevent.
+  const fromPath = readFromPath();
+  const stored = sessionStorage.getItem("cv3_connection");
+
+  // The path wins where it names a merchant. Storage covers /merchant and
+  // /operations, which have no merchant in their own address.
+  const first = window.location.pathname.split("/").filter(Boolean)[0] ?? "";
+  if (BY_PATH[first.toLowerCase()]) {
+    if (stored !== fromPath) sessionStorage.setItem("cv3_connection", fromPath);
+    return fromPath;
+  }
+
+  return stored || CONNECTION;
 }
 
 export interface Connection {
