@@ -15,6 +15,8 @@ from .store import (
     turns,
 )
 
+from . import shopper_memory
+
 __all__ = [
     "HISTORY_TURNS",
     "add_turn",

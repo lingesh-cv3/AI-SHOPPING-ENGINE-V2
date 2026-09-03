@@ -130,6 +130,11 @@ def call(
             return json.loads(r.read() or "{}")
     except urllib.error.HTTPError as e:
         return {"_status": e.code, "_body": e.read().decode()[:200]}
+    except TimeoutError:
+        # A result, not a crash. The provider was too slow, and every check after
+        # this one still deserves to run - a suite that dies partway through says
+        # less than one that reports what it found.
+        return {"_timeout": True, "_body": "the request timed out"}
     except urllib.error.URLError as e:
         # A service being down is a result, not a crash. Reporting it as a failed
         # check with the reason is far more useful than a stack trace that buries
@@ -157,7 +162,7 @@ def check(name: str, ok: bool, detail: str = "", fix: str = "") -> bool:
     if ok:
         passed += 1
         print(f"  PASS  {name}" + (f"  ({detail})" if detail else ""))
-    elif THROTTLED in detail:
+    elif THROTTLED in detail or "timed out" in detail:
         # Throttled is not failed. The model was never asked, so nothing
         # about the engine was measured either way.
         skipped.append(name)

@@ -10,7 +10,10 @@
  * use this identical file.
  */
 
-const ENGINE = "http://localhost:8000";
+// Relative, so requests go to the origin serving the page and Vite proxies them to
+// the engine. Absolute would make every request cross-origin and the session cookie
+// would not be sent.
+const ENGINE = "";
 
 /** The merchant connection every call is scoped to.
  *

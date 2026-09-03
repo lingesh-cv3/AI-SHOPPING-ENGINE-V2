@@ -1,13 +1,13 @@
 """Sign up, sign in, sign out, and who am I.
 
 The cookie is httpOnly, so no script on the page can read it. That is the whole
-reason for a cookie rather than a token in localStorage: an injected script can
-steal anything JavaScript can read, and it cannot read this.
+reason for a cookie rather than a token in localStorage: an injected script can steal
+anything JavaScript can read, and it cannot read this.
 
-SameSite=Lax rather than None, which requires the storefront and the engine to be
-same-origin. Vite proxies /api to the engine in development so that holds there too -
-and a cross-origin cookie would need SameSite=None with HTTPS, which is a worse
-place to arrive at by accident in production.
+SameSite=Lax rather than None, which requires the storefront and engine to share an
+origin. Vite proxies /api to the engine so that holds in development too - and
+SameSite=None would need HTTPS and give up the browser's own CSRF protection, which
+is a worse place to arrive at by accident.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from engine import db
 from engine.db.shoppers import SignUpError
+from engine.session import shopper_memory
 
 from .auth import any_key, belongs_to
 
@@ -42,11 +43,19 @@ class SignUp(BaseModel):
     password: str = Field(min_length=8, max_length=200)
     display_name: str | None = Field(default=None, max_length=80)
 
+    #: The conversation they were having before signing in, if any.
+    #:
+    #: Adopted onto the account, because signing in is meant to give a shopper
+    #: their context - losing the conversation they are in the middle of, at the
+    #: exact moment they identify themselves, would be backwards.
+    guest_session: str | None = None
+
 
 class SignIn(BaseModel):
     connection_id: str
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=200)
+    guest_session: str | None = None
 
 
 def _set_cookie(response: Response, request: Request, token: str) -> None:
@@ -54,20 +63,42 @@ def _set_cookie(response: Response, request: Request, token: str) -> None:
 
     Secure only when the request arrived over HTTPS, so development on localhost
     works without a certificate and production gets the flag automatically. Hard
-    coding it either way would mean either a broken local setup or a cookie sent
-    in clear over the wire.
+    coding it either way means either a broken local setup or a cookie sent in
+    clear over the wire.
     """
-    secure = request.url.scheme == "https"
-
     response.set_cookie(
         COOKIE,
         token,
         max_age=db.shopper_sessions.SESSION_DAYS * 24 * 60 * 60,
         httponly=True,
         samesite="lax",
-        secure=secure,
+        secure=request.url.scheme == "https",
         path="/",
     )
+
+
+async def _finish(shopper: dict, connection_id: str, guest_session: str | None) -> str:
+    """Give the shopper their conversation, adopting the guest one if there is one.
+
+    The session id is derived from the shopper and the merchant rather than stored,
+    so there is one source of truth. Three separate bugs this week came from two
+    places holding the same value; this avoids a fourth by not having a second
+    place.
+    """
+    account_session = await shopper_memory.session_for(
+        shopper["shopper_id"], connection_id
+    )
+
+    if guest_session:
+        moved = await shopper_memory.adopt(
+            guest_session, account_session, connection_id
+        )
+        if moved:
+            logger.info(
+                "adopted %s guest turn(s) onto %s", moved, shopper["shopper_id"]
+            )
+
+    return account_session
 
 
 @router.post("/signup")
@@ -80,8 +111,8 @@ async def sign_up(
     """Create an account and sign in.
 
     Signed in immediately, because making somebody sign up and then sign in with
-    the details they just typed is a step that exists only because it was easier to
-    build.
+    the details they just typed is a step that exists only because it was easier
+    to build that way.
     """
     belongs_to(key, body.connection_id)
 
@@ -103,9 +134,12 @@ async def sign_up(
     )
     _set_cookie(response, request, token)
 
+    session_id = await _finish(shopper, body.connection_id, body.guest_session)
+
     return {
         "username": shopper["username"],
         "display_name": shopper["display_name"],
+        "session_id": session_id,
     }
 
 
@@ -120,12 +154,11 @@ async def sign_in(
     belongs_to(key, body.connection_id)
 
     if await db.shopper_sessions.locked_out(body.connection_id, body.username):
-        # 429 rather than 401, and the reason is said plainly: somebody locked out
-        # by their own mistyping needs to know waiting will fix it, and somebody
+        # 429 rather than 401, and the reason said plainly: somebody locked out by
+        # their own mistyping needs to know that waiting fixes it, and somebody
         # guessing learns only that guessing has stopped working.
         raise HTTPException(
-            429,
-            "Too many failed attempts. Wait fifteen minutes and try again.",
+            429, "Too many failed attempts. Wait fifteen minutes and try again."
         )
 
     shopper = await db.shoppers.verify(
@@ -138,17 +171,20 @@ async def sign_in(
 
     await db.shopper_sessions.clear_failures(body.connection_id, body.username)
 
-    # A brand new token, never one the request supplied. A token already in the
-    # cookie could have been planted there, and extending it would sign the
+    # A brand new token, never one the request supplied. A token already sitting in
+    # the cookie could have been planted there, and extending it would sign the
     # planter in as this shopper.
     token = await db.shopper_sessions.start(
         shopper["shopper_id"], body.connection_id
     )
     _set_cookie(response, request, token)
 
+    session_id = await _finish(shopper, body.connection_id, body.guest_session)
+
     return {
         "username": shopper["username"],
         "display_name": shopper["display_name"],
+        "session_id": session_id,
     }
 
 
@@ -177,8 +213,8 @@ async def me(
     """Who is signed in here, if anybody.
 
     A guest is not an error. Most shoppers will never sign in, so this returns
-    signed_in false rather than a 401 - the storefront asks this on every load and
-    an error for the normal case would be the wrong shape.
+    signed_in false rather than a 401 - the storefront asks on every load, and an
+    error for the normal case would be the wrong shape.
     """
     belongs_to(key, connection_id)
 
@@ -195,4 +231,9 @@ async def me(
         "signed_in": True,
         "username": shopper["username"],
         "display_name": shopper["display_name"],
+        #: Which conversation to use. Derived from the shopper and the merchant,
+        #: so the storefront never has to keep a copy in step.
+        "session_id": await shopper_memory.session_for(
+            session["shopper_id"], connection_id
+        ),
     }
