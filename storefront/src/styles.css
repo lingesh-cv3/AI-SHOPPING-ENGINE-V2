@@ -2327,3 +2327,274 @@ select.card-picker {
 .acct-link:hover {
   color: var(--ink);
 }
+
+
+
+/* ---- pages ---- */
+/* The consoles were tabs in one page. Now each has its own address, so each needs
+ * its own head - and the difference between them is the point: a merchant's page
+ * is themed as their shop, and the operations page is themed as ours, because one
+ * belongs to a client and the other spans all of them. */
+
+.page {
+  min-height: 100vh;
+  background: var(--paper);
+}
+
+.pagehead {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 26px 28px 20px;
+  background: var(--hero);
+  color: var(--hero-ink);
+}
+
+/* CV3's own page. Deliberately not themed as either merchant - our tooling should
+ * not look like whichever client happened to be open last. */
+.pagehead.ops {
+  background: #1a1d21;
+  color: #f2f3f4;
+}
+
+.pagehead-org {
+  display: block;
+  font-family: var(--body);
+  font-size: 12.5px;
+  opacity: 0.72;
+  margin-bottom: 3px;
+}
+
+.pagehead-title {
+  font-size: var(--step-2);
+  line-height: 1.1;
+  margin: 0;
+  color: inherit;
+}
+
+.pagenav {
+  display: flex;
+  gap: 18px;
+}
+
+.pagenav a {
+  font-family: var(--body);
+  font-size: 13px;
+  color: inherit;
+  opacity: 0.75;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  padding-bottom: 2px;
+  transition: opacity 0.13s var(--ease), border-color 0.13s var(--ease);
+}
+
+.pagenav a:hover {
+  opacity: 1;
+  border-bottom-color: currentColor;
+}
+
+.pagebody {
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 26px 28px 60px;
+}
+
+/* ---- signing in ---- */
+/* Centred and narrow, which is the one place in this app where centring is right:
+ * there is a single thing to do and nothing to scan. */
+
+.authpage {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px 20px;
+  background: var(--hero);
+}
+
+.authcard {
+  width: 100%;
+  max-width: 420px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  padding: 34px 32px 28px;
+}
+
+.authshop {
+  display: block;
+  font-family: var(--body);
+  font-size: 12.5px;
+  color: var(--ink-3);
+  margin-bottom: 12px;
+}
+
+.authtitle {
+  font-size: var(--step-2);
+  line-height: 1.15;
+  margin: 0 0 10px;
+}
+
+/* The reason, given more room than the heading usually gets. It is the thing a
+ * shopper is actually deciding about. */
+.authwhy {
+  font-family: var(--body);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  margin: 0 0 24px;
+}
+
+.authform {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.authform label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-family: var(--body);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.authform input {
+  border: 1px solid var(--line);
+  padding: 10px 12px;
+  font-family: var(--body);
+  font-size: 14.5px;
+  border-radius: 2px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.authform input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+.authhint {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  line-height: 1.4;
+}
+
+.autherror {
+  font-size: 13px;
+  color: var(--friction);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.authgo {
+  width: 100%;
+  padding: 12px;
+  margin-top: 2px;
+}
+
+.authalt {
+  font-family: var(--body);
+  font-size: 13px;
+  color: var(--ink-2);
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.authalt a {
+  color: var(--accent);
+}
+
+/* Quiet, and present. Forcing an account before somebody can look at a shoe is how
+ * a shop loses people - but it should not compete with the thing being offered. */
+.authskip {
+  display: inline-block;
+  margin-top: 12px;
+  font-family: var(--body);
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+
+@media (max-width: 720px) {
+  .pagehead {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 20px;
+  }
+  .pagebody {
+    padding: 20px 20px 48px;
+  }
+  .authcard {
+    padding: 26px 22px 22px;
+  }
+}
+
+
+
+/* The signed-in shopper's name, where the sign-in link was. */
+.whoami {
+  font-family: var(--display);
+  font-weight: var(--display-weight);
+  font-size: 13px;
+  color: var(--ink);
+  padding: 6px 0;
+}
+
+
+
+
+/* ---- masthead links ---- */
+/* The three tabs became links when each console got its own address, and links
+ * inherit none of what a button had - no padding, no radius, no alignment. So the
+ * header lost its shape.
+ *
+ * Matched to the button rules rather than approximated, so the header looks the
+ * same as it did. The uppercase and the monospace are the existing masthead
+ * language, not a new choice: changing them here would leave this one row speaking
+ * differently from the search button beside it. */
+
+.tabs a {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--hero-ink-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  padding: 8px 12px;
+  cursor: pointer;
+  text-transform: uppercase;
+  text-decoration: none;
+  border-radius: var(--radius);
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.tabs a:hover {
+  color: var(--hero-ink);
+}
+
+.tabs a:focus-visible {
+  outline: 2px solid var(--hero-ink);
+  outline-offset: -2px;
+}
+
+/* The signed-in shopper's name, where Sign in was.
+ *
+ * Set in the display face rather than the monospace the links use, because it is a
+ * person's name and not a control. That difference is the point: everything else in
+ * this row is somewhere to go, and this is who you are. */
+.whoami {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--display);
+  font-weight: var(--display-weight);
+  font-size: 13px;
+  letter-spacing: var(--display-tracking);
+  color: var(--hero-ink);
+  padding: 8px 12px 8px 0;
+}

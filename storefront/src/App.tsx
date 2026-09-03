@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   api,
   getConnection,
@@ -551,23 +552,22 @@ export default function App() {
           Show engine
         </label>
 
-        <div className="tabs">
-          <button aria-selected={shopView} onClick={() => setView("shop")}>
-            Shop
-          </button>
-          <button
-            aria-selected={view === "queue"}
-            onClick={() => setView("queue")}
-          >
-            Operations
-          </button>
-          <button
-            aria-selected={view === "console"}
-            onClick={() => setView("console")}
-          >
-            Merchant
-          </button>
-        </div>
+                       <nav className="tabs">
+          {/* Only the shopper's own account.
+            *
+            * Merchant and Operations were links here, which meant a shopper
+            * browsing shoes could see a link to CV3's queue - and a client would
+            * reasonably ask why their customers can see our tooling. Those pages
+            * are reached by their own address by people who have a reason to.
+            *
+            * Not security: the engine refuses them without a key regardless. But a
+            * door nobody should knock on should not have a sign on it. */}
+          {account ? (
+            <span className="whoami">{account.display_name}</span>
+          ) : (
+            <Link to="/signin">Sign in</Link>
+          )}
+        </nav>
       </header>
 
       {view === "console" ? (

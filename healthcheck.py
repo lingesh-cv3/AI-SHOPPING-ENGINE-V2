@@ -150,6 +150,26 @@ def call(
 #: check silently stopped working, which is the risk in matching prose at all. If it
 #: is reworded again, this stops recognising a skip and reports a failure: annoying,
 #: and the safe direction.
+#: How many checks this suite contains, counted from the source.
+#:
+#: Counted rather than declared, because a hand-maintained total is a number
+#: somebody forgets to update - and then the check that verifies completeness is
+#: itself incomplete. It was set to 46 by hand and the file declares 49, so the
+#: summary was wrong in both directions.
+#:
+#: Read at startup from this file's own text. Slightly odd, and it cannot drift.
+#:
+#: One is subtracted because two checks are mutually exclusive: the rejection
+#: pair runs when the queue has something in it, and 'rejection case reached
+#: the queue' runs when it does not. The suite can never execute both, so a
+#: raw count of declarations is always one too many.
+EXPECTED_CHECKS = len(
+    __import__("re").findall(
+        r'check\(\s*\n?\s*"([^"]+)"',
+        __import__("pathlib").Path(__file__).read_text(encoding="utf-8"),
+    )
+) - 1
+
 THROTTLED = "a lot of questions"
 
 #: Checks that could not run. Counted apart from failures, because a red line
@@ -161,7 +181,15 @@ def check(name: str, ok: bool, detail: str = "", fix: str = "") -> bool:
     global passed
     if ok:
         passed += 1
-        print(f"  PASS  {name}" + (f"  ({detail})" if detail else ""))
+        # The name only.
+        #
+        # detail is written to explain a failure, so printing it on success
+        # produced lines like "PASS the operator's note stays private (the
+        # internal note reached the shopper)" - a pass that reads as a failure.
+        #
+        # On success the name is the whole message. Anything worth knowing when a
+        # check passes belongs in the name.
+        print(f"  PASS  {name}")
     elif any(
         marker in detail
         for marker in (
@@ -668,6 +696,26 @@ if model_on:
         "engine/execution/service.py ADD_TO_CART, engine/api/chat.py needs_choice",
     )
 
+    # Tapped rather than asked, so the rest of this section does not depend on the
+    # model being reachable.
+    #
+    # The check above is the only one here that is about judgement: does the model
+    # ask rather than guess. Everything below is about execution, which needs no
+    # model - and tying them together meant a busy provider silently took four
+    # checks with it.
+    tapped = call(
+        "POST",
+        "/api/chat/act",
+        {
+            "connection_id": NORTHFIELD,
+            "session_id": shop_session,
+            "product_id": "P1001",
+            "cart_id": shop_cart["cart_id"],
+            "said": "Add the Trailblazer Running Shoe",
+        },
+    )
+    choices = choices or tapped.get("choices") or []
+
     if choices:
         check(
             "sold-out sizes are not offered",
@@ -677,20 +725,19 @@ if model_on:
         )
 
     # Now with a size named.
+    # The tap endpoint, which is what the widget uses when a shopper picks an
+    # option - so this tests the path a shopper actually takes, and it works while
+    # the provider is busy because no model is involved.
     sized = call(
         "POST",
-        "/api/chat",
+        "/api/chat/act",
         {
             "connection_id": NORTHFIELD,
             "session_id": shop_session,
-            # Sent the way the widget sends it when a shopper taps an option.
-            # Typing a phrase deliberately does not add - only the exact label does
-            # - because fuzzy matching is what produced double-adds.
-            "message": choices[0]["label"] if choices else "8",
+            "product_id": "P1001",
+            "variant_id": choices[0]["variant_id"] if choices else "P1001-8",
             "cart_id": shop_cart["cart_id"],
-            "known": {
-                "chosen_variant": choices[0]["variant_id"] if choices else ""
-            },
+            "said": choices[0]["label"] if choices else "8",
         },
     )
     cart_now = call("GET", f"/api/shop/{NORTHFIELD}/cart/{shop_cart['cart_id']}")
@@ -709,15 +756,25 @@ if model_on:
             "engine/api/chat.py cart_changed",
         )
 
-        removed = call(
-            "POST",
-            "/api/chat",
-            {
-                "connection_id": NORTHFIELD,
-                "session_id": shop_session,
-                "message": "actually remove that from my cart",
-                "cart_id": shop_cart["cart_id"],
-            },
+        # Removed through the cart route rather than by asking.
+        #
+        # Asking needs the model, and this check is about whether removal works -
+        # which is a different question from whether the model understands
+        # "actually remove that". The second is worth testing and belongs with the
+        # other reasoning checks, not gating three that have nothing to do with it.
+        lines_now = call(
+            "GET", f"/api/shop/{NORTHFIELD}/cart/{shop_cart['cart_id']}"
+        ).get("lines") or []
+
+        removed = (
+            call(
+                "PATCH",
+                f"/api/shop/{NORTHFIELD}/cart/{shop_cart['cart_id']}/lines/"
+                f"{lines_now[0]['line_id']}",
+                {"quantity": 0},
+            )
+            if lines_now
+            else {}
         )
         after = call("GET", f"/api/shop/{NORTHFIELD}/cart/{shop_cart['cart_id']}")
         check(
@@ -797,7 +854,12 @@ if queue2:
         "engine/api/routes.py::decide",
     )
 else:
-    check("rejection case reached the queue", False, "queue was empty", "chat.py")
+    check(
+        "rejection case reached the queue",
+        False,
+        "the queue was empty, so there was nothing to reject",
+        "engine/api/chat.py - a decline should create an approval",
+    )
 
 # ---------------------------------------------------------------------------
 
@@ -879,6 +941,41 @@ check(
     "engine/api/routes.py::ops_overview",
 )
 
+# One case, left pending on purpose.
+#
+# These checks were gated on the queue being non-empty, and by this point
+# everything earlier has been decided - so a clean run guaranteed they never
+# executed. A check that cannot run precisely when everything works is worse than
+# no check, because the suite looks complete.
+#
+# Simulated rather than chatted, so it needs no model.
+pending_bag = call("POST", f"/api/shop/{KETTLE}/cart")
+if pending_bag.get("cart_id"):
+    call(
+        "POST",
+        f"/api/shop/{KETTLE}/cart/{pending_bag['cart_id']}/lines",
+        {
+            "product_id": "KB-COL-02",
+            "variant_id": "KB-COL-02::250g whole bean",
+            "quantity": 1,
+        },
+    )
+    pending_paid = call(
+        "POST",
+        f"/api/shop/{KETTLE}/cart/{pending_bag['cart_id']}/checkout",
+        {"card_last4": "0002"},
+    )
+    call(
+        "POST",
+        "/api/simulate",
+        {
+            "connection_id": KETTLE,
+            "friction": "PAYMENT_DECLINED",
+            "order_id": (pending_paid.get("order") or {}).get("order_id"),
+            "session_id": f"hc_queue_{uuid.uuid4().hex[:6]}",
+        },
+    )
+
 ops_q = call("GET", "/api/ops/queue", key=OPERATOR)
 q_rows = ops_q.get("approvals")
 check(
@@ -937,6 +1034,19 @@ if failed:
     print(f"{passed} passed, {len(failed)} FAILED")
     for name in failed:
         print(f"  - {name}")
+    sys.exit(1)
+
+ran = passed + len(skipped)
+
+if ran < EXPECTED_CHECKS:
+    missing = EXPECTED_CHECKS - ran
+    print(f"{passed} passed, {len(skipped)} skipped, {missing} never ran.")
+    print()
+    print(f"  {missing} check(s) did not execute at all. Some checks need an")
+    print("  earlier one to succeed - a skipped model check takes its dependants")
+    print("  with it, and until now nothing said so.")
+    print()
+    print("  Rerun with the provider idle for a complete number.")
     sys.exit(1)
 
 print(f"All {passed} checks passed.")
