@@ -12,6 +12,8 @@ import {
   type Pipeline,
   type Product,
 } from "./api";
+
+import { type Account, whoAmI } from "./account";
 import { OpsConsole } from "./OpsConsole";
 import { CartPanel } from "./CartPanel";
 import { ChatWidget } from "./ChatWidget";
@@ -102,7 +104,26 @@ export default function App() {
   // now: it cannot be stale because there is nothing to be stale against, and
   // the first switch behaves like every other one because nothing has to
   // catch up.
-  const sessionId = sessionFor(connection);
+  // Who is signed in here, if anybody. Asked once per merchant on load.
+  const [account, setAccount] = useState<Account | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    whoAmI(connection).then((who) => {
+      if (!cancelled) setAccount(who);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [connection]);
+
+  // A signed-in shopper's conversation, or this tab's.
+  //
+  // Derived rather than stored, so there is nothing to keep in step - which is the
+  // mistake behind three separate bugs this week. Signed in, the id comes from the
+  // engine and follows them across visits; as a guest it is per-tab, because there
+  // is no identity to remember a guest by.
+  const sessionId = account?.session_id ?? sessionFor(connection);
   const merchant = themeFor(connection);
     // Unread assistant messages while the chat is shut. Drives the badge, so a
   // shopper who closed the chat still knows something arrived for them.
@@ -640,6 +661,8 @@ export default function App() {
             setChatOpen(true);
             setUnread(0);
           }}
+          account={account}
+          onAccount={setAccount}
           onClose={() => setChatOpen(false)}
           onTurns={setChatTurns}
           onReply={(r) => showEngine && setPipeline(fromChat(r, null))}
