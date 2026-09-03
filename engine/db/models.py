@@ -409,3 +409,74 @@ class Shopper(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+
+
+
+
+
+class ShopperSession(Base):
+    """A signed-in shopper's session, held server-side.
+
+    Server-side rather than a JWT, and that is the decision worth defending. A JWT
+    cannot be revoked before it expires, so "sign me out" would be a lie until the
+    token aged out - and on a shared computer that is the one promise that has to be
+    true. A row can be deleted. There is already a database, and one lookup per
+    request costs nothing measurable.
+
+    The token is stored as a SHA-256 hash, not bcrypt. It is 32 bytes of urandom
+    with no dictionary to attack, so the reasoning is the same as for the API keys
+    and the opposite of the one for passwords.
+    """
+
+    __tablename__ = "shopper_sessions"
+
+    session_token_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    #: The first twelve characters, indexed, so a token is found without hashing
+    #: every row. The prefix alone is not usable.
+    prefix: Mapped[str] = mapped_column(String(16), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64))
+
+    shopper_id: Mapped[str] = mapped_column(String(64), index=True)
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    #: Revoked rather than deleted, so "when did this session end, and was it
+    #: signed out or did it expire" stays answerable.
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class SignInAttempt(Base):
+    """A failed sign-in, so guessing can be slowed down.
+
+    In the database rather than in memory, because in-memory counters reset on
+    every restart and do not exist for a second worker - which makes them
+    theatre. A row per failure is a write nobody will notice at this scale.
+
+    Only failures are recorded. A successful sign-in is not evidence of anything
+    worth rate limiting, and keeping them would be building a login log nobody
+    asked for.
+    """
+
+    __tablename__ = "sign_in_attempts"
+
+    attempt_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+
+    #: Indexed with the time, because the only question asked of this table is
+    #: "how many times has this name failed recently".
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, index=True
+    )

@@ -33,6 +33,7 @@ from .session import create_schema, database_url, dispose, session_scope
 # Last, because it needs session_scope and Shopper from this package - and
 # importing it earlier asked a half-built module for both.
 from . import shoppers
+from . import shopper_sessions
 
 __all__ = [
     "ApiKey",
