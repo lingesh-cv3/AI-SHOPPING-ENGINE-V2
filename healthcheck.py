@@ -137,11 +137,31 @@ def call(
         return {"_unreachable": str(e.reason)}
 
 
+#: What the assistant says when the provider refused us. It means one thing
+#: only, so it is safe to key on.
+#: Keyed on the shortest phrase in the throttle message unlikely to be reworded.
+#:
+#: The message has already changed once - from "getting" to "handling" - and this
+#: check silently stopped working, which is the risk in matching prose at all. If it
+#: is reworded again, this stops recognising a skip and reports a failure: annoying,
+#: and the safe direction.
+THROTTLED = "a lot of questions"
+
+#: Checks that could not run. Counted apart from failures, because a red line
+#: should mean something is broken.
+skipped: list[str] = []
+
+
 def check(name: str, ok: bool, detail: str = "", fix: str = "") -> bool:
     global passed
     if ok:
         passed += 1
         print(f"  PASS  {name}" + (f"  ({detail})" if detail else ""))
+    elif THROTTLED in detail:
+        # Throttled is not failed. The model was never asked, so nothing
+        # about the engine was measured either way.
+        skipped.append(name)
+        print(f"  SKIP  {name}  (the model was busy, not checked)")
     else:
         failed.append(name)
         print(f"  FAIL  {name}")
@@ -893,6 +913,13 @@ if rows:
 # ---------------------------------------------------------------------------
 
 print("\n" + "=" * 60)
+if skipped:
+    print()
+    print(f"  {len(skipped)} check(s) skipped - the model was busy:")
+    for name in skipped:
+        print(f"    {name}")
+    print("  Not failures. Rerun when the provider is idle for a complete number.")
+
 if failed:
     print(f"{passed} passed, {len(failed)} FAILED")
     for name in failed:
