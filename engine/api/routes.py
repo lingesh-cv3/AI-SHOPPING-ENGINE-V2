@@ -498,6 +498,28 @@ async def decide(
     if result is None:
         raise HTTPException(404, "no such approval on this connection")
 
+    # Out of time. The queue stops showing an approval past its deadline, but a
+    # console drawn a minute earlier still has a live button on it, and pressing
+    # it used to execute - which on this queue means taking a payment against a
+    # decision that had already lapsed.
+    #
+    # Swept rather than closed out here, so an approval that runs out while an
+    # operator is looking at it ends the same way as one that runs out while
+    # nobody is: the shopper is told, and the sale we did not save is counted.
+    if result.get("expired"):
+        try:
+            await expiry.sweep_once()
+        except Exception:  # noqa: BLE001
+            logger.exception("could not sweep an approval decided after expiry")
+        return {
+            **result,
+            "executed": None,
+            "reason": (
+                "that approval had already expired, so nothing was run. The "
+                "shopper has been told."
+            ),
+        }
+
     # An approval that changes nothing executes nothing. Without this check, two
     # operators clicking approve would produce one decision and two executions -
     # which is precisely the double-charge the idempotency key exists to prevent,

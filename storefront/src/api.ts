@@ -379,6 +379,9 @@ export interface Decision {
   state: string;
   changed: boolean;
   executed: Executed | null;
+  /** Set when the decision did not take effect and the operator should know why -
+   *  an approval that had already run out of time, for instance. */
+  reason?: string;
 }
 
 export interface Stats {

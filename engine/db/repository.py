@@ -214,6 +214,14 @@ async def decide_approval(
     decision. Two people clicking approve at the same moment should not produce two
     executions, and an audit record that changed after the fact is not an audit
     record.
+
+    And refuses one that has run out of time. The queue hides an approval past its
+    deadline and the sweeper closes it out, but between those two facts was a
+    window nobody guarded: expires_at had passed, the sweep had not run, the row
+    was still PENDING, and approving it executed as though it were fresh. Every
+    approval in this queue is financial by definition, so that was a payment taken
+    against a decision that had already timed out - and an operator only had to
+    click a button their console had drawn a minute earlier.
     """
     async with session_scope() as db:
         result = await db.execute(
@@ -231,6 +239,20 @@ async def decide_approval(
                 "case_id": approval.case_id,
                 "state": approval.state,
                 "changed": False,
+            }
+
+        expires = _aware(approval.expires_at)
+        if expires is not None and expires < datetime.now(UTC):
+            # Left PENDING on purpose, rather than expired here. Closing one out
+            # means telling the shopper and recording the sale we did not save,
+            # and that already exists in one place. Marking the row here would
+            # hide it from the sweeper and do neither.
+            return {
+                "approval_id": approval_id,
+                "case_id": approval.case_id,
+                "state": "EXPIRED",
+                "changed": False,
+                "expired": True,
             }
 
         approval.state = "APPROVED" if approved else "REJECTED"

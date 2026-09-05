@@ -394,10 +394,22 @@ export function OpsConsole() {
                     }
                   >
                     <div className="gate-label">
-                      {result.state === "APPROVED" ? "Approved" : "Rejected"}
+                      {result.state === "APPROVED"
+                        ? "Approved"
+                        : result.state === "EXPIRED"
+                          ? "Too late"
+                          : "Rejected"}
                     </div>
                     <p className="qsummary">
-                      {result.executed?.summary ?? "Recorded. Nothing was run."}
+                      {/* The engine's own words where it has any. An approval
+                          that ran out while this card was on screen was labelled
+                          "Rejected" and summarised as "Recorded. Nothing was
+                          run." - which reads as a decision somebody made, and
+                          tells an operator nothing about why their press did
+                          not take. */}
+                      {result.reason ??
+                        result.executed?.summary ??
+                        "Recorded. Nothing was run."}
                     </p>
                   </div>
                 ) : rejecting === item.approval_id ? (
