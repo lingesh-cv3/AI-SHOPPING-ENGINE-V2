@@ -9,7 +9,16 @@ Nothing in the schema uses a SQLite-only feature.
 """
 from . import idempotency
 from . import keys
-from .models import ApiKey, Approval, Base, Case, ExecutionAttempt, MerchantPolicy, Outcome
+from .models import (
+    ApiKey,
+    Approval,
+    Base,
+    Case,
+    ExecutionAttempt,
+    MerchantPolicy,
+    Outcome,
+    ResourceOwner,
+)
 from .repository import (
     decide_approval,
     decided_across,
@@ -37,6 +46,10 @@ from . import shopper_sessions
 
 from . import shopper_carts
 
+# Who a cart, a conversation or an order belongs to. Imported after the models
+# for the same reason as the two above: it asks this package for session_scope.
+from . import owners
+
 __all__ = [
     "ApiKey",
     "Approval",
@@ -61,5 +74,11 @@ __all__ = [
     "record_case",
     "record_outcome",
     "session_scope",
-    "stats","MerchantPolicy", "load_policies", "save_policy","merchant_report"
+    "stats",
+    "MerchantPolicy",
+    "load_policies",
+    "save_policy",
+    "merchant_report",
+    "owners",
+    "ResourceOwner",
 ]

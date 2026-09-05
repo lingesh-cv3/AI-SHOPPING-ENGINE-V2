@@ -35,7 +35,7 @@ from engine import db
 from engine import session as session_store
 from shared.models import CommerceError
 
-from .auth import any_key, belongs_to
+from .auth import Visitor, any_key, belongs_to, require_owner, visitor
 from .why import explain
 from .deps import engine
 
@@ -174,10 +174,47 @@ class ChatReply(BaseModel):
     #: have phrased them.
 
 
+async def _mine(who: Visitor, connection_id: str, *, session_id: str, cart_id: str | None = None) -> None:
+    """Refuse unless this conversation and cart belong to the caller.
+
+    Both, because a message carries both and either one being somebody else's is a
+    problem. A stranger reading a transcript learns what somebody bought; a
+    stranger naming another shopper's cart_id in a pay request spends against a
+    basket they did not fill.
+
+    Session ids come from the storefront and look like sess_a1b2c3d4e5f6, so they
+    are not countable the way cart ids are - but "hard to guess" is not the same as
+    "checked", and this is the check.
+    """
+    await require_owner(
+        who,
+        connection_id,
+        db.owners.SESSION,
+        session_id,
+        code="SESSION_NOT_FOUND",
+        message="no such conversation",
+    )
+
+    if cart_id:
+        await require_owner(
+            who,
+            connection_id,
+            db.owners.CART,
+            cart_id,
+            code="CART_NOT_FOUND",
+            message="no such cart",
+        )
+
+
 @router.post("", response_model=ChatReply)
-async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
+async def chat(
+    req: ChatRequest,
+    key=Depends(any_key),
+    who: Visitor = Depends(visitor),
+) -> ChatReply:
     """Handle one shopper message."""
     belongs_to(key, req.connection_id)
+    await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
     adapter = engine.registry.adapter_for(req.connection_id)
     if adapter is None:
         raise HTTPException(404, f"unknown connection '{req.connection_id}'")
@@ -559,7 +596,10 @@ async def chat(req: ChatRequest, key=Depends(any_key)) -> ChatReply:
 
 @router.get("/{connection_id}/{session_id}")
 async def transcript(
-    connection_id: str, session_id: str, key=Depends(any_key)
+    connection_id: str,
+    session_id: str,
+    key=Depends(any_key),
+    who: Visitor = Depends(visitor),
 ) -> dict:
     """The conversation so far.
 
@@ -567,10 +607,15 @@ async def transcript(
     this to pick up messages written by something other than the shopper - an
     operator approving a payment recovery, for instance. Those arrive here rather
     than as a reply to anything the shopper said.
+
+    Theirs only. This route answered for any session id anybody named, which made
+    a shopper's whole conversation - what they asked, what they were told, what
+    they bought - readable by anyone holding the key that ships in the page.
     """
     belongs_to(key, connection_id)
     if engine.registry.adapter_for(connection_id) is None:
         raise HTTPException(404, f"unknown connection '{connection_id}'")
+    await _mine(who, connection_id, session_id=session_id)
     return {
         "session_id": session_id,
         "turns": await session_store.turns(session_id, connection_id, limit=60),
@@ -598,7 +643,11 @@ class ActRequest(BaseModel):
 
 
 @router.post("/act", response_model=ChatReply)
-async def act(req: ActRequest, key=Depends(any_key)) -> ChatReply:
+async def act(
+    req: ActRequest,
+    key=Depends(any_key),
+    who: Visitor = Depends(visitor),
+) -> ChatReply:
     """Carry out a tap, without asking a model anything.
 
     The safety path is unchanged. The action still goes through the Decision Engine
@@ -609,6 +658,7 @@ async def act(req: ActRequest, key=Depends(any_key)) -> ChatReply:
     adapter = engine.registry.adapter_for(req.connection_id)
     if adapter is None:
         raise HTTPException(404, f"unknown connection '{req.connection_id}'")
+    await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
 
     await session_store.add_turn(
         session_id=req.session_id,
@@ -814,7 +864,11 @@ class PayRequest(BaseModel):
 
 
 @router.post("/pay", response_model=ChatReply)
-async def pay(req: PayRequest, key=Depends(any_key)) -> ChatReply:
+async def pay(
+    req: PayRequest,
+    key=Depends(any_key),
+    who: Visitor = Depends(visitor),
+) -> ChatReply:
     """Take payment, in the conversation the shopper is already in.
 
     The one place in the system that charges without an approval, and the reason is
@@ -832,6 +886,10 @@ async def pay(req: PayRequest, key=Depends(any_key)) -> ChatReply:
     adapter = engine.registry.adapter_for(req.connection_id)
     if adapter is None:
         raise HTTPException(404, f"unknown connection '{req.connection_id}'")
+
+    # Before anything is charged. This route takes a cart_id from the caller and
+    # spent against it without ever asking whose it was.
+    await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
 
     await session_store.add_turn(
         session_id=req.session_id,
@@ -879,6 +937,14 @@ async def pay(req: PayRequest, key=Depends(any_key)) -> ChatReply:
     order = result.order
     order_id = order.order_id if order else None
 
+    # Theirs, paid or declined. The declined one matters more: it is the order a
+    # shopper comes back to look at, and the one an operator writes to them about.
+    if order_id:
+        keys = await who.keys_for(req.connection_id)
+        await db.owners.take(
+            req.connection_id, db.owners.ORDER, order_id, keys[0]
+        )
+
     if result.succeeded:
         reply = (
             f"Paid. Your order is {order_id} and you will get a confirmation "
@@ -910,6 +976,7 @@ async def pay(req: PayRequest, key=Depends(any_key)) -> ChatReply:
                 skip_model=True,
             ),
             key=key,
+            who=who,
         )
 
         # Prefixed rather than replaced. The first sentence is the fact the shopper

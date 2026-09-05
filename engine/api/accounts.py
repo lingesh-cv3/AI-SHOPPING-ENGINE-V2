@@ -21,7 +21,7 @@ from engine import db
 from engine.db.shoppers import SignUpError
 from engine.session import shopper_memory
 
-from .auth import any_key, belongs_to
+from .auth import Visitor, any_key, belongs_to, visitor
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,7 @@ async def _finish(
     connection_id: str,
     guest_session: str | None,
     guest_cart: str | None,
+    who: Visitor | None = None,
 ) -> dict:
     """Give the shopper their conversation and their basket back.
 
@@ -113,6 +114,28 @@ async def _finish(
     account_session = await shopper_memory.session_for(
         shopper["shopper_id"], connection_id
     )
+
+    # The conversation they are signed into is theirs by definition - it is derived
+    # from their own id - so it is filed under the account before anything else
+    # touches it. Without this, whichever browser spoke first would hold it, and
+    # they would be locked out of their own thread on a second device.
+    await db.owners.claim_safely(
+        connection_id, db.owners.SESSION, account_session, shopper["shopper_id"]
+    )
+
+    # What they were holding as a guest comes with them, but only what they
+    # actually held. Adopting on the strength of an id in the request body would
+    # make signing in a way to take somebody else's basket.
+    if who is not None:
+        held = await who.keys_for(connection_id)
+        for kind, resource in (
+            (db.owners.SESSION, guest_session),
+            (db.owners.CART, guest_cart),
+        ):
+            if resource:
+                await db.owners.adopt(
+                    connection_id, kind, resource, shopper["shopper_id"], held
+                )
 
     if guest_session:
         moved = await shopper_memory.adopt(
@@ -145,6 +168,7 @@ async def sign_up(
     request: Request,
     response: Response,
     key=Depends(any_key),
+    who: Visitor = Depends(visitor),
 ) -> dict:
     """Create an account and sign in.
 
@@ -173,7 +197,7 @@ async def sign_up(
     _set_cookie(response, request, token)
 
     restored = await _finish(
-        shopper, body.connection_id, body.guest_session, body.guest_cart
+        shopper, body.connection_id, body.guest_session, body.guest_cart, who
     )
 
     return {
@@ -189,6 +213,7 @@ async def sign_in(
     request: Request,
     response: Response,
     key=Depends(any_key),
+    who: Visitor = Depends(visitor),
 ) -> dict:
     """Sign in, unless this username has been guessed at too often lately."""
     belongs_to(key, body.connection_id)
@@ -219,7 +244,7 @@ async def sign_in(
     )
     _set_cookie(response, request, token)
     restored = await _finish(
-        shopper, body.connection_id, body.guest_session, body.guest_cart
+        shopper, body.connection_id, body.guest_session, body.guest_cart, who
     )
 
     return {
@@ -294,6 +319,7 @@ class MyCart(BaseModel):
 async def claim_cart(
     body: MyCart,
     key=Depends(any_key),
+    who: Visitor = Depends(visitor),
     cv3_shopper: str | None = Cookie(default=None),
 ) -> dict:
     """Note that this cart belongs to whoever is signed in.
@@ -311,6 +337,28 @@ async def claim_cart(
 
     session = await db.shopper_sessions.resolve(cv3_shopper, body.connection_id)
     if session is None:
+        return {"remembered": False}
+
+    # Filed under the account rather than under this browser, so it is still theirs
+    # on their phone tomorrow. Only from an owner they already hold - otherwise
+    # signing in would be a way to take any cart whose id you could name.
+    moved = await db.owners.adopt(
+        body.connection_id,
+        db.owners.CART,
+        body.cart_id,
+        session["shopper_id"],
+        await who.keys_for(body.connection_id),
+    )
+
+    if not moved and not await db.owners.may_touch(
+        body.connection_id,
+        db.owners.CART,
+        body.cart_id,
+        await who.keys_for(body.connection_id),
+    ):
+        # Somebody else's basket, named by a signed-in shopper. Nothing to do and
+        # nothing to say - the same quiet answer a guest gets, because telling
+        # them the cart exists is the fact worth withholding.
         return {"remembered": False}
 
     await db.shopper_carts.remember(

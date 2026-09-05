@@ -512,3 +512,57 @@ class ShopperCart(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now
     )
+
+
+class ResourceOwner(Base):
+    """Who a cart, a conversation or an order belongs to.
+
+    The gap this closes: every route was locked by merchant and none by shopper. A
+    publishable key is bound to one shop and ships in the browser, so every shopper
+    at that shop holds the same one - which made "is this caller entitled to this
+    merchant" the only question anybody asked. Cart ids run BSK00001, BSK00002, so
+    reading somebody else's basket was counting, not guessing.
+
+    The owner is not a shopper account. Most shoppers never make one, and a guest's
+    basket needs protecting just as much as a member's - more, really, since the
+    guest is the common case. So an owner is whichever browser made the thing,
+    identified by a cookie it cannot read and did not choose, and a signed-in
+    shopper additionally owns everything filed under their account.
+
+    One row per resource, and the first claim wins. A resource nobody has claimed is
+    claimed by whoever touches it first, which is what lets the carts already in
+    this database keep working. That is trust-on-first-use and it is honestly
+    weaker than claiming at creation: somebody counting through cart ids before
+    their owners come back would claim them. It closes the hole for everything made
+    from here on, and the durable answer is ids that cannot be counted - which is
+    the platform's decision, not ours.
+    """
+
+    __tablename__ = "resource_owners"
+    __table_args__ = (
+        UniqueConstraint(
+            "connection_id", "kind", "resource_id", name="uq_one_owner_per_thing"
+        ),
+    )
+
+    row_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+
+    #: "cart", "session" or "order". A string rather than an enum because the set
+    #: is small, the values are written once, and a migration to add one should not
+    #: be a schema change.
+    kind: Mapped[str] = mapped_column(String(16), index=True)
+
+    #: The platform's id, or the storefront's session id. Not ours either way - we
+    #: only record who reached it first.
+    resource_id: Mapped[str] = mapped_column(String(200), index=True)
+
+    #: A visitor cookie's fingerprint, or a shopper_id. Both are opaque and neither
+    #: is guessable, which is what makes them usable as an answer to "are you the
+    #: same person as last time".
+    owner_key: Mapped[str] = mapped_column(String(80), index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now
+    )

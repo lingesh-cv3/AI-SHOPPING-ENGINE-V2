@@ -22,7 +22,9 @@ from pydantic import BaseModel, Field
 
 from shared.models import CapabilityUnsupported, CommerceError, Money
 
-from .auth import shopper_scoped
+from engine import db
+
+from .auth import Visitor, require_owner, shopper_scoped, visitor
 from .deps import engine
 
 router = APIRouter(prefix="/api/shop", tags=["shop"])
@@ -134,6 +136,23 @@ class CheckoutBody(BaseModel):
     #: can be demonstrated on demand rather than waited for.
     card_last4: str = "1111"
 
+async def _mine(who: Visitor, connection_id: str, kind: str, resource_id: str) -> None:
+    """Refuse unless this cart or order belongs to the caller.
+
+    The message is the one a shopper would get for a cart that has gone. That is
+    not a euphemism - from where they are standing the two are the same thing, and
+    the storefront already knows how to recover from it by starting a fresh one.
+    """
+    codes = {
+        db.owners.CART: ("CART_NOT_FOUND", "no such cart"),
+        db.owners.ORDER: ("ORDER_NOT_FOUND", "no such order"),
+    }
+    code, message = codes[kind]
+    await require_owner(
+        who, connection_id, kind, resource_id, code=code, message=message
+    )
+
+
 @router.get("/{connection_id}/departments")
 async def departments(
     connection_id: str,
@@ -191,6 +210,7 @@ def _order(o) -> dict:
 @router.get("/{connection_id}/order/{order_id}")
 async def get_order(
     connection_id: str, order_id: str,
+    who: Visitor = Depends(visitor),
     _=Depends(shopper_scoped()),
 ) -> dict:
     """Look up an order.
@@ -198,7 +218,12 @@ async def get_order(
     Works for paid and unpaid orders alike. A shopper whose card was declined
     still has an order, and being able to look it up is part of what makes the
     sale recoverable rather than lost.
+
+    Theirs, though. Order ids run ORD00001, ORD00002, and this route used to hand
+    any of them - with lines, totals and what was paid - to anybody holding the
+    publishable key that ships in the page.
     """
+    await _mine(who, connection_id, db.owners.ORDER, order_id)
     adapter = _adapter(connection_id)
     try:
         return _order(await adapter.get_order(order_id))
@@ -247,20 +272,36 @@ async def product(
 @router.post("/{connection_id}/cart")
 async def create_cart(
     connection_id: str,
+    who: Visitor = Depends(visitor),
     _=Depends(shopper_scoped()),
 ) -> dict:
+    """Start a basket, and record whose it is.
+
+    Claimed here rather than on first use, because this is the one moment the
+    answer is not a guess: the browser asking for a cart is the browser that will
+    be filling it.
+    """
     adapter = _adapter(connection_id)
     try:
-        return _cart(await adapter.create_cart())
+        cart = await adapter.create_cart()
     except CommerceError as exc:
         raise _handle(exc) from exc
+
+    # Taken rather than claimed. The shop has just minted this id, so whoever is
+    # holding it owns it - including when a restart has reissued a number somebody
+    # else held last week.
+    keys = await who.keys_for(connection_id)
+    await db.owners.take(connection_id, db.owners.CART, cart.cart_id, keys[0])
+    return _cart(cart)
 
 
 @router.get("/{connection_id}/cart/{cart_id}")
 async def get_cart(
     connection_id: str, cart_id: str,
+    who: Visitor = Depends(visitor),
     _=Depends(shopper_scoped()),
 ) -> dict:
+    await _mine(who, connection_id, db.owners.CART, cart_id)
     adapter = _adapter(connection_id)
     try:
         return _cart(await adapter.get_cart(cart_id))
@@ -271,8 +312,10 @@ async def get_cart(
 @router.post("/{connection_id}/cart/{cart_id}/lines")
 async def add_line(
     connection_id: str, cart_id: str, body: AddLine,
+    who: Visitor = Depends(visitor),
     _=Depends(shopper_scoped()),
 ) -> dict:
+    await _mine(who, connection_id, db.owners.CART, cart_id)
     adapter = _adapter(connection_id)
     try:
         cart = await adapter.add_to_cart(
@@ -292,6 +335,7 @@ async def change_line(
     cart_id: str,
     line_id: str,
     body: ChangeLine,
+    who: Visitor = Depends(visitor),
     _=Depends(shopper_scoped()),
 ) -> dict:
     """Change how many of something is in the cart. Zero removes it.
@@ -304,6 +348,7 @@ async def change_line(
     interface offers and inventing a second verb for the same operation would mean
     two code paths where one will do.
     """
+    await _mine(who, connection_id, db.owners.CART, cart_id)
     adapter = _adapter(connection_id)
     try:
         cart = await adapter.update_cart(cart_id, line_id, quantity=body.quantity)
@@ -315,6 +360,7 @@ async def change_line(
 @router.post("/{connection_id}/cart/{cart_id}/promotion")
 async def apply_promotion(
     connection_id: str, cart_id: str, body: PromoBody,
+    who: Visitor = Depends(visitor),
     _=Depends(shopper_scoped()),
 ) -> dict:
     """Apply a coupon.
@@ -322,6 +368,7 @@ async def apply_promotion(
     WELCOME10 works. SUMMER25 is expired, which is what drives the
     PROMOTION_FAILED friction path.
     """
+    await _mine(who, connection_id, db.owners.CART, cart_id)
     adapter = _adapter(connection_id)
     try:
         await adapter.apply_promotion(cart_id, body.code)
@@ -333,6 +380,7 @@ async def apply_promotion(
 @router.post("/{connection_id}/cart/{cart_id}/checkout")
 async def checkout(
     connection_id: str, cart_id: str, body: CheckoutBody,
+    who: Visitor = Depends(visitor),
     _=Depends(shopper_scoped()),
 ) -> dict:
     """Complete the order.
@@ -340,6 +388,7 @@ async def checkout(
     A decline returns HTTP 200 with succeeded false and a real order. It is not an
     error - it is an unpaid order, which is precisely the thing worth recovering.
     """
+    await _mine(who, connection_id, db.owners.CART, cart_id)
     adapter = _adapter(connection_id)
     key = f"idem-{uuid.uuid4().hex[:12]}"
     try:
@@ -350,6 +399,17 @@ async def checkout(
         raise _handle(exc) from exc
 
     order = result.order
+
+    # The order belongs to whoever the cart belonged to. Recorded here rather than
+    # left to first use, because the alternative is that the first person to count
+    # up to this id owns it - and a declined order is precisely the one a shopper
+    # will come back to look at later.
+    if order is not None:
+        keys = await who.keys_for(connection_id)
+        await db.owners.take(
+            connection_id, db.owners.ORDER, order.order_id, keys[0]
+        )
+
     return {
         "succeeded": result.succeeded,
         "payment_status": str(result.payment_status),

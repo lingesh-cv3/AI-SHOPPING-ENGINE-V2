@@ -10,9 +10,11 @@ telling a caller which of those it was tells them what to try next.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 
-from fastapi import Header, HTTPException, Request
+from fastapi import Cookie, Header, HTTPException, Request, Response
 
 from engine import db
 
@@ -167,3 +169,128 @@ def belongs_to(record, connection_id: str) -> None:
         return
     if record.connection_id != connection_id:
         raise HTTPException(401, REFUSED)
+
+
+# ---------------------------------------------------------------------------
+# Which shopper, as opposed to which merchant
+# ---------------------------------------------------------------------------
+#
+# Everything above answers "may this caller act for this merchant". That was the
+# only question being asked, and it is not enough. A publishable key is bound to
+# one shop and ships in the browser, so every shopper at that shop holds the same
+# one - and cart ids run BSK00001, BSK00002. Reading somebody else's basket was
+# counting, not attacking.
+#
+# So there is a second identity, underneath the key: the browser itself. It is not
+# an account, because most shoppers never make one and a guest's basket needs
+# protecting just as much. It is a cookie the page cannot read and nobody chose.
+
+
+#: The cookie that says which browser this is.
+#:
+#: httpOnly for the same reason as the sign-in cookie: an injected script can steal
+#: anything JavaScript can read. This one is not a credential in the usual sense -
+#: it identifies rather than authenticates - but it is what stands between a
+#: stranger and a shopper's basket, which is close enough to treat it the same way.
+VISITOR_COOKIE = "cv3_visitor"
+
+#: A year. A basket should still be theirs when they come back after a fortnight,
+#: and a guest has nothing else remembering them.
+VISITOR_MAX_AGE = 365 * 24 * 60 * 60
+
+
+def _visitor_key(token: str) -> str:
+    """The stored form of a visitor token.
+
+    Hashed, so the database never holds anything that could be pasted back into a
+    cookie. Same reasoning as the API keys and the shopper sessions: the token is
+    32 bytes of urandom, so a fast hash is right and there is no dictionary to
+    slow anybody down.
+    """
+    return "vis_" + hashlib.sha256(token.encode()).hexdigest()[:40]
+
+
+class Visitor:
+    """One browser, and whoever is signed in on it.
+
+    Carries both because a caller is legitimately two people at once. A shopper who
+    filled a basket as a guest and then signed in must not lose it, and the same
+    shopper on their phone tomorrow must still find it - so the browser's claim and
+    the account's claim both have to count.
+    """
+
+    def __init__(self, key: str, shopper_cookie: str | None) -> None:
+        self.key = key
+        self._shopper_cookie = shopper_cookie
+
+    async def keys_for(self, connection_id: str) -> list[str]:
+        """Every identity this caller may act as, most specific first.
+
+        The account comes first deliberately. Whatever they make while signed in is
+        filed under the account rather than under this browser, which is what lets
+        it follow them to another device. A guest's things are filed under the
+        browser, because there is nothing else to file them under.
+        """
+        session = await db.shopper_sessions.resolve(
+            self._shopper_cookie, connection_id
+        )
+        if session is not None:
+            return [session["shopper_id"], self.key]
+        return [self.key]
+
+
+async def visitor(
+    request: Request,
+    response: Response,
+    cv3_visitor: str | None = Cookie(default=None),
+    cv3_shopper: str | None = Cookie(default=None),
+) -> Visitor:
+    """Identify the browser, minting a cookie for it if it has none.
+
+    Minted here rather than at some explicit "start a visit" endpoint, because
+    there is no such moment - a shopper arrives by loading a page, and the first
+    thing the storefront does is ask for a cart. Any route that can own something
+    is a route that can be somebody's first.
+    """
+    token = cv3_visitor
+
+    if not token or len(token) < 16:
+        token = f"vis_{os.urandom(32).hex()}"
+        response.set_cookie(
+            VISITOR_COOKIE,
+            token,
+            max_age=VISITOR_MAX_AGE,
+            httponly=True,
+            samesite="lax",
+            secure=request.url.scheme == "https",
+            path="/",
+        )
+
+    return Visitor(_visitor_key(token), cv3_shopper)
+
+
+async def require_owner(
+    who: Visitor,
+    connection_id: str,
+    kind: str,
+    resource_id: str,
+    *,
+    code: str,
+    message: str,
+) -> None:
+    """Refuse unless this caller owns this cart, conversation or order.
+
+    404 rather than 403, and that is the whole point of the status code here. A
+    403 confirms the thing exists, so an id that answers "forbidden" is an id
+    somebody has just learned is real. Refusing the way a missing thing refuses
+    tells them nothing they did not already have.
+    """
+    if await db.owners.may_touch(
+        connection_id, kind, resource_id, await who.keys_for(connection_id)
+    ):
+        return
+
+    raise HTTPException(
+        404,
+        detail={"code": code, "message": message, "retryable": False},
+    )

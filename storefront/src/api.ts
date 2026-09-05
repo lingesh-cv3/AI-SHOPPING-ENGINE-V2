@@ -421,6 +421,13 @@ function publishableKey(connectionId: string): string {
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${ENGINE}${path}`, {
     ...init,
+    // Said rather than left to the default, which happens to be the same thing.
+    //
+    // The publishable key says which shop; the cookie says which shopper. Both
+    // have to arrive or a shopper is refused their own basket, and a guarantee
+    // resting on a default nobody wrote down is one line from being lost. It
+    // matches account.ts, which has always been explicit for the same reason.
+    credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
       // Every shopper request carries the current merchant's publishable

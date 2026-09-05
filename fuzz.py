@@ -37,6 +37,7 @@ import json
 import random
 import sys
 import urllib.error
+import http.cookiejar
 import urllib.request
 from pathlib import Path
 
@@ -81,6 +82,16 @@ def load_keys() -> dict[str, str]:
 KEYS = load_keys()
 
 
+#: One cookie jar for the whole run, so the suite looks like one browser.
+#:
+#: The engine now files a cart, a conversation and an order under whichever
+#: browser made it, and refuses the rest. Without a jar every request here would
+#: arrive as a different stranger and the second call of every pair would be
+#: refused - correctly, which is the point.
+_JAR = http.cookiejar.CookieJar()
+_OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_JAR))
+
+
 def call(method: str, path: str, body: dict | None = None, key: str | None = None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
@@ -93,7 +104,7 @@ def call(method: str, path: str, body: dict | None = None, key: str | None = Non
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with _OPENER.open(req, timeout=30) as r:
             return json.loads(r.read() or "{}")
     except urllib.error.HTTPError as e:
         return {"_status": e.code}
