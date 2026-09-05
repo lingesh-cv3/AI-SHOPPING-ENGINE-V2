@@ -430,6 +430,98 @@ else:
 
 # ---------------------------------------------------------------------------
 
+section("A basket is paid for once")
+
+# One basket, three cards, on both platforms.
+#
+# The key handed to the platform was derived from the cart and the card, so the
+# same card twice was recognised as a retry - which is what "a paid cart is never
+# chargeable again" was taken to mean, and it is only ever true of a repeated tap
+# on one card. A different card was a different key, and one basket bought three
+# separate orders at the full amount.
+#
+# Both merchants, because this is not a platform quirk. Northfield is REST and
+# Kettle is GraphQL and neither of them was being asked the question.
+
+
+def buy_three_ways(shop: str, product: str, variant: str) -> dict:
+    """Pay for one basket three times on three cards. Report what it bought."""
+    basket = call("POST", f"/api/shop/{shop}/cart")
+    if "cart_id" not in basket:
+        return {"setup": str(basket)[:120]}
+
+    cart_id = basket["cart_id"]
+    call(
+        "POST",
+        f"/api/shop/{shop}/cart/{cart_id}/lines",
+        {"product_id": product, "variant_id": variant, "quantity": 1},
+    )
+
+    # Fresh per run, like every other session id in this file. A fixed one is
+    # claimed by the first run that uses it and refused to every run after,
+    # because each run is a new browser - which is the scoping working, not
+    # failing.
+    session_id = f"hc_once_{uuid.uuid4().hex[:6]}"
+    bought: list[str] = []
+    replies: list[str] = []
+
+    for card in ("1111", "2222", "3333", "4444"):
+        r = call(
+            "POST",
+            "/api/chat/pay",
+            {
+                "connection_id": shop,
+                "session_id": session_id,
+                "cart_id": cart_id,
+                "card_last4": card,
+            },
+        )
+        payment = r.get("payment") or {}
+        replies.append(str(r.get("reply") or r)[:120])
+        # Counted only when a *new* order came back. The already-paid answer
+        # repeats the original order id, which is the point of it.
+        if payment.get("paid") and payment.get("order_id"):
+            if not payment.get("already_paid"):
+                bought.append(payment["order_id"])
+
+    return {
+        "orders": sorted(set(bought)),
+        "last": replies[-1],
+        "told": (payment or {}).get("already_paid") is True,
+    }
+
+
+northfield_once = buy_three_ways(NORTHFIELD, "P1002", "P1002-8")
+kettle_once = buy_three_ways(KETTLE, "KB-BLD-05", "KB-BLD-05::250g ground")
+
+check(
+    "Northfield: four cards on one basket buy it once",
+    northfield_once.get("orders") is not None
+    and len(northfield_once["orders"]) == 1,
+    f"bought {northfield_once.get('orders', northfield_once)}",
+    "engine/db/idempotency.py::begin_payment",
+)
+check(
+    "Northfield: paying again says so instead of charging",
+    northfield_once.get("told") is True,
+    str(northfield_once.get("last")),
+    "engine/api/chat.py::pay",
+)
+check(
+    "Kettle: four cards on one basket buy it once",
+    kettle_once.get("orders") is not None and len(kettle_once["orders"]) == 1,
+    f"bought {kettle_once.get('orders', kettle_once)}",
+    "engine/db/idempotency.py::begin_payment",
+)
+check(
+    "Kettle: paying again says so instead of charging",
+    kettle_once.get("told") is True,
+    str(kettle_once.get("last")),
+    "engine/api/chat.py::pay",
+)
+
+# ---------------------------------------------------------------------------
+
 section("Northfield: a decline that cannot be recovered")
 
 cart = call("POST", f"/api/shop/{NORTHFIELD}/cart")

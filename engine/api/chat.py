@@ -891,6 +891,49 @@ async def pay(
     # spent against it without ever asking whose it was.
     await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
 
+    # And before anything is charged twice.
+    #
+    # The platform key is derived from the cart and the card, which recognises the
+    # same card tapped twice and nothing else. A different card was a different key
+    # and bought the same basket again at the full amount. The card cannot come out
+    # of that key - a decline is stored under it too, so a cart-only key would
+    # replay the refusal forever and there would be no recovery to offer. So the
+    # engine keeps its own answer to "has this basket been bought".
+    settled = await db.idempotency.begin_payment(req.connection_id, req.cart_id)
+
+    if settled is not None:
+        if settled.get("in_flight"):
+            reply = (
+                "That is going through now - give it a moment rather than "
+                "paying again."
+            )
+        else:
+            reply = (
+                f"That basket is already paid for - it is order "
+                f"{settled.get('order_id')}. Nothing has been charged again."
+            )
+
+        await session_store.add_turn(
+            session_id=req.session_id,
+            connection_id=req.connection_id,
+            speaker="assistant",
+            text=reply,
+        )
+        return ChatReply(
+            reply=reply,
+            session_id=req.session_id,
+            used_model=False,
+            cart_changed=False,
+            payment={
+                "paid": True,
+                "order_id": settled.get("order_id"),
+                # The storefront reads this to stop offering the cards again,
+                # rather than inferring it from the wording of a sentence.
+                "already_paid": True,
+                "cart_retired": True,
+            },
+        )
+
     await session_store.add_turn(
         session_id=req.session_id,
         connection_id=req.connection_id,
@@ -917,6 +960,11 @@ async def pay(
     except CommerceError as exc:
         # A platform refusal is not the shopper's fault and not their business.
         logger.exception("checkout failed on %s", req.connection_id)
+
+        # Nothing was attempted, so the basket goes back. Holding the claim would
+        # lock somebody out of their own cart over an error that was not theirs.
+        await db.idempotency.release_payment(req.connection_id, req.cart_id)
+
         reply = (
             "Something went wrong taking the payment, and it was not your card. "
             "Nothing has been charged - try again in a moment."
@@ -936,6 +984,19 @@ async def pay(
 
     order = result.order
     order_id = order.order_id if order else None
+
+    # A success locks the basket for good; a decline leaves it buyable, because the
+    # shopper is about to be offered another way to pay and refusing them then
+    # would turn a recoverable sale into a lost one.
+    await db.idempotency.payment_settled(
+        req.connection_id,
+        req.cart_id,
+        succeeded=result.succeeded,
+        order_id=order_id,
+        summary=(
+            f"paid {order_id}" if result.succeeded else f"declined on {order_id}"
+        ),
+    )
 
     # Theirs, paid or declined. The declined one matters more: it is the order a
     # shopper comes back to look at, and the one an operator writes to them about.

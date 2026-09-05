@@ -163,3 +163,124 @@ async def purge_old() -> int:
         for row in stale:
             await db.delete(row)
         return len(stale)
+
+
+# ---------------------------------------------------------------------------
+# A basket is paid for once
+# ---------------------------------------------------------------------------
+#
+# Everything above guards one action on one case. This guards one basket across
+# every route that can charge it, which is a different question and was not being
+# asked by anybody.
+#
+# What went wrong: the key handed to the platform was derived from the cart and
+# the card. The same card twice was recognised as a retry, so "a paid cart is
+# never chargeable again" looked true and was only ever true of a repeated tap on
+# one card. A different card was a different key, and the same basket bought three
+# separate orders at the full amount on both platforms.
+#
+# The card cannot come out of that key. A declined purchase is stored under it
+# too, so a cart-only key would replay the decline forever and a shopper whose
+# card was refused could never pay with another one - which is the recovery this
+# whole system exists for. So the platform key keeps the card, and the engine is
+# what knows a basket has already been bought.
+
+
+def cart_payment_key(connection_id: str, cart_id: str) -> str:
+    """The ledger key for paying one basket.
+
+    The cart and nothing else. Not the card, not the attempt - the question this
+    answers is "has this basket been bought", and the answer must not depend on
+    which card somebody is holding when they ask.
+    """
+    digest = hashlib.sha256(f"{connection_id}|{cart_id}".encode()).hexdigest()
+    return f"paid_{digest[:32]}"
+
+
+async def begin_payment(connection_id: str, cart_id: str) -> dict | None:
+    """Take the right to charge this basket, or say why not.
+
+    None means charge it. A dict means do not, and carries `already_paid` for a
+    basket that is bought and `in_flight` for one somebody is buying right now.
+
+    The in-flight case is the race the ledger exists for: two taps on two cards
+    arriving together both read "not paid yet" and both charge. Claiming the row
+    before the platform call means the second one loses, which is the whole reason
+    this is written first rather than after.
+    """
+    key = cart_payment_key(connection_id, cart_id)
+
+    async with session_scope() as db:
+        existing = await db.get(ExecutionAttempt, key)
+
+        if existing is not None:
+            if existing.state == "DONE" and existing.succeeded:
+                return {
+                    "already_paid": True,
+                    "order_id": (existing.result or {}).get("order_id"),
+                    "summary": existing.summary,
+                }
+            if existing.state == "IN_FLIGHT":
+                return {"in_flight": True}
+
+            # DONE and not succeeded. A decline is not a purchase, so the basket is
+            # still buyable - which is the entire point of the recovery path. The
+            # row is reused rather than left behind to block them.
+            existing.state = "IN_FLIGHT"
+            existing.succeeded = None
+            existing.completed_at = None
+            return None
+
+        db.add(
+            ExecutionAttempt(
+                idempotency_key=key,
+                connection_id=connection_id,
+                case_id=cart_id[:40],
+                action_type="CHECKOUT",
+                state="IN_FLIGHT",
+            )
+        )
+
+    return None
+
+
+async def payment_settled(
+    connection_id: str,
+    cart_id: str,
+    *,
+    succeeded: bool,
+    order_id: str | None,
+    summary: str,
+) -> None:
+    """Record how the charge ended.
+
+    A success locks the basket for good. A decline leaves it buyable, because the
+    shopper is about to be offered another way to pay and refusing them then would
+    turn a recoverable sale into a lost one.
+    """
+    key = cart_payment_key(connection_id, cart_id)
+
+    async with session_scope() as db:
+        row = await db.get(ExecutionAttempt, key)
+        if row is None:
+            return
+        row.state = "DONE"
+        row.succeeded = succeeded
+        row.summary = summary[:500]
+        row.result = {"order_id": order_id} if order_id else {}
+        row.completed_at = datetime.now(UTC)
+
+
+async def release_payment(connection_id: str, cart_id: str) -> None:
+    """Give the basket back after a charge that never happened.
+
+    For the platform refusing the call outright - an empty basket, a network
+    failure. Nothing was attempted, so leaving a row behind would lock somebody out
+    of a basket over an error that was not theirs.
+    """
+    key = cart_payment_key(connection_id, cart_id)
+
+    async with session_scope() as db:
+        row = await db.get(ExecutionAttempt, key)
+        if row is not None and row.state == "IN_FLIGHT":
+            await db.delete(row)
