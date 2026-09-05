@@ -171,6 +171,13 @@ export interface Cart {
 
 export interface CheckoutResult {
   succeeded: boolean;
+  /** This basket was already bought, and nothing was charged for this press.
+   *
+   *  Succeeded is true and the order is the original one, so the shopper lands on
+   *  the order page either way - which is where somebody pressing Pay a second
+   *  time was trying to get to. The flag is here for anything that wants to say
+   *  so rather than work it out. */
+  already_paid?: boolean;
   payment_status: string;
   decline_reason: string | null;
   order: {

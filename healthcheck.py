@@ -520,6 +520,66 @@ check(
     "engine/api/chat.py::pay",
 )
 
+
+# The sidebar Pay button, which is a different route to the same money.
+#
+# The chat pay route derived its key from the cart and the card. This one
+# generated a fresh uuid per request, so it had no idempotency at all - not even
+# the half the other one had. The same cart and the same card, twice, bought two
+# orders, which is exactly what a shopper on a slow connection does when nothing
+# happens after the first tap.
+def buy_twice_from_the_sidebar(shop: str, product: str, variant: str) -> dict:
+    """Press Pay twice on one basket, the way a slow connection does."""
+    basket = call("POST", f"/api/shop/{shop}/cart")
+    if "cart_id" not in basket:
+        return {"setup": str(basket)[:120]}
+
+    cart_id = basket["cart_id"]
+    call(
+        "POST",
+        f"/api/shop/{shop}/cart/{cart_id}/lines",
+        {"product_id": product, "variant_id": variant, "quantity": 1},
+    )
+
+    bought: list[str] = []
+    last: dict = {}
+    for _ in range(3):
+        last = call(
+            "POST",
+            f"/api/shop/{shop}/cart/{cart_id}/checkout",
+            {"card_last4": "1111"},
+        )
+        order_id = (last.get("order") or {}).get("order_id")
+        if last.get("succeeded") and order_id:
+            bought.append(order_id)
+
+    return {"orders": sorted(set(bought)), "last": str(last)[:160]}
+
+
+northfield_twice = buy_twice_from_the_sidebar(NORTHFIELD, "P1001", "P1001-9")
+kettle_twice = buy_twice_from_the_sidebar(KETTLE, "KB-BLD-06", "KB-BLD-06::250g whole bean")
+
+check(
+    "Northfield: pressing Pay three times buys one order",
+    northfield_twice.get("orders") is not None
+    and len(northfield_twice["orders"]) == 1,
+    f"bought {northfield_twice.get('orders', northfield_twice)}",
+    "engine/api/shop.py::checkout - the key must not be a fresh uuid",
+)
+check(
+    "Kettle: pressing Pay three times buys one order",
+    kettle_twice.get("orders") is not None and len(kettle_twice["orders"]) == 1,
+    f"bought {kettle_twice.get('orders', kettle_twice)}",
+    "engine/api/shop.py::checkout - the key must not be a fresh uuid",
+)
+check(
+    "the two checkout routes share one answer",
+    northfield_twice.get("orders") is not None
+    and kettle_twice.get("orders") is not None,
+    "one of the two platforms did not produce an order at all",
+    "engine/db/idempotency.py::begin_payment",
+)
+
 # ---------------------------------------------------------------------------
 
 section("Northfield: a decline that cannot be recovered")

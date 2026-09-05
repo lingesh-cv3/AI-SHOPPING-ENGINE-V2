@@ -15,8 +15,6 @@ exists to prevent.
 
 from __future__ import annotations
 
-import uuid
-
 from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -135,6 +133,39 @@ class CheckoutBody(BaseModel):
     #: Test cards ending 0002, 0003 and 0004 always decline, so the recovery flow
     #: can be demonstrated on demand rather than waited for.
     card_last4: str = "1111"
+
+async def _already_bought(adapter, order_id: str | None) -> dict:
+    """The answer for a basket that has already been paid for.
+
+    The same shape a fresh checkout returns, so the storefront needs no second
+    branch - it lands on the order page it would have landed on, which is where a
+    shopper pressing Pay again wanted to be anyway. `already_paid` is there for
+    anything that wants to say so rather than infer it.
+    """
+    order = None
+    if order_id:
+        try:
+            order = await adapter.get_order(order_id)
+        except CommerceError:
+            # The order exists in our ledger and the platform will not hand it
+            # over. Still better than charging again.
+            order = None
+
+    return {
+        "succeeded": True,
+        "already_paid": True,
+        "payment_status": "CAPTURED",
+        "decline_reason": None,
+        "order": None
+        if order is None
+        else {
+            "order_id": order.order_id,
+            "status": str(order.status),
+            "grand_total": _money(order.grand_total),
+            "amount_paid": _money(order.amount_paid),
+        },
+    }
+
 
 async def _mine(who: Visitor, connection_id: str, kind: str, resource_id: str) -> None:
     """Refuse unless this cart or order belongs to the caller.
@@ -390,15 +421,60 @@ async def checkout(
     """
     await _mine(who, connection_id, db.owners.CART, cart_id)
     adapter = _adapter(connection_id)
-    key = f"idem-{uuid.uuid4().hex[:12]}"
+
+    # The same ledger the chat pay route uses, because this is the same money by
+    # another door. This route generated a fresh uuid per request, so it had no
+    # idempotency at all - not even the half the other one had. Same cart, same
+    # card, three taps, three orders, which is precisely what a shopper on a slow
+    # connection does when nothing happens after the first one.
+    settled = await db.idempotency.begin_payment(connection_id, cart_id)
+
+    if settled is not None:
+        if settled.get("in_flight"):
+            # Not an error and not a second charge. The first tap is still in the
+            # air, and the honest answer is to say so rather than to start another.
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "CHECKOUT_IN_PROGRESS",
+                    "message": "that payment is already going through",
+                    "retryable": True,
+                },
+            )
+        return await _already_bought(adapter, settled.get("order_id"))
+
+    # Derived from the cart and the card, and identical to the key the chat route
+    # builds - so a shopper who taps Pay here and then pays in the chat with the
+    # same card is one purchase to the platform as well as to us.
+    key = f"pay-{cart_id}-{body.card_last4}"
+
     try:
         result = await adapter.checkout_with_card(
             cart_id, card_last4=body.card_last4, idempotency_key=key
         )
     except CommerceError as exc:
+        # Nothing was attempted, so the basket goes back rather than staying
+        # locked over a failure that was not the shopper's.
+        await db.idempotency.release_payment(connection_id, cart_id)
         raise _handle(exc) from exc
 
     order = result.order
+
+    # A success locks the basket; a decline leaves it buyable, because a declined
+    # order is the one worth recovering and the shopper is about to be offered
+    # another way to pay.
+    await db.idempotency.payment_settled(
+        connection_id,
+        cart_id,
+        succeeded=result.succeeded,
+        order_id=order.order_id if order else None,
+        summary=(
+            f"paid {order.order_id}"
+            if result.succeeded and order
+            else "declined"
+        ),
+    )
+
 
     # The order belongs to whoever the cart belonged to. Recorded here rather than
     # left to first use, because the alternative is that the first person to count
