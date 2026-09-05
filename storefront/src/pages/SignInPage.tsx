@@ -37,13 +37,16 @@ export function SignInPage({ creating = false }: { creating?: boolean }) {
     try {
       // The conversation and cart this browser already has, handed over so
       // signing in adds to what somebody was doing rather than replacing it.
+      // The conversation and basket this browser already has, handed over so
+      // signing in adds to what somebody was doing rather than replacing it.
       const guestSession =
         sessionStorage.getItem(`cv3_session_${connection}`) ?? "";
+      const guestCart = sessionStorage.getItem(`cv3_cart_${connection}`);
 
       if (creating) {
-        await signUp(connection, username.trim(), password, guestSession);
+        await signUp(connection, username.trim(), password, guestSession, guestCart);
       } else {
-        await signIn(connection, username.trim(), password, guestSession);
+        await signIn(connection, username.trim(), password, guestSession, guestCart);
       }
 
       // Cleared before navigating. Leaving a password in state for the rest of

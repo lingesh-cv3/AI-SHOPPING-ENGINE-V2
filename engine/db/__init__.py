@@ -35,6 +35,8 @@ from .session import create_schema, database_url, dispose, session_scope
 from . import shoppers
 from . import shopper_sessions
 
+from . import shopper_carts
+
 __all__ = [
     "ApiKey",
     "Approval",

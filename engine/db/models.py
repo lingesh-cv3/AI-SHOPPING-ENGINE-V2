@@ -480,3 +480,35 @@ class SignInAttempt(Base):
     at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, index=True
     )
+
+
+
+
+class ShopperCart(Base):
+    """Which cart belongs to which shopper, per merchant.
+
+    The conversation already follows a signed-in shopper and the basket did not,
+    which is the kind of inconsistency somebody notices at once: their chat is where
+    they left it and their cart is empty.
+
+    One cart per shopper per merchant. A shopper with an account at both shops has
+    two baskets, because they are two shops - and merging them would mean Northfield
+    learning what somebody bought from Kettle.
+    """
+
+    __tablename__ = "shopper_carts"
+    __table_args__ = (
+        UniqueConstraint("shopper_id", "connection_id", name="uq_cart_per_shop"),
+    )
+
+    row_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    shopper_id: Mapped[str] = mapped_column(String(64), index=True)
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+
+    #: The platform's own cart id. Ours only in the sense that we remember it.
+    cart_id: Mapped[str] = mapped_column(String(120))
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now
+    )

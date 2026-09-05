@@ -16,7 +16,7 @@ import {
   pathFor
 } from "./api";
 
-import { type Account, whoAmI } from "./account";
+
 import { OpsConsole } from "./OpsConsole";
 import { CartPanel } from "./CartPanel";
 import { ChatWidget } from "./ChatWidget";
@@ -27,6 +27,7 @@ import { ProductCard } from "./ProductCard";
 import { ProductDetail } from "./ProductDetail";
 import { Hero } from "./Hero";
 import { themeFor } from "./theme";
+import { type Account, claimCart, whoAmI } from "./account";
 
 /** Reshape a chat reply into the engine panel's Pipeline view.
  *
@@ -236,8 +237,17 @@ export default function App() {
     // request pointing at something that no longer exists.
     // Keyed by merchant. One key meant a Kettle cart could be handed to
     // Northfield, which answered 404 - correctly, since it never issued it.
+        // Keyed by merchant. One key meant a Kettle cart could be handed to
+    // Northfield, which answered 404 - correctly, since it never issued it.
     const cartKey = `cv3_cart_${connection}`;
-    const storedCart = sessionStorage.getItem(cartKey);
+
+    // A signed-in shopper's basket first, then this tab's.
+    //
+    // The conversation already followed a shopper and the basket did not, which is
+    // the kind of inconsistency somebody notices at once: their chat is where they
+    // left it and their cart is empty. Their own comes first because it is the more
+    // specific claim - a tab's cart could belong to anybody who used this browser.
+    const storedCart = account?.cart_id ?? sessionStorage.getItem(cartKey);
 
     // A cart the engine does not recognise is not a cart. This already fell back
     // to creating a new one; the missing half was clearing the stale id, so the
@@ -248,7 +258,7 @@ export default function App() {
           return api.createCart();
         })
       : api.createCart();
-
+      
     // And the same for the conversation: a shopper we cannot find is a new
     // shopper. Deleting the database used to leave the browser holding an id
     // nothing knew about, and the only cure was clearing storage by hand.
@@ -270,6 +280,51 @@ export default function App() {
     // when the cart arrives, and re-running the initial load then would be wasteful.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+    // Swap to the shopper's own basket once we know who they are.
+  //
+  // The effect above runs on mount, before whoAmI has answered - so account is
+  // always null there and their basket was never used. Adding account to its
+  // dependencies would re-run the whole thing: products, departments,
+  // connections, and a second cart.
+  //
+  // So this is its own effect, and it only acts when there is something to act on.
+  useEffect(() => {
+    const theirs = account?.cart_id;
+    if (!theirs) return;
+    if (cart?.cart_id === theirs) return;
+
+    api
+      .getCart(theirs)
+      .then((c) => {
+        sessionStorage.setItem(`cv3_cart_${connection}`, c.cart_id);
+        setCart(c);
+      })
+      .catch(() => {
+        // Their remembered basket is gone from the platform - expired, or the
+        // merchant restarted. Whatever this tab has is better than nothing, and
+        // silence is better than an error about a cart they did not ask about.
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account?.cart_id, connection]);
+
+  // Keep the engine's idea of their basket in step with this one.
+  //
+  // Only sign-in recorded it before, so a basket filled afterwards was never
+  // theirs. Runs on every change, and does nothing for a guest.
+  // Keep the engine's idea of their basket in step with this one.
+  //
+  // Never claims an empty cart, and that guard is the whole fix. The mount effect
+  // creates a cart before whoAmI has answered, so this fired with a fresh empty one
+  // and recorded it as their basket - overwriting the real id and losing everything
+  // in it. An empty cart is never worth remembering as somebody's, so refusing to
+  // record one removes the race rather than trying to order it.
+  useEffect(() => {
+    if (!account || !cart?.cart_id) return;
+    if (account.cart_id === cart.cart_id) return;
+    if ((cart.item_count ?? 0) === 0) return;
+    claimCart(connection, cart.cart_id);
+  }, [account, cart?.cart_id, cart?.item_count, connection]);
 
   async function guard(work: () => Promise<void>) {
     setBusy(true);
