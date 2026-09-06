@@ -916,6 +916,98 @@ if approvals:
 
 # ---------------------------------------------------------------------------
 
+section("Kettle: approved recovery that fails on the platform")
+
+# Card 0006 is hard-blocked: the first checkout declines like every other card,
+# but when a person approves a recovery the platform itself refuses it. This is
+# the approved-then-failed outcome an operator needs to see rendered honestly,
+# not buried under a success badge.
+hcb_bag = call("POST", f"/api/shop/{KETTLE}/cart")
+call(
+    "POST",
+    f"/api/shop/{KETTLE}/cart/{hcb_bag['cart_id']}/lines",
+    {
+        "product_id": "KB-COL-02",
+        "variant_id": "KB-COL-02::250g whole bean",
+        "quantity": 1,
+    },
+)
+hcb_paid = call(
+    "POST",
+    f"/api/shop/{KETTLE}/cart/{hcb_bag['cart_id']}/checkout",
+    {"card_last4": "0006"},
+)
+hcb_order = (hcb_paid.get("order") or {}).get("order_id")
+hcb_session = f"hc_hcb_{uuid.uuid4().hex[:6]}"
+
+hcb_case = call(
+    "POST",
+    "/api/chat",
+    {
+        "connection_id": KETTLE,
+        "session_id": hcb_session,
+        "message": "my payment failed",
+        "friction": "PAYMENT_DECLINED",
+        "order_id": hcb_order,
+    },
+)
+check(
+    "hard-block still proposes recovery",
+    hcb_case.get("selected_action") in {"OFFER_ALTERNATE_PAYMENT", "SPLIT_PAYMENT"},
+    str(hcb_case.get("selected_action")),
+    "engine/decision/ranking.py",
+)
+check(
+    "hard-block recovery needs a person",
+    hcb_case.get("awaiting_person") is True,
+    str(hcb_case.get("risk_rule")),
+    "engine/risk/gate.py",
+)
+
+hcb_queue = call("GET", f"/api/approvals/{KETTLE}")
+hcb_approvals = hcb_queue.get("approvals") or []
+
+if hcb_approvals:
+    hcb_apr = hcb_approvals[-1]["approval_id"]
+    hcb_decided = call(
+        "POST",
+        f"/api/approvals/{KETTLE}/{hcb_apr}",
+        {"approved": True, "decided_by": "healthcheck"},
+    )
+    hcb_executed = hcb_decided.get("executed") or {}
+    check(
+        "approving a hard-blocked recovery fails",
+        hcb_executed.get("succeeded") is False,
+        str(hcb_executed.get("summary"))[:80],
+        "engine/execution/service.py",
+    )
+    check(
+        "failure code is PAYMENT_RECOVERY_FAILED",
+        hcb_executed.get("error_code") == "PAYMENT_RECOVERY_FAILED",
+        str(hcb_executed.get("error_code")),
+        "engine/execution/service.py",
+    )
+    check(
+        "the order stays unpaid",
+        hcb_executed.get("final_state") == "FAILED",
+        str(hcb_executed.get("final_state")),
+        "engine/execution/service.py",
+    )
+
+    hcb_transcript = call("GET", f"/api/chat/{KETTLE}/{hcb_session}")
+    hcb_turns = hcb_transcript.get("turns") or []
+    hcb_told = any(
+        "did not go through" in (t.get("text") or "") for t in hcb_turns
+    )
+    check(
+        "the shopper is told it failed",
+        hcb_told,
+        f"{len(hcb_turns)} turns, none reporting the failure",
+        "engine/execution/service.py delivery block",
+    )
+
+# ---------------------------------------------------------------------------
+
 section("Shared memory")
 
 # Tested while the problem is still open, which is the moment that matters: a card

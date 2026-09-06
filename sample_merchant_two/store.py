@@ -34,6 +34,13 @@ DECLINE_CARDS = {
     "0002": "CARD_DECLINED_NSF",
     "0003": "CARD_EXPIRED",
     "0005": "ISSUER_UNAVAILABLE",
+    #: Passes the first decline the way every other card does, but the card
+    #: itself is hard-blocked: no recovery method will clear it, alternate or
+    #: otherwise. The engine therefore proposes a recovery, a person approves
+    #: it, and it then fails on the platform - the approved-then-failed outcome
+    #: an operator needs to see rendered honestly. A real gateway distinguishes
+    #: "this payment failed" from "this card cannot pay", and so do we.
+    "0006": "CARD_HARD_BLOCKED",
 }
 
 GST = Decimal("0.18")
@@ -237,13 +244,21 @@ def order(order_id: str) -> dict | None:
 RECOVERY_METHODS = ("ALTERNATE_METHOD", "PAYMENT_LINK", "RETRY_SAME_METHOD")
 
 
+#: A decline reason no recovery can clear. The card is the problem, not the
+#: payment method, so an alternate method or a payment link on the same card
+#: fails exactly as the identical retry does.
+HARD_BLOCKED = "CARD_HARD_BLOCKED"
+
+
 def retry_payment(order_id: str, method: str, idempotency_key: str):
     """Attempt to recover a failed payment.
 
     The behaviour is deliberately realistic rather than convenient: retrying the
     same method fails again, because the bank's answer has not changed. Switching
-    method or sending a payment link succeeds. An engine that could only retry
-    identically would be no use.
+    method or sending a payment link succeeds - except for a hard-blocked card,
+    where no method helps because the card itself, not the payment, is refused.
+    An engine that could only retry identically would be no use; a gateway that
+    never distinguished a dead card from a bad method would be no use either.
     """
     o = _orders.get(order_id)
     if o is None:
@@ -252,6 +267,13 @@ def retry_payment(order_id: str, method: str, idempotency_key: str):
         return "ALREADY_PAID"
     if method not in RECOVERY_METHODS:
         return "METHOD_NOT_SUPPORTED"
+    if o["payment"].get("failureCode") == HARD_BLOCKED:
+        return {
+            "order": o,
+            "recovered": False,
+            "method": method,
+            "message": "this card is blocked - no recovery method will clear it",
+        }
 
     # Idempotent: the same key twice does not charge twice.
     if o.get("recoveryKey") == idempotency_key:

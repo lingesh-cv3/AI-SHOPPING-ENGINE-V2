@@ -328,6 +328,27 @@ below; `npm run build` now exits 0.)
     reports "2 shopper from 2 cases" (FAIL); restore it and it reports "1
     shopper from 2 cases" (PASS). 76 checks total.
 
+19. **No way to demo an approved recovery that then fails on the platform.** The
+    operations console had honest rendering for an approval whose execution came
+    back refused ("Approved, but did not go through on the platform", OpsConsole),
+    but no live path produced one - every real recovery succeeded, so the badge
+    and its warn note could never be shown. Added a test card to the Kettle
+    platform: `0006` is hard-blocked (a real gateway's "this card cannot pay",
+    distinct from "this payment failed"). It declines at checkout like any other
+    recoverable card - so the engine proposes a recovery, a person approves it,
+    and *then* the platform refuses it. The failure reads as suspected fraud
+    upstream (`mapping.py`), the recovery returns `PAYMENT_RECOVERY_FAILED` with
+    `final_state = FAILED`, the order stays unpaid, and the shopper is told it did
+    not go through. Six new healthcheck checks cover the whole chain, and
+    `demo_reset.py` now plants one approved-but-failed recovery in the ops history
+    so a walkthrough can show the honest outcome next to a genuine success.
+
+    Doing this surfaced a stale tool: `demo_reset.py` predates the route locks, so
+    it never sent a key and could not set merchant policy (401) - and it also
+    never shared a visitor cookie, so its cart calls arrived as a different shopper
+    every time (carts 404'd at checkout). Both fixed to match how `healthcheck.py`
+    authenticates. 80 checks total.
+
 ---
 
 ## Known Issues / Pending

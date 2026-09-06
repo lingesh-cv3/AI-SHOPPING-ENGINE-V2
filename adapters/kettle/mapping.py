@@ -53,6 +53,9 @@ DECLINE_MAP: dict[str, DeclineReason] = {
     "CARD_DECLINED_NSF": DeclineReason.INSUFFICIENT_FUNDS,
     "CARD_EXPIRED": DeclineReason.CARD_EXPIRED,
     "ISSUER_UNAVAILABLE": DeclineReason.ISSUER_DECLINED,
+    # A card the issuer has hard-blocked reads as suspected fraud upstream: the
+    # shopper is unlikely to clear it and no recovery method will help.
+    "CARD_HARD_BLOCKED": DeclineReason.SUSPECTED_FRAUD,
 }
 
 
