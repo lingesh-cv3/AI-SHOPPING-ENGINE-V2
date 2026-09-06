@@ -845,11 +845,18 @@ async def mark_handled(
 
     Scoped by connection like everything else here, so one merchant's operator
     cannot close another's work.
+
+    None either way a handover cannot be closed - an id that does not exist, one
+    belonging to another merchant, or one already closed. The caller reads that as
+    "nothing changed" and answers the same for all three, on purpose: telling an
+    operator which of them it was would let them learn whether a case id is real by
+    trying it. This used to return False for the first two and None only for the
+    third, which the caller's `is None` check let straight through to a crash.
     """
     async with session_scope() as db:
         case = await db.get(Case, case_id)
         if case is None or case.connection_id != connection_id:
-            return False
+            return None
         if case.handled_at is not None:
             return None
         case.handled_at = datetime.now(UTC)

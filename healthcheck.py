@@ -1365,6 +1365,50 @@ if rows:
         "engine/db/repository.py::expire_approvals",
     )
 
+    # Closing a case id that does not exist. db.mark_handled returned False for
+    # this - not None - while the route only ever checked "is closed None", so
+    # False fell through to closed.get("session_id") on a bool and crashed with a
+    # 500. An operator mistyping a case id, or a browser tab racing a colleague
+    # who closed it first, should get a clean answer, not a stack trace.
+    bogus_close = call(
+        "POST",
+        f"/api/ops/handovers/{KETTLE}/case_does_not_exist",
+        {"handled_by": "healthcheck"},
+        key=OPERATOR,
+    )
+    check(
+        "closing a handover that does not exist fails cleanly",
+        bogus_close.get("_status") is None and bogus_close.get("changed") is False,
+        str(bogus_close)[:160],
+        "engine/db/repository.py::mark_handled",
+    )
+
+    # And closing the same one twice. mark_handled returns None for "already
+    # handled" today, which the route already maps to the same clean answer - this
+    # locks that in rather than assuming it stays true.
+    handovers_now = call("GET", "/api/ops/handovers", key=OPERATOR)
+    open_case = next(iter(handovers_now.get("handovers", [])), None)
+    if open_case:
+        first_close = call(
+            "POST",
+            f"/api/ops/handovers/{open_case['connection_id']}/{open_case['case_id']}",
+            {"handled_by": "healthcheck"},
+            key=OPERATOR,
+        )
+        second_close = call(
+            "POST",
+            f"/api/ops/handovers/{open_case['connection_id']}/{open_case['case_id']}",
+            {"handled_by": "healthcheck"},
+            key=OPERATOR,
+        )
+        check(
+            "closing an already-closed handover also fails cleanly",
+            second_close.get("_status") is None
+            and second_close.get("changed") is False,
+            f"first: {first_close}, second: {second_close}",
+            "engine/db/repository.py::mark_handled",
+        )
+
 # ---------------------------------------------------------------------------
 
 print("\n" + "=" * 60)
