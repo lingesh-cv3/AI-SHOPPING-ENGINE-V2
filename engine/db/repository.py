@@ -454,10 +454,18 @@ async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
     times = [o.time_to_resolution_ms for o in resolved if o.time_to_resolution_ms]
     median_ms = sorted(times)[len(times) // 2] if times else None
 
+    # Distinct shoppers, not cases - one shopper can hit several friction
+    # types in a session and each becomes a case row. Counting cases inflated
+    # the headline, and resolution rate is measured against the total that were
+    # actually opened.
+    shoppers_helped = len({c.session_id for c in case_rows}) if case_rows else 0
+    resolution_rate = (len(resolved) / len(case_rows) * 100) if case_rows else None
+
     return {
         "days": days,
-        "shoppers_helped": len(case_rows),
+        "shoppers_helped": shoppers_helped,
         "problems_solved": len(resolved),
+        "resolution_rate": round(resolution_rate, 1) if resolution_rate is not None else None,
         "handled_without_you": handled_alone,
         "waiting_for_you": waiting or 0,
         "revenue_recovered": f"{recovered:.2f}",

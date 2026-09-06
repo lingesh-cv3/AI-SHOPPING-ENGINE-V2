@@ -814,6 +814,7 @@ export interface MerchantReport {
   days: number;
   shoppers_helped: number;
   problems_solved: number;
+  resolution_rate: number | null;
   handled_without_you: number;
   waiting_for_you: number;
   revenue_recovered: string;

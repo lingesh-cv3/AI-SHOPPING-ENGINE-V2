@@ -308,6 +308,26 @@ below; `npm run build` now exits 0.)
     authorised browser verification for this fix per the existing project
     convention.
 
+18. **The merchant report's "shoppers helped" counted cases, not shoppers.**
+    One shopper who hit two problems in a session became two cases and showed as
+    two shoppers - the headline figure a merchant checks against their own books
+    was inflated by run-ins rather than people. Now counts distinct sessions
+    (`repository.py:merchant_report`), and gains a `resolution_rate` (resolved
+    problems over problems opened, as a percentage) shown in the merchant
+    console beside "Shoppers helped". Both are defensive exactly the way they
+    should be: `shoppers_helped` was also over-stated relative to distinct
+    shoppers, so the fix is a one-line dedup, and the two new figures make the
+    "did it actually work" question answerable in one glance.
+
+    The healthcheck proves the distinct-count with intent rather than a value
+    check: it opens a fresh session, runs two declined payments through it (two
+    cases, same shopper), and asserts the report's `shoppers_helped` moved by
+    one while the friction counts moved by two. The `delta_cases == 2` half
+    guards against both payments silently becoming one case, so the check cannot
+    pass vacuously. Verified against both code paths: revert the dedup and it
+    reports "2 shopper from 2 cases" (FAIL); restore it and it reports "1
+    shopper from 2 cases" (PASS). 76 checks total.
+
 ---
 
 ## Known Issues / Pending
@@ -345,8 +365,7 @@ tapping a size option records the shopper as having said the bare label ("8")
 rather than a real sentence; `retry_after_seconds` is wired through the API and the
 storefront but the field that should populate it is never actually set, so it is
 permanently null; `HISTORY_TURNS` (14) does not match this file's own claim of
-thirty; the merchant report's "shoppers helped" figure counts cases, not distinct
-shoppers; a case can get stuck in `DIAGNOSED` state with no path to resolution;
+thirty; a case can get stuck in `DIAGNOSED` state with no path to resolution;
 closing a handover with a blank note tells the shopper nothing by design, which is
 worth revisiting; the sign-in screen shows a connection id or platform name rather
 than the merchant's actual name; a rejection branch pasted three times in

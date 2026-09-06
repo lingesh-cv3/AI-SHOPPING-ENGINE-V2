@@ -1003,6 +1003,70 @@ if "revenue_recovered" in report:
         f"{len(report.get('recent') or [])} entries",
         "engine/db/repository.py::merchant_report",
     )
+    rr = report.get("resolution_rate")
+    check(
+        "resolution_rate is reported",
+        "resolution_rate" in report
+        and (rr is None or isinstance(rr, (int, float))),
+        f"{rr}%",
+        "engine/db/repository.py::merchant_report",
+    )
+
+    # The deterministic part: two cases from one shopper must count once.
+    #
+    # "shoppers_helped" was the case count, so a shopper who hit two problems in
+    # one session was counted twice - the headline number a merchant checks
+    # against their own books, inflated by the number of separate run-ins rather
+    # than people. The fix counts distinct sessions. To prove it, make two cases
+    # on one fresh session and watch the report's shoppers_helped move by one,
+    # even though the friction it records moved by two.
+    #
+    # Each chat with PAYMENT_DECLINED friction records a case (repository.py:
+    # record_case, always a fresh row), and the checkout on a declining card
+    # makes the friction real rather than fabricated. Both chats are created
+    # before the after-report, so any prior data in the window cancels out of
+    # the delta.
+    def friction_total(rpt: dict) -> int:
+        return sum(f["count"] for f in rpt.get("friction") or [])
+
+    before = call("GET", f"/api/report/{KETTLE}")
+    two_session = f"hc_two_{uuid.uuid4().hex[:6]}"
+    for _ in range(2):
+        twobag = call("POST", f"/api/shop/{KETTLE}/cart")
+        call(
+            "POST",
+            f"/api/shop/{KETTLE}/cart/{twobag['cart_id']}/lines",
+            {
+                "product_id": "KB-COL-02",
+                "variant_id": "KB-COL-02::250g whole bean",
+                "quantity": 1,
+            },
+        )
+        twodecl = call(
+            "POST",
+            f"/api/shop/{KETTLE}/cart/{twobag['cart_id']}/checkout",
+            {"card_last4": "0002"},
+        )
+        call(
+            "POST",
+            "/api/chat",
+            {
+                "connection_id": KETTLE,
+                "session_id": two_session,
+                "message": "my payment failed",
+                "friction": "PAYMENT_DECLINED",
+                "order_id": (twodecl.get("order") or {}).get("order_id"),
+            },
+        )
+    after = call("GET", f"/api/report/{KETTLE}")
+    delta_shoppers = after["shoppers_helped"] - before["shoppers_helped"]
+    delta_cases = friction_total(after) - friction_total(before)
+    check(
+        "shoppers_helped counts shoppers, not cases",
+        delta_cases == 2 and delta_shoppers == 1,
+        f"{delta_shoppers} shopper from {delta_cases} cases",
+        "engine/db/repository.py::merchant_report",
+    )
 
 stats = call("GET", f"/api/stats/{KETTLE}")
 check(

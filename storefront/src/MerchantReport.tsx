@@ -88,6 +88,15 @@ export function MerchantReport() {
 
             <div className="figures">
               <Figure value={report.shoppers_helped} label="Shoppers helped" />
+              <Figure
+                value={pct(report.resolution_rate)}
+                label="Resolved"
+                title={
+                  report.resolution_rate === null
+                    ? "No problems opened in this window yet."
+                    : "Of the problems opened, the share that reached a resolution."
+                }
+              />
               <Figure value={report.problems_solved} label="Problems solved" />
               <Figure
                 value={report.handled_without_you}
@@ -144,19 +153,28 @@ function Figure({
   value,
   label,
   warn,
+  title,
 }: {
   value: number;
   label: string;
   warn?: boolean;
+  title?: string;
 }) {
   return (
-    <div>
+    <div title={title}>
       <div className={warn && value > 0 ? "figure num warn" : "figure num"}>
         {value}
       </div>
       <div className="eyebrow">{label}</div>
     </div>
   );
+}
+
+/** A percentage figure, shown as an integer. "0.0" reads as zero and "100.0"
+ *  as perfect, neither of which is worth the characters. */
+function pct(rate: number | null): number {
+  if (rate === null) return 0;
+  return Math.round(rate);
 }
 
 /** Milliseconds are an engineering unit. A merchant wants "under a second". */
