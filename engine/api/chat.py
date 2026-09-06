@@ -417,6 +417,13 @@ async def chat(
     payment: dict = {}
     choices: list[dict] = []
     cart_changed = False
+    # ESCALATE_TO_HUMAN is not financial, not irreversible and touches no
+    # customer data, so the gate clears it to run automatically - it needs no
+    # approval to hand a shopper to a person. `awaiting` alone therefore missed
+    # the one action whose entire meaning is "a person is now involved": a
+    # shopper was told one would help and the reply's own awaiting_person flag
+    # said otherwise.
+    escalated_to_human = False
 
     # The parameters of whatever was selected, so a failed lookup can
     # name the number the shopper actually typed.
@@ -426,6 +433,7 @@ async def chat(
         executed = await engine.execution.execute_case(req.connection_id, case_id)
         action_taken = executed.action_type
         action_summary = executed.summary
+        escalated_to_human = executed.action_type == str(ActionType.ESCALATE_TO_HUMAN)
         found = executed.payload.get("products")
         if isinstance(found, list):
             products = found
@@ -570,7 +578,7 @@ async def chat(
             selected_action=str(trace.selected.action.action_type),
             risk_rule=decision.policy_rule,
         ),
-        awaiting_person=awaiting,
+        awaiting_person=awaiting or escalated_to_human,
         risk_rule=decision.policy_rule,
         cart_changed=cart_changed,
         remembered_turns=len(history),
@@ -761,10 +769,15 @@ async def act(
     choices: list[dict] = []
     cart_changed = False
     action_summary = None
+    # Same reasoning as the chat handler above: ESCALATE_TO_HUMAN clears the
+    # gate automatically, so `awaiting` alone cannot tell a shopper a person is
+    # now involved.
+    escalated_to_human = False
 
     if not awaiting and case_id:
         executed = await engine.execution.execute_case(req.connection_id, case_id)
         action_summary = executed.summary
+        escalated_to_human = executed.action_type == str(ActionType.ESCALATE_TO_HUMAN)
 
         if executed.needs_choice:
             choices = executed.choices
@@ -847,7 +860,7 @@ async def act(
         action_taken=str(ActionType.ADD_TO_CART),
         action_summary=action_summary,
         choices=choices,
-        awaiting_person=awaiting,
+        awaiting_person=awaiting or escalated_to_human,
         risk_rule=decision.policy_rule,
         cart_changed=cart_changed,
         selected_action=str(trace.selected.action.action_type),

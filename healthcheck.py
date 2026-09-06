@@ -719,6 +719,41 @@ check(
     "engine/api/routes.py::simulate",
 )
 
+# The live path a shopper actually takes, rather than /api/simulate - which has
+# no awaiting_person field to check in the first place.
+#
+# ESCALATE_TO_HUMAN is not financial, not irreversible and touches no customer
+# data, so the risk gate clears it to run automatically - "awaiting_person" was
+# computed purely from that gate outcome, which made it false for the one
+# action whose entire meaning is "a person is now involved". The shopper was
+# told "I've passed it to someone at the shop", the ChatWidget's "Waiting on
+# someone at the shop" banner - which reads that exact flag - never appeared,
+# and there was nothing on screen to say the promise had been kept.
+live_cart = call("POST", f"/api/shop/{NORTHFIELD}/cart")
+call(
+    "POST",
+    f"/api/shop/{NORTHFIELD}/cart/{live_cart['cart_id']}/lines",
+    {"product_id": "P1003", "quantity": 1},
+)
+live_session = f"hc_awaiting_{uuid.uuid4().hex[:6]}"
+live_decline = call(
+    "POST",
+    "/api/chat/pay",
+    {
+        "connection_id": NORTHFIELD,
+        "session_id": live_session,
+        "cart_id": live_cart["cart_id"],
+        "card_last4": "0003",
+    },
+)
+check(
+    "a shopper handed to a person is shown waiting on one",
+    live_decline.get("awaiting_person") is True,
+    f"selected_action={live_decline.get('selected_action')} "
+    f"awaiting_person={live_decline.get('awaiting_person')}",
+    "engine/api/chat.py - awaiting_person must also cover ESCALATE_TO_HUMAN",
+)
+
 # ---------------------------------------------------------------------------
 
 section("Kettle: a decline that can be recovered")
