@@ -571,9 +571,29 @@ async def chat(
                 if reasoning and reasoning.diagnosis
                 else None
             ),
+            # trace.rejected is only ever a platform's incapacity - the decision
+            # engine never records a candidate it simply ranked below the winner,
+            # because that list is also what an operator reads as "the engine
+            # could not do this itself" in the ops and merchant consoles, and a
+            # ranking artifact does not belong there.
+            #
+            # A shopper asking "why this?" wants both halves, though: on a
+            # platform that can do several things - Kettle can retry a card,
+            # split the payment or offer another method - the honest answer to
+            # a successful recovery is not "nothing was ruled out", it is "these
+            # were viable and this one was picked". Recomputed here, once, from
+            # what was actually proposed, so it never touches the audit trail.
             rejected=[
                 {"action_type": str(r.action_type), "reason": r.reason}
                 for r in trace.rejected
+            ]
+            + [
+                {"action_type": str(a.action_type), "reason": "RANKED_LOWER"}
+                for a in reasoning.actions
+                if str(a.action_type) != str(trace.selected.action.action_type)
+                and not any(
+                    str(r.action_type) == str(a.action_type) for r in trace.rejected
+                )
             ],
             selected_action=str(trace.selected.action.action_type),
             risk_rule=decision.policy_rule,

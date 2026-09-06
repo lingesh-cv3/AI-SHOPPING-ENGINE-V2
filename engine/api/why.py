@@ -33,6 +33,13 @@ SHOPPER_REASONS = {
     "TOUCHES_CUSTOMER_DATA": "it would mean contacting you, which needs a person",
     "NOT_SUPPORTED_BY_PLATFORM": "this shop's systems cannot do it",
     "PLATFORM_CANNOT": "this shop's systems cannot do it",
+    #: Not incapable, just not chosen - a platform that can do several of these
+    #: (Kettle can retry, split or offer another method) picks the one ranked
+    #: most likely to work, and the others were viable rather than refused. Until
+    #: this existed, only a platform's incapacity ever produced a "declined"
+    #: line, so the one place able to do more than one thing had nothing to show
+    #: for the choice it made.
+    "RANKED_LOWER": "another option was more likely to work",
 }
 
 #: What each action would have been, so "ruled out" names something recognisable.

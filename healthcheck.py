@@ -806,6 +806,24 @@ check(
     "engine/risk/gate.py",
 )
 
+# Nothing was capability-rejected here - Kettle can retry, split or offer
+# another method, so all three survive the decision engine's filter and only
+# lose on ranking. trace.rejected stays empty on a ranking-only outcome, and
+# "why" returned None for it: a shopper on the one platform able to do more
+# than one thing saw no explanation at all, on the exact turn CLAUDE.md names
+# as the reason this toggle exists. RETRY_PAYMENT is checked for specifically
+# because it is documented as always ranked last of the three, so it is
+# reliably the one outranked whichever of the other two wins.
+check(
+    "a successful recovery still explains what it did not do",
+    any(
+        "trying your card again" in line
+        for line in (kb_case.get("why") or {}).get("declined", [])
+    ),
+    str(kb_case.get("why")),
+    "engine/api/chat.py - ranked-lower survivors must reach why(), not just rejections",
+)
+
 queue = call("GET", f"/api/approvals/{KETTLE}")
 approvals = queue.get("approvals") or []
 check(
