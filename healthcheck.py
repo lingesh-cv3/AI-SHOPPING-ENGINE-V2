@@ -430,6 +430,36 @@ else:
 
 # ---------------------------------------------------------------------------
 
+section("An empty basket is told the truth")
+
+# Paying an empty cart raised CommerceError(CART_INVALID) on both platforms, and
+# the pay route's except block gave it the exact same sentence as a genuine
+# platform failure: "it was not your card. Nothing has been charged - try again
+# in a moment." That is reassuring and false. There is nothing wrong with their
+# card and trying again changes nothing, because there is nothing in the
+# basket to buy.
+for shop in (NORTHFIELD, KETTLE):
+    empty_cart = call("POST", f"/api/shop/{shop}/cart")
+    empty_session = f"hc_empty_{uuid.uuid4().hex[:6]}"
+    empty_pay = call(
+        "POST",
+        "/api/chat/pay",
+        {
+            "connection_id": shop,
+            "session_id": empty_session,
+            "cart_id": empty_cart.get("cart_id"),
+            "card_last4": "1111",
+        },
+    )
+    check(
+        f"{shop}: paying nothing does not blame the card",
+        "not your card" not in str(empty_pay.get("reply", "")).lower(),
+        str(empty_pay.get("reply")),
+        "engine/api/chat.py::pay - CommerceError(CART_INVALID) needs its own message",
+    )
+
+# ---------------------------------------------------------------------------
+
 section("A basket is paid for once")
 
 # One basket, three cards, on both platforms.

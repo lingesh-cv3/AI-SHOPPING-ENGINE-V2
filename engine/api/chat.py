@@ -23,6 +23,7 @@ from engine.decision import operation_for
 from shared.models import (
     ActionType,
     CommerceError,
+    ErrorCode,
     FrictionType,
     ProposedAction,
 )
@@ -1003,10 +1004,17 @@ async def pay(
         # lock somebody out of their own cart over an error that was not theirs.
         await db.idempotency.release_payment(req.connection_id, req.cart_id)
 
-        reply = (
-            "Something went wrong taking the payment, and it was not your card. "
-            "Nothing has been charged - try again in a moment."
-        )
+        if exc.code == ErrorCode.CART_INVALID:
+            # An empty basket, on both platforms. Not a platform failure and
+            # nothing to do with the card - the previous message reassured a
+            # shopper their card was fine and told them to try again, which
+            # changes nothing when there is nothing to buy.
+            reply = "There's nothing in this basket to pay for yet."
+        else:
+            reply = (
+                "Something went wrong taking the payment, and it was not your "
+                "card. Nothing has been charged - try again in a moment."
+            )
         await session_store.add_turn(
             session_id=req.session_id,
             connection_id=req.connection_id,
