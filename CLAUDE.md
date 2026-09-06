@@ -4,8 +4,10 @@ Context for whoever picks this up. Written after a stretch of development that
 produced real features and a real mess, and the honest version of both is more use
 than a tidy summary.
 
-**Read PROGRESS.md before believing anything else here.** A green test run has
-repeatedly meant less than it looked.
+**Read PROGRESS.md before believing anything else here.** It carries what's fixed,
+what's still broken, and what's next, and it is kept current every session - this
+file is architecture and practices, and goes stale the moment it tries to describe
+current state instead.
 
 ---
 
@@ -98,7 +100,7 @@ Four stages:
 
 **Decision** - rank proposals, drop anything the platform cannot do, choose one.
 
-**Risk** - a ten-rule gate: automatic, needs approval, or blocked.
+**Risk** - an eleven-rule gate: automatic, needs approval, or blocked.
 
 **Execution** - carry it out through the adapter, and tell the shopper.
 
@@ -126,14 +128,27 @@ adapter works either way.
 4. **A tap is trusted; the model's guess is not.** `chosen_variant` from a button
    beats `variant_id` from the model, which is a suggestion.
 5. **Raw platform errors never reach shoppers.**
-6. **One merchant's data is never reachable with another's key.**
+6. **One merchant's data is never reachable with another's key, and one shopper's
+   cart, conversation and order are never reachable by another shopper holding the
+   same key.** Enforced by an httpOnly visitor cookie and an ownership table
+   (`db.owners`), checked on every cart/session/order route.
+
+### The payment ledger
+
+A cart is claimed in `db.idempotency` at creation, keyed on the cart id alone - not
+on the cart and the card together, and not derived per payment attempt. Load-bearing
+for three separate guarantees: a paid cart cannot be charged again on a different
+card, a cart id reused after a merchant restart cannot inherit somebody else's paid
+status, and a paid cart cannot be mutated afterwards (checked by both the REST cart
+routes and the chat/tap execution path before any write). Keying it any other way -
+per card, per attempt, per session - reopens a double charge.
 
 ### Layout
 
 ```
 engine/reasoning/    the model, prompts, context building
 engine/decision/     ranking and capability filtering
-engine/risk/         the ten-rule gate and merchant policy
+engine/risk/         the eleven-rule gate and merchant policy
 engine/execution/    carrying actions out
 engine/api/          routes, auth, accounts, shopper sessions
 engine/db/           models, repository, keys, shopper accounts
@@ -236,9 +251,11 @@ strength of one narrow test passing, repeatedly, and the demo broke anyway.
 
 ## The constraint
 
-The free Groq tier throttles at roughly four model turns a minute. One healthcheck
-check cannot run reliably because the suite needs more calls than the tier allows in
-the time it takes. Tapping paths are model-free by design and keep working while
-throttled - a deliberate response to this, not a coincidence.
+The free Groq tier throttles at roughly four model turns a minute. `healthcheck.py`
+has grown past what fits in that window - it needs more model calls than the tier
+allows in the time the suite takes, so a full run cannot complete reliably, and this
+gets worse as the suite grows rather than better. Tapping paths are model-free by
+design and keep working while throttled - a deliberate response to this, not a
+coincidence.
 
 A concrete cost rather than a complaint, and a few dollars a month buys it back.
