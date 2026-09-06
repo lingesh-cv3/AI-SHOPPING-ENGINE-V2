@@ -323,6 +323,13 @@ async def create_cart(
     # else held last week.
     keys = await who.keys_for(connection_id)
     await db.owners.take(connection_id, db.owners.CART, cart.cart_id, keys[0])
+
+    # And forgotten by the payment ledger for the identical reason. A number
+    # somebody else held last week may also have been paid last week, and a
+    # brand new empty basket answering "already bought" is worse than the
+    # double charge that ledger exists to prevent.
+    await db.idempotency.forget_payment(connection_id, cart.cart_id)
+
     return _cart(cart)
 
 

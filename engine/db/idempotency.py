@@ -284,3 +284,28 @@ async def release_payment(connection_id: str, cart_id: str) -> None:
         row = await db.get(ExecutionAttempt, key)
         if row is not None and row.state == "IN_FLIGHT":
             await db.delete(row)
+
+
+async def forget_payment(connection_id: str, cart_id: str) -> None:
+    """Discard any record of this cart having been paid for.
+
+    Cart ids are sequential and the platform's counter lives in its own memory,
+    so a restart reissues BSK00001 to a shopper who has never seen it - the same
+    fact that made db.owners.take() necessary for ownership. This closes the
+    identical hole here: without it, a brand new empty basket handed the same id
+    a paid basket once had is told it is already bought, with no order to show
+    for it because the order from before the restart is gone too. That is worse
+    than the double charge this ledger exists to prevent - it refuses a
+    shopper's first, legitimate payment.
+
+    Called at the one moment the answer is not a guess: create_cart, where the
+    platform has just told us this id is fresh. Nothing about a payment can be
+    racing a cart that has not been created yet, so there is no IN_FLIGHT row to
+    protect here the way release_payment protects one.
+    """
+    key = cart_payment_key(connection_id, cart_id)
+
+    async with session_scope() as db:
+        row = await db.get(ExecutionAttempt, key)
+        if row is not None:
+            await db.delete(row)
