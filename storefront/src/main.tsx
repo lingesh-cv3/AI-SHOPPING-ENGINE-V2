@@ -33,6 +33,21 @@ createRoot(document.getElementById("root")!).render(
         <Route path="/northfield" element={<App />} />
         <Route path="/kettle" element={<App />} />
 
+        {/* The consoles and sign-in used to live at bare addresses that carried
+            no merchant, so which shop you got depended on where you last were.
+            Now they are reachable merchant-prefixed too - /kettle/merchant is
+            Kettle's console, /northfield/signin is Northfield's sign-in - and
+            the address decides, the same way it does for the shop itself.
+
+            The bare paths stay as aliases: a stray bookmark or link to /merchant
+            should land somewhere sane rather than 404. Without a merchant in the
+            address they fall back to the last shop visited, which is the old
+            behaviour and the best a merchant-less address can do. */}
+        <Route path="/:merchant/signin" element={<SignInPage />} />
+        <Route path="/:merchant/signup" element={<SignInPage creating />} />
+        <Route path="/:merchant/merchant" element={<MerchantPage />} />
+        <Route path="/:merchant/operations" element={<OperationsPage />} />
+
         <Route path="/signin" element={<SignInPage />} />
         <Route path="/signup" element={<SignInPage creating />} />
         <Route path="/merchant" element={<MerchantPage />} />

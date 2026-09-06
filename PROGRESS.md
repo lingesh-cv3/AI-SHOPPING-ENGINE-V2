@@ -286,6 +286,28 @@ below; `npm run build` now exits 0.)
     (appending failure onto an optimistic claim is), so they were left alone
     rather than churned. 74 checks total.
 
+17. **`/merchant` and `/operations` did not carry the merchant in their address.**
+    Both pages read the merchant from `sessionStorage`, so which client's console
+    you saw depended on which shop you last visited - a Kettle page followed by
+    `/merchant` showed Northfield if Northfield was the previous tab. Fixed by
+    adding merchant-prefixed routes (`/kettle/merchant`, `/kettle/signin`, etc.)
+    where the address itself decides the merchant, matching the pattern the shop
+    already uses (`/kettle` is Kettle). Bare `/merchant`, `/signin` and
+    `/signup` stay as aliases so a stray bookmark lands somewhere sane rather
+    than 404-ing; they fall back to the last-visited merchant, which is the old
+    behaviour and the best a merchant-less address can do. `pathFor()` gained an
+    optional second argument for sub-pages so internal links (the shop's "Sign
+    in" link, the signin ↔ signup toggle) build `/kettle/signin` rather than the
+    bare `/signin` that would lose the merchant context. `setConnection()` was
+    removed (no caller remains) and `CONNECTION` became `const` (its sole
+    reassignment was inside `setConnection`). `npm run build` passes; 7
+    pre-existing eslint `set-state-in-effect` errors remain unchanged (in
+    App/ApprovalQueue/MerchantConsole/OpsConsole/OrderView/ProductDetail, not
+    touched by this fix). No Vitest added: `getConnection()` and `pathFor()`
+    depend on `window.location`, setting up jsdom was its own task, and the user
+    authorised browser verification for this fix per the existing project
+    convention.
+
 ---
 
 ## Known Issues / Pending
@@ -297,11 +319,6 @@ trusting anything.
 shopper can browse and buy without an account, on the reasoning that forcing signup
 loses sales. The product owner wants sign-in required. Decide it explicitly rather
 than "fixing" a deliberate decision.
-
-**`/merchant` and `/operations` do not carry the merchant in their address.** They
-read it from `sessionStorage`, so which client's console you get depends on which
-shop you last visited. `/northfield/merchant` is the fix, and `/signin` has the same
-problem.
 
 **Guest checkout collects no email.** A guest can buy and the order can reach
 nobody. A handover message written by an operator goes into a session that dies with
@@ -352,12 +369,10 @@ Known Issues are disproportionately the ones that are not.
    not) before touching anything downstream of it - email collection, order
    notification, and the handover-message-into-a-dying-session problem all follow
    from that decision.
-2. Route the merchant/operator consoles by address (`/northfield/merchant`) rather
-   than `sessionStorage`, and fix `/signin` the same way.
-3. Consider a browser-level test layer before trusting any future frontend fix
+2. Consider a browser-level test layer before trusting any future frontend fix
    without one - this session's own backend fixes could all be verified
    automatically; the remaining known issues mostly can't be, for the same
    underlying reason.
-4. Work through the smaller findings listed under Known Issues in whatever order
+3. Work through the smaller findings listed under Known Issues in whatever order
    next picks up this file - none of them are architecturally risky, they just
    didn't get to this session.

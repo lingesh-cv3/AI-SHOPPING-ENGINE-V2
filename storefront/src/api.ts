@@ -47,7 +47,10 @@ const BY_PATH: Record<string, string> = {
 //: default at all; this exists because the demo carries two.
 const DEFAULT_CONNECTION = "conn_demo";
 
-let CONNECTION = readFromPath();
+// What this tab loaded with, kept as the last-resort default for bare
+// /merchant and /signin aliases. Never reassigned - merchant switches are
+// navigation to a new address, not an in-memory change.
+const CONNECTION = readFromPath();
 
 function readFromPath(): string {
   if (typeof window === "undefined") return DEFAULT_CONNECTION;
@@ -56,17 +59,17 @@ function readFromPath(): string {
   return BY_PATH[first.toLowerCase()] ?? DEFAULT_CONNECTION;
 }
 
-/** The path segment for a merchant, for building links. */
-export function pathFor(connectionId: string): string {
+/** The path for a merchant, for building links.
+ *
+ *  A second argument names a sub-page - "signin", "signup", "merchant",
+ *  "operations" - so a link can carry the merchant in its own address
+ *  (/kettle/merchant) rather than falling back to whichever shop was visited
+ *  last. An omitted page returns the shop root, as before.
+ */
+export function pathFor(connectionId: string, page = ""): string {
   const found = Object.entries(BY_PATH).find(([, id]) => id === connectionId);
-  return found ? `/${found[0]}` : "/";
-}
-
-/** Kept for the merchant and operations consoles, which are reached directly and
- *  have no merchant in their own path. */
-export function setConnection(id: string) {
-  sessionStorage.setItem("cv3_connection", id);
-  CONNECTION = id;
+  if (!found) return "/";
+  return page ? `/${found[0]}/${page}` : `/${found[0]}`;
 }
 
 export function getConnection() {
@@ -78,8 +81,10 @@ export function getConnection() {
   const fromPath = readFromPath();
   const stored = sessionStorage.getItem("cv3_connection");
 
-  // The path wins where it names a merchant. Storage covers /merchant and
-  // /operations, which have no merchant in their own address.
+  // The path wins where it names a merchant, and it names one even under a
+  // sub-page - /kettle/merchant is Kettle just like /kettle. Storage only
+  // covers the bare /merchant and /operations aliases, which have no merchant
+  // in their own address and fall back to wherever was visited last.
   const first = window.location.pathname.split("/").filter(Boolean)[0] ?? "";
   if (BY_PATH[first.toLowerCase()]) {
     if (stored !== fromPath) sessionStorage.setItem("cv3_connection", fromPath);

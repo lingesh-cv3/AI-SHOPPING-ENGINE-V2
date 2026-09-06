@@ -45,7 +45,11 @@ export function AccountMenu({
   }, [open]);
 
   if (!account) {
-    return <Link to="/signin">Sign in</Link>;
+    // The merchant in the address, not the bare /signin. The shop page this is
+    // rendered from already names its merchant, so the sign-in should carry it
+    // too - /kettle/signin rather than /signin, which would fall back to
+    // whichever shop was visited last.
+    return <Link to={pathFor(getConnection(), "signin")}>Sign in</Link>;
   }
 
   return (

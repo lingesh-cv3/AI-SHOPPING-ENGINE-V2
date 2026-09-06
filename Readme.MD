@@ -192,7 +192,7 @@ proposals with a diagnosis and a reply. It cannot select, gate, or execute.
 merchant has switched off, then picks the highest-ranked survivor. If nothing
 survives, it returns an escalation naming what was unavailable. No LLM.
 
-**Risk** (`engine/risk/`) returns `AUTO`, `HUMAN` or `BLOCK` by walking ten rules in
+**Risk** (`engine/risk/`) returns `AUTO`, `HUMAN` or `BLOCK` by walking eleven rules in
 a fixed order, first match wins. Deterministic: same input, same output. No LLM, and
 it cannot import the reasoning package.
 
@@ -352,25 +352,26 @@ the action is reachable and useful.
 
 ## The risk rules
 
-Ten rules, evaluated in order, first match wins. Every verdict records which rule
+Eleven rules, evaluated in order, first match wins. Every verdict records which rule
 produced it.
 
 | # | Rule | Outcome |
 |---|---|---|
 | 1 | `CAPABILITY_UNVERIFIED` | BLOCK. Reached the gate without a capability check, which is a bug upstream. |
 | 2 | `CONNECTION_SUSPENDED` | BLOCK. The connection is paused. |
-| 3 | `BLOCKED_BY_MERCHANT_POLICY` | BLOCK. The merchant switched this action off. |
-| 4 | `UNKNOWN_ACTION_TYPE` | HUMAN. No risk-table entry, so treated as financial. |
-| 5 | `FINANCIAL_ALWAYS_HUMAN` | HUMAN. Touches money. Checked before any merchant setting. |
-| 6 | `IRREVERSIBLE_ALWAYS_HUMAN` | HUMAN. Cannot be undone. |
-| 7 | `TOUCHES_CUSTOMER_DATA` | HUMAN. Contacts the customer. |
-| 8 | `CAUTIOUS_MODE_GATES_ALL` | HUMAN. New connections start here. |
-| 9 | `NOT_ON_MERCHANT_ALLOWLIST` | HUMAN. Only if the merchant narrowed the list. |
-| 10 | `AUTO_CLEARED` | AUTO. Safe, reversible, permitted. |
+| 3 | `ESCALATION_ALWAYS_REACHES_A_PERSON` | AUTO. Handing a shopper to a person cannot be switched off. A floor, like the financial rule: checked before the merchant's block list. |
+| 4 | `BLOCKED_BY_MERCHANT_POLICY` | BLOCK. The merchant switched this action off. |
+| 5 | `UNKNOWN_ACTION_TYPE` | HUMAN. No risk-table entry, so treated as financial. |
+| 6 | `FINANCIAL_ALWAYS_HUMAN` | HUMAN. Touches money. Checked before any merchant setting. |
+| 7 | `IRREVERSIBLE_ALWAYS_HUMAN` | HUMAN. Cannot be undone. |
+| 8 | `TOUCHES_CUSTOMER_DATA` | HUMAN. Contacts the customer. |
+| 9 | `CAUTIOUS_MODE_GATES_ALL` | HUMAN. New connections start here. |
+| 10 | `NOT_ON_MERCHANT_ALLOWLIST` | HUMAN. Only if the merchant narrowed the list. |
+| 11 | `AUTO_CLEARED` | AUTO. Safe, reversible, permitted. |
 
-Rule 5 sits above every merchant setting deliberately. A merchant who explicitly
-enables automatic refunds still gets an approval request, and the audit record names
-rule 5 as the reason.
+The financial rule sits above every merchant setting deliberately. A merchant who
+explicitly enables automatic refunds still gets an approval request, and the audit
+record names the financial rule (or the escalation floor) as the reason.
 
 Automation modes: `CAUTIOUS` gates everything, `STANDARD` runs anything the gate
 proves safe, `SUSPENDED` runs nothing. In `STANDARD` an empty allowlist means all

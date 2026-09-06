@@ -136,11 +136,13 @@ export function SignInPage({ creating = false }: { creating?: boolean }) {
         <div className="authalt">
           {creating ? (
             <>
-              Already have one? <Link to="/signin">Sign in</Link>
+              Already have one?{" "}
+              <Link to={pathFor(connection, "signin")}>Sign in</Link>
             </>
           ) : (
             <>
-              New here? <Link to="/signup">Create an account</Link>
+              New here?{" "}
+              <Link to={pathFor(connection, "signup")}>Create an account</Link>
             </>
           )}
         </div>
