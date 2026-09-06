@@ -247,6 +247,14 @@ minutes.
 **Walk the product, do not read the test summary.** Features were committed on the
 strength of one narrow test passing, repeatedly, and the demo broke anyway.
 
+**A test written from a guess at the bug's output, not the actual output, can pass
+for the wrong reason.** A check asserting a reply excluded words like "added" or
+"done" was written before seeing what the model actually says - which turned out to
+be "Sure, I'll add the X to your cart," containing none of them. The check would
+have passed against the very bug it was meant to catch. Rewritten to assert the
+engine's own deterministic replacement text instead, and confirmed by hand against
+both the broken and fixed code before trusting it.
+
 ---
 
 ## The constraint

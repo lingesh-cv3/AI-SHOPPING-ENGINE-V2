@@ -441,24 +441,23 @@ async def chat(
         if executed.needs_choice:
             # Not a failure. The shopper has not said enough yet, and asking is the
             # right answer - a guessed size is a return waiting to happen.
+            #
+            # Replaces the model's sentence rather than appending to it - the same
+            # shape as CLEAR_CART and CHECK_ORDER_STATUS below. The model is told to
+            # fill variant_id when a shopper names a size in the same message
+            # ("add the size 9 to my cart"), but execution only ever trusts a tap
+            # or an exact match to a bare follow-up answer, so that guess is
+            # discarded. Appending a question to a reply that already claimed the
+            # size was understood read as the system contradicting itself in one
+            # message - acknowledging a size and re-asking for it in the same
+            # breath. Replacing it means the shopper only ever sees the question.
             choices = executed.choices
             first = executed.choices[0] if executed.choices else {}
-            # Only ask if the model has not. It usually says "which size
-            # would you like?" itself, and following that with our own
-            # near-identical question reads as a system talking over its own
-            # output.
-            #
-            # A trailing question mark is a crude test, and it is the right
-            # kind of crude: a false negative adds a redundant sentence, a
-            # false positive leaves buttons with no prompt. The first is the
-            # cheaper mistake.
-            if not reply.rstrip().endswith("?"):
-                reply = (
-                    reply
-                    + "\n\nWhich option would you like for the "
-                    + str(first.get("product_title", "item"))
-                    + "?"
-                )
+            reply = (
+                "There's more than one option for "
+                + str(first.get("product_title", "that"))
+                + ". Which would you like?"
+            )
         elif executed.action_type == "CLEAR_CART":
             # Written by the engine, not the model.
             #

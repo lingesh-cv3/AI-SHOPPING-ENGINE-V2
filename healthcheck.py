@@ -1039,6 +1039,22 @@ if model_on:
         f"{len(choices)} choices, reply: {str(ask.get('reply'))[:60]}",
         "engine/execution/service.py ADD_TO_CART, engine/api/chat.py needs_choice",
     )
+    if choices:
+        # The model is told to extract a size from the shopper's own sentence and
+        # writes as though it acted on it - "Sure, I'll add the Trailblazer Running
+        # Shoe to your cart" - before execution has run. Appending the size
+        # question to that sentence used to leave both in the reply: an implied
+        # promise the size was handled, immediately followed by asking for it.
+        # engine/api/chat.py's needs_choice branch now replaces the model's
+        # sentence outright rather than appending to it, so the reply should be
+        # exactly the engine's own question and never the model's guess at all.
+        ask_reply = str(ask.get("reply") or "")
+        check(
+            "replaces the model's reply rather than appending the question to it",
+            ask_reply.startswith("There's more than one option for"),
+            ask_reply[:100],
+            "engine/api/chat.py needs_choice replaces rather than appends",
+        )
 
     # Tapped rather than asked, so the rest of this section does not depend on the
     # model being reachable.

@@ -212,6 +212,43 @@ below; `npm run build` now exits 0.)
     command rather than a hand-written test - `npm run dev` alone was proven
     insufficient to catch it.
 
+15. **A typed add-to-cart message could contradict itself and add nothing.** A
+    shopper who typed "add the size 9 to my cart" in one message got a reply that
+    both acknowledged the size and re-asked for it. The model is instructed
+    (`engine/reasoning/prompts.py`) to fill `variant_id` from what the shopper
+    typed, but execution deliberately ignores that guess - only a tap
+    (`chosen_variant`) or an exact whole-message match to a bare follow-up answer
+    is trusted (`engine/execution/service.py`, comment there explains this
+    replaced four interacting mechanisms that together let a shopper add the same
+    item twice). So with more than one buyable variant, execution returns
+    `needs_choice` and adds nothing, and `engine/api/chat.py`'s `needs_choice`
+    branch used to *append* "Which option would you like...?" to the model's
+    reply rather than replace it - and the model's reply, written before
+    execution runs, often already claimed the size was understood. The branch now
+    replaces the model's sentence outright, the same shape `CLEAR_CART` and
+    `CHECK_ORDER_STATUS` already used - the shopper only ever sees the question,
+    never the contradiction. Left the "only ask if the model hasn't" trailing-`?`
+    heuristic out entirely rather than keeping it for some cases - half-appending
+    and half-replacing would have been a second inconsistency.
+
+    Not touched: the exact-whole-message variant matching itself. Loosening it to
+    match a variant label anywhere in a longer sentence is the fuzzy matching the
+    same comment says was already tried and removed for causing double-adds -
+    reopening it to fix a wording problem would trade one bug for the one it
+    replaced.
+
+    `healthcheck.py` gained one check in "Cart, through the chat": asking for a
+    multi-size product by name (no size stated) must get back the engine's own
+    question, not the model's. A first attempt asserted the reply excluded
+    success-sounding words ("added", "done", "in your cart", "all set") - run
+    against the old code by hand, the model's actual reply ("Sure, I'll add the
+    Trailblazer Running Shoe to your cart... Which option would you like...?")
+    didn't contain any of them, so that version of the check would have passed
+    on the bug it was meant to catch. Rewritten to assert the reply equals the
+    engine's own deterministic sentence instead - verified by hand against the
+    old code (failed, on two different model phrasings) and the new code
+    (passed) before trusting it. 73 checks total.
+
 ---
 
 ## Known Issues / Pending
