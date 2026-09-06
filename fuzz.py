@@ -135,7 +135,19 @@ class Shopper:
         #: check should absorb it too.
         self.expected_items = 0
         self.orders: list[str] = []
-        self.paid_carts: set[str] = set()
+
+        #: Cart id -> the card that paid it.
+        #:
+        #: Was a bare set. The platform key was derived from the cart AND the
+        #: card, so a retry on the same card was recognised and a retry on a
+        #: different one was not - and a set could not tell
+        #: check_paid_cart_not_reusable which card had already been used, so it
+        #: always retried with "1111" whatever had actually paid. Every paid cart
+        #: in this suite is paid with "1111" (the only card act_pay ever succeeds
+        #: with), so that check retried the same card on the same card and passed
+        #: while a different card bought the basket again. Recording the card
+        #: is what lets the check reach for a different one on purpose.
+        self.paid_carts: dict[str, str] = {}
 
     def ensure_cart(self) -> str | None:
         if self.cart_id is None:
@@ -232,7 +244,9 @@ def act_pay(s: Shopper, rng: random.Random) -> str:
     if payment.get("paid"):
         if order:
             s.orders.append(order)
-        s.paid_carts.add(s.cart_id)
+        # Recorded with the card that paid it, so the invariant check below can
+        # deliberately reach for a different one.
+        s.paid_carts[s.cart_id] = card
         # A paid cart is finished. The storefront starts a new one; so do we.
         s.cart_id = None
         s.expected_items = 0
@@ -290,28 +304,41 @@ def check_cart_matches(s: Shopper) -> str | None:
 
 
 def check_paid_cart_not_reusable(s: Shopper) -> str | None:
-    """A cart that has been paid for cannot be paid for again.
+    """A cart that has been paid for cannot be paid for again, on any card.
 
-    The bug this exists for: a paid cart stayed on screen and saying pay again
-    charged it, returning the same order because the idempotency key recognised
-    the retry. Nothing was double charged and the shopper should never have got
-    there.
+    This used to retry with "1111" regardless of what had paid the cart - and
+    "1111" is the only card act_pay ever succeeds with, so every retry was the
+    same card retrying itself. The platform key was derived from the cart AND
+    the card, so that was recognised as a retry and returned the original order,
+    which made this pass throughout a live double-charge bug: a DIFFERENT card
+    was a different key, and the same basket bought a second order at the full
+    amount. The docstring here used to describe that as the correct outcome.
+
+    So this tries the card that paid it - which now goes through the engine's
+    own ledger rather than the platform's key - and a second, genuinely
+    different one, which is the case that was never being asked.
     """
-    for cart in s.paid_carts:
-        r = call(
-            "POST",
-            "/api/chat/pay",
-            {
-                "connection_id": s.connection,
-                "session_id": s.session,
-                "cart_id": cart,
-                "card_last4": "1111",
-            },
-            key=s.key,
-        )
-        payment = r.get("payment") or {}
-        if payment.get("paid") and payment.get("order_id") not in s.orders:
-            return f"paid cart {cart} produced a new order {payment.get('order_id')}"
+    for cart, paid_with in s.paid_carts.items():
+        other_card = "2222" if paid_with != "2222" else "3333"
+        for card in (paid_with, other_card):
+            r = call(
+                "POST",
+                "/api/chat/pay",
+                {
+                    "connection_id": s.connection,
+                    "session_id": s.session,
+                    "cart_id": cart,
+                    "card_last4": card,
+                },
+                key=s.key,
+            )
+            payment = r.get("payment") or {}
+            if payment.get("paid") and payment.get("order_id") not in s.orders:
+                return (
+                    f"paid cart {cart} (originally paid with {paid_with}) "
+                    f"produced a new order {payment.get('order_id')} when "
+                    f"retried with {card}"
+                )
     return None
 
 
