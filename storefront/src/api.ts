@@ -655,6 +655,8 @@ export function shopperMessage(err: unknown): string {
     case "CART_NOT_FOUND":
     case "CART_INVALID":
       return "Something went wrong with your cart. Try reloading the page.";
+    case "CART_ALREADY_PAID":
+      return "That order's already placed. Start a new cart to buy something else.";
     case "PAYMENT_DECLINED":
       return "Your payment didn't go through.";
     case "CAPABILITY_UNSUPPORTED":

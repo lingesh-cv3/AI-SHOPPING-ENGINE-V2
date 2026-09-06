@@ -74,6 +74,24 @@ NO_EXECUTION: frozenset[ActionType] = frozenset(
     }
 )
 
+#: Actions that change what is in a cart. Refused once the cart has been paid
+#: for - see engine/db/idempotency.py::is_paid.
+#:
+#: This is the tap/chat path's half of the same guard the REST cart routes carry
+#: in engine/api/shop.py. The two share no code: a shopper could not add a line
+#: through the sidebar once an order existed, but could still get the assistant
+#: to add one to the identical cart, because nothing here had ever asked whether
+#: the basket it was about to change had already been bought.
+CART_MUTATING: frozenset[ActionType] = frozenset(
+    {
+        ActionType.ADD_TO_CART,
+        ActionType.UPDATE_CART_QUANTITY,
+        ActionType.REMOVE_CART_LINE,
+        ActionType.CLEAR_CART,
+        ActionType.APPLY_PROMOTION,
+    }
+)
+
 
 @dataclass
 class Executed:
@@ -279,6 +297,24 @@ class ExecutionService:
                     ),
                     error_code="CAPABILITY_UNSUPPORTED",
                     final_state=str(CaseState.UNSUPPORTED),
+                )
+
+        # Refused before the platform ever sees it. The order for this cart may
+        # already exist, and the platform has no idea we consider the basket
+        # closed - only our own ledger knows that.
+        if action_type in CART_MUTATING and case.cart_id:
+            if await db.idempotency.is_paid(connection_id, case.cart_id):
+                return Executed(
+                    succeeded=False,
+                    action_type=str(action_type),
+                    summary="Refused: this cart has already been paid for.",
+                    shopper_summary=(
+                        "That order's already placed, so I can't change what's "
+                        "in it. Start a new cart if you'd like to buy something "
+                        "else."
+                    ),
+                    error_code="CART_ALREADY_PAID",
+                    final_state=str(CaseState.FAILED),
                 )
 
         started = time.perf_counter()

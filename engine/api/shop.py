@@ -184,6 +184,26 @@ async def _mine(who: Visitor, connection_id: str, kind: str, resource_id: str) -
     )
 
 
+async def _not_if_paid(connection_id: str, cart_id: str) -> None:
+    """Refuse to change a cart that has already been bought.
+
+    A line could be added, a quantity changed, or a coupon applied after the
+    order for this cart already existed - the total moving after a shopper had
+    already been charged for it. Checked here rather than left to the platform,
+    because the platform has no idea we consider this basket closed; that
+    knowledge lives only in our own ledger.
+    """
+    if await db.idempotency.is_paid(connection_id, cart_id):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "CART_ALREADY_PAID",
+                "message": "this basket has already been paid for",
+                "retryable": False,
+            },
+        )
+
+
 @router.get("/{connection_id}/departments")
 async def departments(
     connection_id: str,
@@ -354,6 +374,7 @@ async def add_line(
     _=Depends(shopper_scoped()),
 ) -> dict:
     await _mine(who, connection_id, db.owners.CART, cart_id)
+    await _not_if_paid(connection_id, cart_id)
     adapter = _adapter(connection_id)
     try:
         cart = await adapter.add_to_cart(
@@ -387,6 +408,7 @@ async def change_line(
     two code paths where one will do.
     """
     await _mine(who, connection_id, db.owners.CART, cart_id)
+    await _not_if_paid(connection_id, cart_id)
     adapter = _adapter(connection_id)
     try:
         cart = await adapter.update_cart(cart_id, line_id, quantity=body.quantity)
@@ -407,6 +429,7 @@ async def apply_promotion(
     PROMOTION_FAILED friction path.
     """
     await _mine(who, connection_id, db.owners.CART, cart_id)
+    await _not_if_paid(connection_id, cart_id)
     adapter = _adapter(connection_id)
     try:
         await adapter.apply_promotion(cart_id, body.code)

@@ -197,6 +197,24 @@ def cart_payment_key(connection_id: str, cart_id: str) -> str:
     return f"paid_{digest[:32]}"
 
 
+async def is_paid(connection_id: str, cart_id: str) -> bool:
+    """Whether this basket has already been bought.
+
+    The ledger's own answer, asked from outside a payment attempt - by a route
+    that wants to refuse changing a cart rather than charging one. Lines could be
+    added to a cart, and quantities changed, after the order for it already
+    existed: the REST cart routes and the chat/tap execution path both call the
+    adapter directly and neither one asked whether the basket they were about to
+    change had already been paid for. A declined or in-flight attempt does not
+    count - only a completed, successful one locks the basket against further
+    changes, which matches begin_payment's own idea of "bought".
+    """
+    key = cart_payment_key(connection_id, cart_id)
+    async with session_scope() as db:
+        row = await db.get(ExecutionAttempt, key)
+        return bool(row is not None and row.state == "DONE" and row.succeeded)
+
+
 async def begin_payment(connection_id: str, cart_id: str) -> dict | None:
     """Take the right to charge this basket, or say why not.
 

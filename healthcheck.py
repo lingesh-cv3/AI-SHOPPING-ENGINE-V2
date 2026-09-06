@@ -580,6 +580,104 @@ check(
     "engine/db/idempotency.py::begin_payment",
 )
 
+
+section("A paid cart cannot still be changed")
+
+# Lines could be added to a cart after its order existed, and the total moved
+# with them - on the REST cart routes, and separately through the chat/tap path,
+# because the two share no code and neither one checked. A shopper adding
+# something to a basket the shop had already charged them for is not a feature;
+# it is an order whose contents disagree with what was paid.
+
+
+def pay_it_off(shop: str, product: str, variant: str) -> tuple[str, str | None]:
+    """A cart, bought. Returns (cart_id, order_id)."""
+    basket = call("POST", f"/api/shop/{shop}/cart")
+    cart_id = basket.get("cart_id")
+    call(
+        "POST",
+        f"/api/shop/{shop}/cart/{cart_id}/lines",
+        {"product_id": product, "variant_id": variant, "quantity": 1},
+    )
+    session_id = f"hc_lock_{uuid.uuid4().hex[:6]}"
+    r = call(
+        "POST",
+        "/api/chat/pay",
+        {
+            "connection_id": shop,
+            "session_id": session_id,
+            "cart_id": cart_id,
+            "card_last4": "1111",
+        },
+    )
+    return cart_id, (r.get("payment") or {}).get("order_id")
+
+
+for shop, product, variant, other_product, other_variant in (
+    # other_product has no variant on Northfield and one supplied on Kettle, so
+    # the tap resolves in one step rather than asking "which one?" first - which
+    # otherwise reports cart_changed=False for a reason that has nothing to do
+    # with the cart being paid for.
+    (NORTHFIELD, "P1001", "P1001-8", "P1003", None),
+    (KETTLE, "KB-COL-02", "KB-COL-02::250g ground", "KB-BRA-04", "KB-BRA-04::250g whole bean"),
+):
+    cart_id, order_id = pay_it_off(shop, product, variant)
+
+    before = call("GET", f"/api/shop/{shop}/cart/{cart_id}")
+    kept_count = before.get("item_count")
+
+    add_attempt = call(
+        "POST",
+        f"/api/shop/{shop}/cart/{cart_id}/lines",
+        {"product_id": other_product, "quantity": 1},
+    )
+    check(
+        f"{shop}: cannot add a line through the cart route once paid",
+        add_attempt.get("_status") in (409, 400)
+        or (add_attempt.get("_body") or "").find("ALREADY_PAID") != -1,
+        str(add_attempt)[:160],
+        "engine/api/shop.py::add_line",
+    )
+
+    line_id = (before.get("lines") or [{}])[0].get("line_id")
+    change_attempt = call(
+        "PATCH",
+        f"/api/shop/{shop}/cart/{cart_id}/lines/{line_id}",
+        {"quantity": 5},
+    )
+    check(
+        f"{shop}: cannot change a quantity through the cart route once paid",
+        change_attempt.get("_status") in (409, 400),
+        str(change_attempt)[:160],
+        "engine/api/shop.py::change_line",
+    )
+
+    # And through the tap path, which shares no code with the routes above.
+    tap_session = f"hc_lock_tap_{uuid.uuid4().hex[:6]}"
+    tap_body = {
+        "connection_id": shop,
+        "session_id": tap_session,
+        "product_id": other_product,
+        "cart_id": cart_id,
+        "said": "Add that too",
+    }
+    if other_variant:
+        tap_body["variant_id"] = other_variant
+    tap_attempt = call("POST", "/api/chat/act", tap_body)
+    check(
+        f"{shop}: tapping a product does not add it to a paid cart",
+        tap_attempt.get("cart_changed") is not True,
+        str(tap_attempt.get("reply"))[:140],
+        "engine/execution/service.py - ADD_TO_CART must check the ledger",
+    )
+
+    after = call("GET", f"/api/shop/{shop}/cart/{cart_id}")
+    check(
+        f"{shop}: the paid cart's contents never moved",
+        after.get("item_count") == kept_count,
+        f"{kept_count} before, {after.get('item_count')} after",
+    )
+
 # ---------------------------------------------------------------------------
 
 section("Northfield: a decline that cannot be recovered")

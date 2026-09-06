@@ -820,6 +820,11 @@ async def act(
                     "Something went wrong with your basket. Try refreshing the "
                     "page and I'll pick up where we left off."
                 )
+            elif code == "CART_ALREADY_PAID":
+                reply = (
+                    "That order's already placed, so I can't change what's in "
+                    "it. Start a new cart if you'd like to buy something else."
+                )
             else:
                 reply = (
                     "I couldn't add that, sorry. Someone at the shop can help if "
