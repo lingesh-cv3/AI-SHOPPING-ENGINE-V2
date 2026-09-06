@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, getConnection, shopperMessage, type ChatReply, type ChatTurn } from "./api";
+import { api, shopperMessage, type ChatReply, type ChatTurn } from "./api";
 import { type Account } from "./account";
 
 /**
@@ -28,9 +28,7 @@ export function ChatWidget({
   onCartChanged,
   onCartRetired,
   unread,
-  merchantName, 
-  account,
-  onAccount,
+  merchantName,
   onUnread,
 }: {
   sessionId: string;

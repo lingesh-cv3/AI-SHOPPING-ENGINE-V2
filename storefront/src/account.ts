@@ -125,7 +125,7 @@ export function signUp(
     guest_cart: guestCart ?? null,
   });
 }
-export async function signOut(connectionId: string): Promise<void> {
+export async function signOut(): Promise<void> {
   await fetch(`${ENGINE}/api/account/signout`, {
     method: "POST",
     credentials: "same-origin",

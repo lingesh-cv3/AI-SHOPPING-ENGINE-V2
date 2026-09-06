@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { AccountMenu } from "./AccountMenu";
 import {
   api,
   getConnection,
-  setConnection,
   shopperMessage,
   type Cart,
   type ChatReply,
@@ -92,7 +90,7 @@ export default function App() {
 
 
   const [connections, setConnections] = useState<Connection[]>([]);
-  const [connection, setConnectionState] = useState(getConnection());
+  const [connection] = useState(getConnection());
 
   // One session id for the visit, shared by the friction path and the chat. This is
   // the mechanism behind shared memory - both report against it, so the assistant
@@ -461,7 +459,7 @@ export default function App() {
    *  state over would be a bug that looks like a feature until someone's coffee
    *  order shows up in a running shop.
    */
-  const switchMerchant = async (id: string) => {
+  const switchMerchant = (id: string) => {
     // Navigate rather than set state.
     //
     // The merchant comes from the address now, so changing it means going
@@ -469,64 +467,6 @@ export default function App() {
     // session and the theme all derive from it. Unpicking each by hand is how one
     // of them ends up stale, which is the mistake behind three bugs this week.
     window.location.assign(pathFor(id));
-    return;
-    setDept(null);
-    setQuery("");
-    setProducts([]);
-    setDeadSearch(null);
-    setPipeline(null);
-    setResult(null);
-    setOpenOrder(null);
-    setOpenProduct(null);
-    // Not cleared here on purpose.
-    //
-    // Clearing the turns and changing the session id are separate updates, and the
-    // widget's restore could land between them - so the clear wiped a conversation
-    // that had just been reloaded. It worked or it did not depending on which won.
-    //
-    // Changing the session id is what reloads the chat, and it fetches that
-    // merchant's own conversation. Removing the clear removes the race rather than
-    // trying to order it.
-    setChatOpen(false);
-    setOpenedForDeadSearch(false);
-    setView("shop");
-    setCart(null);
-    // A cart belongs to one platform. Carrying the id across would point the new
-    // merchant at something it has never issued.
-    
-    // A new conversation, in both places at once.
-    //
-    // This used to delete the stored id and leave the React one alone, so the two
-    // disagreed: turns were written under an id no longer in storage, and the next
-    // reload generated a third id with nothing attached. The conversation was not
-    // lost, it was orphaned.
-    // Nothing to set. sessionId is derived from the connection, so changing the
-    // connection changes it - which is the point of having one source.
-    sessionFor(id);
-    setUnread(0);
-
-    try {
-      // That merchant's own cart, resumed rather than replaced. This called
-      // createCart unconditionally, so switching back always produced an empty
-      // cart even though the id was sitting in storage.
-      const priorCart = sessionStorage.getItem(`cv3_cart_${id}`);
-      const [d, c] = await Promise.all([
-        api.departments(),
-        priorCart
-          ? api.getCart(priorCart).catch(() => api.createCart())
-          : api.createCart(),
-      ]);
-      setDepts(d.departments);
-      // The switched-to merchant's cart is stored too, or the next reload loses it.
-      // The write previously existed only in the mount effect, so a cart created by
-      // switching was never persisted - and switching is the whole point of having
-      // two merchants.
-      sessionStorage.setItem(`cv3_cart_${id}`, c.cart_id);
-      setCart(c);
-    } catch {
-      setError("Could not switch merchant");
-    }
-    load("", null);
   };
 
   // Defined once and reused across the shop, product and order views, so the cart

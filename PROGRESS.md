@@ -167,8 +167,9 @@ Verification for all of the above: `healthcheck.py` grew from 47 to 72 checks,
 holds at every probe including the four new shopper-scoping ones, and
 `testexpiry.py` (10/10) and `testcartreuse.py` (6/6) are new, focused reproductions
 for the two bugs that needed real timing/restart conditions rather than a database
-row. Storefront typecheck is unchanged at 10 pre-existing errors throughout (see
-Known Issues) - none of this session's fixes touched those lines.
+row. Storefront typecheck held 10 pre-existing errors throughout this batch of
+fixes - none of them touched those lines. (Fixed in a later session - see #14
+below; `npm run build` now exits 0.)
 
 13. **Approved-then-failed recoveries read as successes in the operations
     console.** `badge()` in `storefront/src/OpsConsole.tsx` coloured the "Already
@@ -184,6 +185,32 @@ Known Issues) - none of this session's fixes touched those lines.
     no frontend test runner exists in this project yet (`package.json` has no test
     script) and standing one up was treated as its own task rather than folded into
     this fix - verified by hand in the browser instead.
+
+14. **`npm run build` failed on 10 TypeScript errors** - `npm run dev` worked
+    throughout, which is how this went unnoticed; only `tsc -b` (the type-check
+    stage `build` runs before `vite build`) caught them. All ten were downstream of
+    dead code, not live bugs: `App.tsx`'s `switchMerchant` navigated with
+    `window.location.assign` and then had an unconditional `return` before ~45 more
+    lines that could never run (including the one real type error in the batch,
+    `string | null` passed where `string` was required) - deleted outright, along
+    with the now-unused `setConnectionState` (the connection is read once and never
+    reassigned in this component - navigation, not state, is what changes it),
+    `setConnection` and `Link` imports. `AccountMenu.tsx` called `signOut()` with no
+    arguments against a signature requiring a `connectionId` it never actually used
+    - the sign-out route needs no key at all (`accounts.py:257-270`, cookie-only,
+    deliberately privilege-free), so the parameter was dropped from `signOut()`
+    rather than threading a value through that would have been ignored. `Landing.tsx`
+    was confirmed unreferenced anywhere in the storefront (already flagged as
+    probably-dead in Known Issues) and deleted rather than patched. `ChatWidget.tsx`
+    stopped destructuring `account`/`onAccount`, which it never reads - `App.tsx`
+    still passes them, since greeting a signed-in shopper by name is a real feature
+    worth building later and the wiring is one line to restore.
+
+    `npm run build` now exits 0. No frontend test runner exists in this project
+    (`package.json` has no test script); this class of bug is exactly what the
+    compiler itself catches, so the regression guard is running the actual build
+    command rather than a hand-written test - `npm run dev` alone was proven
+    insufficient to catch it.
 
 ---
 
@@ -231,10 +258,8 @@ thirty; the merchant report's "shoppers helped" figure counts cases, not distinc
 shoppers; a case can get stuck in `DIAGNOSED` state with no path to resolution;
 closing a handover with a blank note tells the shopper nothing by design, which is
 worth revisiting; the sign-in screen shows a connection id or platform name rather
-than the merchant's actual name; `npm run build` fails on 10 pre-existing
-TypeScript errors (`tsc -b` only - `vite dev` is unaffected); several code-quality
-items (dead code in `switchMerchant`, a rejection branch pasted three times in
-`routes.py`, duplicate field declarations in `ChatReply`, an unreachable `Landing.tsx`).
+than the merchant's actual name; a rejection branch pasted three times in
+`routes.py`, duplicate field declarations in `ChatReply`.
 
 ### Why the tests did not catch these
 
