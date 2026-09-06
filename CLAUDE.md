@@ -158,6 +158,13 @@ shared/              the commerce interface and action types
 storefront/          React, Vite
 ```
 
+Two handwritten walkthroughs live in `Readme.MD`, not here, because they are
+longer than anything that belongs in a practice file: "Adding a platform" (one
+folder, no engine changes) and "Adding an action" (the six steps, of which steps 1-2
+- the `ActionType` and its `ACTION_RISK_PROPERTIES` entry - are the security pair).
+Reach for those when extending the engine. `scripts/` in the repo root is gitignored
+one-off scratch, not part of the tracked suite.
+
 ---
 
 ## Security
@@ -186,6 +193,32 @@ another shopper's cart, conversation and order even when both hold the same
 publishable key.
 
 `eval.py` - scores the model's judgement across repeated attempts. Unfinished.
+
+### Running the checks
+
+All three suites drive the **running** services over HTTP - they probe what is
+actually up, not the source, so they never test code you have not restarted. Start
+the three backend processes first (see Running it; the storefront is not needed):
+
+```
+python healthcheck.py            # PASS/FAIL per check; names the file to look at
+python fuzz.py                  # 20 sequences; --seed N to replay, --sequences N to soak
+python auditroutes.py            # probes every route's lock and shopper scoping
+```
+
+`testshopper.py` is the one `test*.py` that is tracked (the `.gitignore` explicitly
+keeps it); every other `test*.py`, and the contents of `scripts/`, are gitignored
+one-off scratch - don't trust them as source of truth.
+
+Frontend, from `storefront/`:
+
+```
+npm run build    # tsc -b && vite build - the typecheck guard. npm run dev does NOT
+                 # catch type errors, and build did fail for a session the dev server
+                 # never flagged (see the #14 note in PROGRESS.md)
+npm run lint     # eslint .
+npm run dev      # Vite, port 5173
+```
 
 ## Current status
 
@@ -254,6 +287,14 @@ be "Sure, I'll add the X to your cart," containing none of them. The check would
 have passed against the very bug it was meant to catch. Rewritten to assert the
 engine's own deterministic replacement text instead, and confirmed by hand against
 both the broken and fixed code before trusting it.
+
+**In a test suite, a local variable with the same name as the module-level state it
+represents will eventually shadow it.** A new healthcheck block named its response
+variable `failed` - the same name as the module-level failure list. The suite
+actually passed; the summary then read the response dict as the failures and
+reported 31 FAILED (one per field of the reply). Renamed the local. The same class
+of bug cost a day on the payment route once (`key` shadowing `key`), so names in
+this codebase shadowing their module-scope cousins deserve a second look on sight.
 
 ---
 

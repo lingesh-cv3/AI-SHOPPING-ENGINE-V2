@@ -56,7 +56,7 @@ conversation or order at the same merchant - see Fixed This Session.
 
 ### Tests
 
-`healthcheck.py` - 72 checks, one path end to end. Reports SKIP rather than FAIL
+`healthcheck.py` - 74 checks, one path end to end. Reports SKIP rather than FAIL
 when the provider is busy, and says how many checks never executed.
 
 `fuzz.py` - random shopper sequences, asserting after every step that the cart
@@ -249,6 +249,43 @@ below; `npm run build` now exits 0.)
     old code (failed, on two different model phrasings) and the new code
     (passed) before trusting it. 73 checks total.
 
+16. **The other append-not-replace contradiction - the generic failure branch -
+    fixed.** `chat.py`'s catch-all `else` (any failed execution that is not
+    `needs_choice`/`CLEAR_CART`/`CHECK_ORDER_STATUS`/succeeded `PREPARE_CHECKOUT`)
+    used to append "I couldn't turn anything up for that" to the model's
+    pre-written reply, so a failure arrived as the model's confident claim
+    followed by its contradiction in one message - live evidence: "Sure, I can
+    add the Trailblazer Running Shoe to your cart... Which size would you
+    like?" then "I couldn't turn anything up for that." The else now replaces
+    the model's sentence outright, the same shape as every other special branch.
+
+    The interesting part is the test trigger. The PROGRESS.md note above
+    assumed the sold-out `ADD_TO_CART` path (service.py's "every option is
+    sold out") reached this branch - it does not in practice. The model reads
+    the catalog, sees a sold-out product, and routes the request to
+    `SUGGEST_ALTERNATIVE` / `RECOMMEND_PRODUCTS` instead of proposing a doomed
+    add - those succeed, so the failure branch never fires. Confirmed
+    empirically across several phrasings on two sold-out products. The
+    deterministic trigger turned out to be a **paid cart**: the payment ledger
+    check at the top of execution refuses any cart-mutating action once the
+    basket is paid (`CART_ALREADY_PAID`, service.py), and nothing visible to
+    the model distinguishes a paid cart from a live one, so the model reliably
+    routes "add this to my cart" to `ADD_TO_CART` and execution reliably
+    fails. The healthcheck now builds and pays a real basket, then chats a
+    normal-sounding add against the paid cart and asserts the reply equals the
+    engine's own failure sentence exactly (the same exact-equality style as
+    #15's check, for the same reason - keyword matching would have passed on
+    the bug).
+
+    Also checked the same shape elsewhere, per the standing rule: the tap
+    endpoint (`/api/chat/act`) has its own failure branch that already replaces
+    rather than appends, and the remaining `f"{reply}\n\n..."` appends - the
+    `ADD_TO_CART`/`REMOVE_CART_LINE`/`UPDATE_CART_QUANTITY` success path and
+    the `CHECK_AVAILABILITY` success path - append a *confirmed* fact onto a
+    reply that was already correct, which is not the bug this shape causes
+    (appending failure onto an optimistic claim is), so they were left alone
+    rather than churned. 74 checks total.
+
 ---
 
 ## Known Issues / Pending
@@ -297,17 +334,6 @@ closing a handover with a blank note tells the shopper nothing by design, which 
 worth revisiting; the sign-in screen shows a connection id or platform name rather
 than the merchant's actual name; a rejection branch pasted three times in
 `routes.py`, duplicate field declarations in `ChatReply`.
-
-**The same append-not-replace contradiction exists in one more place.** Found while
-checking for this shape elsewhere after fixing #15's `needs_choice` branch, not yet
-fixed. `chat.py`'s catch-all `else` for any failed action that isn't
-`needs_choice`/`CLEAR_CART`/`CHECK_ORDER_STATUS`/`PREPARE_CHECKOUT` appends a fixed
-"I couldn't turn anything up for that" to the model's reply rather than replacing
-it. That catch-all also handles a sold-out `ADD_TO_CART` (service.py's "every
-option is sold out" path), so a model reply that already says "Sure, I'll add that"
-gets a search-failure sentence tacked onto it - wrong shape (append vs. replace,
-same as #15) and wrong content (search wording for a found-but-unavailable
-product, the same class of mismatch as #12's empty-cart-blamed-on-the-card).
 
 ### Why the tests did not catch these
 

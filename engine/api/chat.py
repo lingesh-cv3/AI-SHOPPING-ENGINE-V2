@@ -534,9 +534,18 @@ async def chat(
             # Say what failed rather than leaving the model's optimistic reply
             # standing alone. A shopper told "here are some options" who then sees no
             # options assumes the interface is broken.
+            #
+            # Replaces the model's sentence rather than appending to it - the same
+            # shape as the needs_choice, CLEAR_CART and CHECK_ORDER_STATUS branches
+            # above. The model writes its reply before execution runs, so on a
+            # failure it can hold a claim that execution just refuted ("Sure, I can
+            # add that...") and appending the failure sentence left the shopper
+            # both halves in one message - the same contradiction the needs_choice
+            # branch used to produce. The failure is the fact; the model's guess is
+            # dropped outright.
             reply = (
-                f"{reply}\n\nI couldn't turn anything up for that. Someone at the "
-                "shop can help if you'd like."
+                "I couldn't turn anything up for that. Someone at the shop can "
+                "help if you'd like."
             )
 
     await session_store.add_turn(

@@ -1056,6 +1056,67 @@ if model_on:
             "engine/api/chat.py needs_choice replaces rather than appends",
         )
 
+    # The generic failure branch, reached deterministically. Execution refuses
+    # to touch any cart-mutating action once the basket is paid (the payment
+    # ledger check in engine/execution/service.py), so a normal-sounding "add
+    # this to my cart" against a paid cart must fail - and the model, which
+    # never sees the ledger, has no way to know that when it writes its
+    # pre-execution reply. The reply used to be the model's confident-sounding
+    # sentence followed by an appended "I couldn't turn anything up for that" -
+    # a contradiction in one message, the same shape as the needs_choice bug
+    # above. The branch now replaces the model's sentence outright, so the
+    # shopper should see only the engine's own failure sentence.
+    #
+    # A sold-out product looked like the natural trigger ("every option is sold
+    # out" fails the same action), but the model reads the catalog and routes a
+    # sold-out add to SUGGEST_ALTERNATIVE / RECOMMEND_PRODUCTS instead of
+    # proposing a doomed ADD_TO_CART - which succeed, so the failure branch
+    # never fires. The paid-cart trigger cannot be routed around, because
+    # nothing visible to the model distinguishes it.
+    paid_for = call(
+        "POST",
+        "/api/shop/{}/cart".format(NORTHFIELD),
+    )
+    paid_session = f"hc_fail_{uuid.uuid4().hex[:6]}"
+    call(
+        "POST",
+        "/api/shop/{}/cart/{}/lines".format(NORTHFIELD, paid_for["cart_id"]),
+        {"product_id": "P1002", "variant_id": "P1002-8", "quantity": 1},
+    )
+    pay = call(
+        "POST",
+        "/api/chat/pay",
+        {
+            "connection_id": NORTHFIELD,
+            "session_id": paid_session,
+            "cart_id": paid_for["cart_id"],
+            "card_last4": "1111",
+        },
+    )
+    paid_ok = (pay.get("payment") or {}).get("paid") is True
+    failure_reply = ""
+    if paid_ok:
+        # Named for what it is, not after the module-level `failed` list - the
+        # shadowing bug class this file's own CLAUDE.md warns about.
+        added_after_pay = call(
+            "POST",
+            "/api/chat",
+            {
+                "connection_id": NORTHFIELD,
+                "session_id": paid_session,
+                "message": "add the Trailblazer Running Shoe to my cart",
+                "cart_id": paid_for["cart_id"],
+            },
+        )
+        failure_reply = str(added_after_pay.get("reply") or "")
+    check(
+        "replaces the model's reply rather than appending a failure to it",
+        failure_reply
+        == "I couldn't turn anything up for that. Someone at the shop can help if you'd like.",
+        failure_reply[:120],
+        "engine/api/chat.py generic failure branch replaces rather than appends",
+    )
+
     # Tapped rather than asked, so the rest of this section does not depend on the
     # model being reachable.
     #
