@@ -478,36 +478,65 @@ export function OpsConsole() {
           {history.length === 0 && (
             <p className="empty">Nothing decided yet.</p>
           )}
-          {history.map((d) => (
-            <div key={d.approval_id} className="histrow">
-              <div className="hist-head">
-                <span>
-                  <span className={`tag ${badge(d.state)}`}>{d.state.toLowerCase()}</span>{" "}
-                  <span className="hist-action">
-                    {d.action_type.replace(/_/g, " ").toLowerCase()}
+          {history.map((d) => {
+            // An approval an operator got right can still fail once it reaches the
+            // platform - a retried card declined again, an adapter error. `state` is
+            // the decision; `final_state` is what actually happened, and the two are
+            // allowed to disagree. Approved-and-failed reads identically to
+            // approved-and-succeeded if only `state` is shown.
+            const approvedButFailed =
+              d.state === "APPROVED" && d.final_state !== "OUTCOME";
+
+            return (
+              <div key={d.approval_id} className="histrow">
+                <div className="hist-head">
+                  <span>
+                    <span className={`tag ${badge(d.state, d.final_state)}`}>
+                      {approvedButFailed
+                        ? "approved, did not run"
+                        : d.state.toLowerCase()}
+                    </span>{" "}
+                    <span className="hist-action">
+                      {d.action_type.replace(/_/g, " ").toLowerCase()}
+                    </span>
                   </span>
-                </span>
-                <span className="eyebrow">{d.merchant_name}</span>
+                  <span className="eyebrow">{d.merchant_name}</span>
+                </div>
+                <div className="gate-note">
+                  {d.decided_by === "expired"
+                    ? "Nobody got to it in time"
+                    : `by ${d.decided_by}`}
+                  {d.revenue && ` - recovered ${d.revenue} ${d.currency}`}
+                  {d.order_id && ` - ${d.order_id}`}
+                </div>
+                {approvedButFailed && (
+                  <p className="hist-note warn">
+                    Approved, but did not go through on the platform
+                    {d.final_state === "UNSUPPORTED"
+                      ? " - not supported there"
+                      : d.final_state === "DIAGNOSED"
+                        ? " - stalled waiting on a choice"
+                        : ""}
+                    . The shopper has not been told it worked.
+                  </p>
+                )}
+                {d.note && <p className="hist-note">{d.note}</p>}
               </div>
-              <div className="gate-note">
-                {d.decided_by === "expired"
-                  ? "Nobody got to it in time"
-                  : `by ${d.decided_by}`}
-                {d.revenue && ` - recovered ${d.revenue} ${d.currency}`}
-                {d.order_id && ` - ${d.order_id}`}
-              </div>
-              {d.note && <p className="hist-note">{d.note}</p>}
-            </div>
-          ))}
+            );
+          })}
         </div>
       </section>
     </div>
   );
 }
 
-/** Expiries get their own colour. They are not rejections - nobody decided. */
-function badge(state: string): string {
-  if (state === "APPROVED") return "ok";
+/** Expiries get their own colour. They are not rejections - nobody decided.
+ *
+ *  An approval whose action then failed to execute gets the same colour as a
+ *  rejection, not green - `state` says what an operator decided, `final_state`
+ *  says what actually happened, and only "OUTCOME" means it went through. */
+function badge(state: string, finalState: string): string {
+  if (state === "APPROVED") return finalState === "OUTCOME" ? "ok" : "bad";
   if (state === "EXPIRED") return "money";
   return "";
 }

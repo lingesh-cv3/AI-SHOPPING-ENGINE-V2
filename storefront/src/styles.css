@@ -1677,6 +1677,11 @@ select.card-picker {
   color: var(--ok);
 }
 
+.tag.bad {
+  background: var(--friction-soft);
+  color: var(--friction);
+}
+
 /* A note somebody wrote. Set apart because it is the only thing on this row a
  * person authored rather than the system recording. */
 .hist-note {
@@ -1685,6 +1690,13 @@ select.card-picker {
   margin: 5px 0 0;
   padding-left: 10px;
   border-left: 2px solid var(--line);
+}
+
+/* An approval that was decided correctly and then failed on the platform - the
+ * one thing this row must not let read the same as a plain success. */
+.hist-note.warn {
+  color: var(--friction);
+  border-left-color: var(--friction);
 }
 
 

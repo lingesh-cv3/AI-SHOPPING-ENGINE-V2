@@ -170,17 +170,20 @@ for the two bugs that needed real timing/restart conditions rather than a databa
 row. Storefront typecheck is unchanged at 10 pre-existing errors throughout (see
 Known Issues) - none of this session's fixes touched those lines.
 
-Not fixed this session, in progress when the session ended: **approved-then-failed
-recoveries are invisible in the operations console** - `/api/ops/history` already
-returns `final_state: "FAILED"` on a row whose `state` is `"APPROVED"`, but
-`OpsConsole.tsx`'s badge is coloured from `state` alone, so an approval that was
-decided correctly and then failed on the platform renders with the same green
-"approved" tag as a genuine success. Root-caused; the fix is `badge()` in
-`storefront/src/OpsConsole.tsx` needs to also read `final_state`, and the row needs
-a visible note when they disagree. No backend change needed - the data is already
-there. This one has no HTTP-observable assertion (pure rendering), so it needs a
-manual browser check rather than a script, the way #8 (option buttons) and #4
-(reload) already do.
+13. **Approved-then-failed recoveries read as successes in the operations
+    console.** `badge()` in `storefront/src/OpsConsole.tsx` coloured the "Already
+    decided" tag from `d.state` alone, so an approval that a person got right and
+    that then failed on the platform (declined card again, adapter error) showed
+    the same green "approved" tag as a genuine success - on the one screen whose
+    entire job is telling an operator what actually happened. `badge()` now also
+    reads `final_state` (only `"OUTCOME"` counts as success; `state === "APPROVED"`
+    with any other `final_state` renders the same red as a rejection), and the row
+    gets an inline note: "Approved, but did not go through on the platform... The
+    shopper has not been told it worked." No backend change - `final_state` was
+    already returned. Pure rendering, so no HTTP-observable assertion is possible;
+    no frontend test runner exists in this project yet (`package.json` has no test
+    script) and standing one up was treated as its own task rather than folded into
+    this fix - verified by hand in the browser instead.
 
 ---
 
@@ -207,9 +210,6 @@ the tab.
 refreshing mid-choice leaves a question with nothing to tap.
 
 **Occasional near-duplicate assistant messages** from the poll's deduplication.
-
-**Approved-then-failed recoveries are invisible in the operations console.** See
-Fixed This Session - root-caused but not yet patched.
 
 **A long testing session shares one demo database with no easy reset for
 accumulated backlog.** `handovers_across` returns only the oldest 50 unhandled
@@ -249,21 +249,16 @@ Known Issues are disproportionately the ones that are not.
 
 ## Next Steps
 
-1. Finish the operations console fix already root-caused above: `badge()` in
-   `storefront/src/OpsConsole.tsx` needs to read `final_state` as well as `state`,
-   and the row needs a visible note when an approved action failed on execution.
-   Verify by hand in the browser - no backend change, so no new HTTP assertion is
-   possible for this one.
-2. Decide the guest-checkout requirement question explicitly (sign-in required or
+1. Decide the guest-checkout requirement question explicitly (sign-in required or
    not) before touching anything downstream of it - email collection, order
    notification, and the handover-message-into-a-dying-session problem all follow
    from that decision.
-3. Route the merchant/operator consoles by address (`/northfield/merchant`) rather
+2. Route the merchant/operator consoles by address (`/northfield/merchant`) rather
    than `sessionStorage`, and fix `/signin` the same way.
-4. Consider a browser-level test layer before trusting any future frontend fix
+3. Consider a browser-level test layer before trusting any future frontend fix
    without one - this session's own backend fixes could all be verified
    automatically; the remaining known issues mostly can't be, for the same
    underlying reason.
-5. Work through the smaller findings listed under Known Issues in whatever order
+4. Work through the smaller findings listed under Known Issues in whatever order
    next picks up this file - none of them are architecturally risky, they just
    didn't get to this session.
