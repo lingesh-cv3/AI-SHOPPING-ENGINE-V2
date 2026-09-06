@@ -298,6 +298,17 @@ worth revisiting; the sign-in screen shows a connection id or platform name rath
 than the merchant's actual name; a rejection branch pasted three times in
 `routes.py`, duplicate field declarations in `ChatReply`.
 
+**The same append-not-replace contradiction exists in one more place.** Found while
+checking for this shape elsewhere after fixing #15's `needs_choice` branch, not yet
+fixed. `chat.py`'s catch-all `else` for any failed action that isn't
+`needs_choice`/`CLEAR_CART`/`CHECK_ORDER_STATUS`/`PREPARE_CHECKOUT` appends a fixed
+"I couldn't turn anything up for that" to the model's reply rather than replacing
+it. That catch-all also handles a sold-out `ADD_TO_CART` (service.py's "every
+option is sold out" path), so a model reply that already says "Sure, I'll add that"
+gets a search-failure sentence tacked onto it - wrong shape (append vs. replace,
+same as #15) and wrong content (search wording for a found-but-unavailable
+product, the same class of mismatch as #12's empty-cart-blamed-on-the-card).
+
 ### Why the tests did not catch these
 
 **None of them can see the browser.** Every bug found by hand recently lived in
