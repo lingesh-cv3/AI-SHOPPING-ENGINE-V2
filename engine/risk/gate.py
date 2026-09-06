@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 
 from shared.models import (
     ACTION_RISK_PROPERTIES,
+    ActionType,
     RiskDecision,
     RiskOutcome,
     SelectedAction,
@@ -42,9 +43,18 @@ from .policy import AutomationMode, PolicyStore, RiskPolicy
 #    refund reports FINANCIAL_ALWAYS_HUMAN rather than CAUTIOUS_MODE - the former
 #    is a permanent architectural rule, the latter a temporary setting, and an
 #    operator reading the audit log needs to know which applied.
+#
+# 3. ESCALATION_ALWAYS_REACHES_A_PERSON is checked BEFORE the merchant's block
+#    list, for the same reason and with the same force. Escalation is what the
+#    engine does when it cannot help, and the shopper is told a person will pick
+#    it up. A merchant who ticked it in the block list got the tick honoured and
+#    the sentence anyway: the case landed in BLOCKED, no handover was created, and
+#    nobody ever saw it. One checkbox quietly disconnected the safety net while
+#    the assistant carried on promising it.
 
 RULE_CAPABILITY_UNVERIFIED = "CAPABILITY_UNVERIFIED"
 RULE_SUSPENDED = "CONNECTION_SUSPENDED"
+RULE_ESCALATION_UNBLOCKABLE = "ESCALATION_ALWAYS_REACHES_A_PERSON"
 RULE_BLOCKED_BY_POLICY = "BLOCKED_BY_MERCHANT_POLICY"
 RULE_UNKNOWN_ACTION = "UNKNOWN_ACTION_TYPE"
 RULE_FINANCIAL = "FINANCIAL_ALWAYS_HUMAN"
@@ -59,6 +69,7 @@ RULE_AUTO_CLEARED = "AUTO_CLEARED"
 RULE_ORDER: tuple[str, ...] = (
     RULE_CAPABILITY_UNVERIFIED,
     RULE_SUSPENDED,
+    RULE_ESCALATION_UNBLOCKABLE,
     RULE_BLOCKED_BY_POLICY,
     RULE_UNKNOWN_ACTION,
     RULE_FINANCIAL,
@@ -80,6 +91,10 @@ def explain_rules() -> list[tuple[str, str]]:
     return [
         (RULE_CAPABILITY_UNVERIFIED, "Blocked - never capability-checked"),
         (RULE_SUSPENDED, "Blocked - the connection is suspended"),
+        (
+            RULE_ESCALATION_UNBLOCKABLE,
+            "Automatic - handing a shopper to a person cannot be switched off",
+        ),
         (RULE_BLOCKED_BY_POLICY, "Blocked - you have forbidden this action"),
         (RULE_UNKNOWN_ACTION, "Human - unrecognised action, treated as financial"),
         (RULE_FINANCIAL, "Human - the action touches money. Never automatic."),
@@ -139,7 +154,24 @@ class RiskGate:
         if policy.mode is AutomationMode.SUSPENDED:
             return decide(RiskOutcome.BLOCK, RULE_SUSPENDED, "connection is suspended")
 
-        # 3. Merchant forbade it. BLOCK, not HUMAN - asking about something they
+        # 3. THE OTHER FLOOR. Checked before the block list, so no policy can
+        #    switch it off - the same shape as the financial rule below and for
+        #    the same reason.
+        #
+        #    Escalation is what happens when the engine cannot help, and the
+        #    shopper is told a person will pick it up. Honouring a block here
+        #    meant the case died in BLOCKED while the sentence was still sent, so
+        #    somebody was waiting on a person nobody had told. A merchant who does
+        #    not want these can turn the assistant off; they cannot have it make
+        #    promises on their behalf and then bin them.
+        if action_type is ActionType.ESCALATE_TO_HUMAN and action_type in policy.blocked:
+            return decide(
+                RiskOutcome.AUTO,
+                RULE_ESCALATION_UNBLOCKABLE,
+                "handing a shopper to a person cannot be blocked",
+            )
+
+        # 4. Merchant forbade it. BLOCK, not HUMAN - asking about something they
         #    already refused wastes their time and implies the answer might be yes.
         if action_type in policy.blocked:
             return decide(
@@ -148,7 +180,7 @@ class RiskGate:
                 f"{action_type} is blocked on this connection",
             )
 
-        # 4. Absent from the risk table. risk_properties_for already failed closed,
+        # 5. Absent from the risk table. risk_properties_for already failed closed,
         #    but a distinct rule name tells an operator this is a missing table
         #    entry rather than a genuinely financial action.
         if action_type not in ACTION_RISK_PROPERTIES:
@@ -158,7 +190,7 @@ class RiskGate:
                 f"{action_type} has no risk-table entry; treated as financial",
             )
 
-        # 5. THE FLOOR. Checked before any merchant configuration, so no policy
+        # 6. THE FLOOR. Checked before any merchant configuration, so no policy
         #    can override it.
         if properties.financial:
             return decide(
@@ -167,7 +199,7 @@ class RiskGate:
                 "action touches money; human approval is mandatory",
             )
 
-        # 6. Irreversible gets a human even with no money involved, because
+        # 7. Irreversible gets a human even with no money involved, because
         #    "undo it" is not available if the judgement was wrong.
         if not properties.reversible:
             return decide(
@@ -176,7 +208,7 @@ class RiskGate:
                 "action cannot be undone; human approval required",
             )
 
-        # 7. Anything reaching the customer directly. Reversible in the database,
+        # 8. Anything reaching the customer directly. Reversible in the database,
         #    not in their inbox.
         if properties.touches_customer_data:
             return decide(
@@ -185,7 +217,7 @@ class RiskGate:
                 "action contacts the customer or uses their data",
             )
 
-        # 8. Cautious mode gates everything. The default for a new connection.
+        # 9. Cautious mode gates everything. The default for a new connection.
         if policy.mode is AutomationMode.CAUTIOUS:
             return decide(
                 RiskOutcome.HUMAN,
@@ -193,9 +225,9 @@ class RiskGate:
                 "connection is in cautious mode; all actions are gated",
             )
 
-        # 9. Standard mode, but not approved. Absence of permission is not
+        # 10. Standard mode, but not approved. Absence of permission is not
         #    permission.
-        # 9. Restricted by the merchant, where they have chosen to restrict.
+        # 10. Restricted by the merchant, where they have chosen to restrict.
         #
         #    This used to be an allowlist: an action ran only if the merchant had
         #    ticked it. That was a second gate on top of one that already works. By
@@ -215,7 +247,7 @@ class RiskGate:
                 f"{action_type} is not on this merchant's restricted allowlist",
             )
 
-        # 10. Only now does it run unattended.
+        # 11. Only now does it run unattended.
         return decide(
             RiskOutcome.AUTO,
             RULE_AUTO_CLEARED,

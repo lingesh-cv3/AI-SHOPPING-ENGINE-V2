@@ -1026,6 +1026,90 @@ else:
 
 # ---------------------------------------------------------------------------
 
+section("A promise of a person is kept")
+
+# A merchant blocking ESCALATE_TO_HUMAN.
+#
+# The gate did as it was told and the reply did not. The shopper was still told
+# "I've passed it to someone at the shop who can", the case landed in state
+# BLOCKED, no handover was created, and nobody at CV3 or at the shop ever saw it.
+# One tick in the policy editor quietly disconnected the safety net while the
+# assistant carried on promising it.
+#
+# Northfield, because it cannot recover a payment - so a declined card there has
+# nowhere to go except a person, which is exactly the path being tested.
+blocked_session = f"hc_block_{uuid.uuid4().hex[:6]}"
+
+before_policy = call("GET", f"/api/policy/{NORTHFIELD}")
+call(
+    "PUT",
+    f"/api/policy/{NORTHFIELD}",
+    {"mode": "STANDARD", "auto_allowed": [], "blocked": ["ESCALATE_TO_HUMAN"]},
+)
+
+blocked_cart = call("POST", f"/api/shop/{NORTHFIELD}/cart")
+call(
+    "POST",
+    f"/api/shop/{NORTHFIELD}/cart/{blocked_cart.get('cart_id')}/lines",
+    {"product_id": "P1003", "quantity": 1},
+)
+blocked_reply = call(
+    "POST",
+    "/api/chat/pay",
+    {
+        "connection_id": NORTHFIELD,
+        "session_id": blocked_session,
+        "cart_id": blocked_cart.get("cart_id"),
+        "card_last4": "0004",
+    },
+)
+
+blocked_handovers = call("GET", "/api/ops/handovers")
+reached = [
+    h
+    for h in blocked_handovers.get("handovers", [])
+    if h.get("case_id") == blocked_reply.get("case_id")
+]
+
+check(
+    "a blocked escalation still reaches a person",
+    len(reached) == 1,
+    f"{len(reached)} handovers for case {blocked_reply.get('case_id')}",
+    "engine/risk/gate.py - a merchant must not be able to block the safety net",
+)
+check(
+    "the rule says the block was overridden",
+    blocked_reply.get("risk_rule") == "ESCALATION_ALWAYS_REACHES_A_PERSON",
+    str(blocked_reply.get("risk_rule")),
+    "engine/risk/gate.py",
+)
+check(
+    "the shopper is not promised somebody who was never told",
+    "passed it" not in str(blocked_reply.get("reply", "")).lower()
+    or len(reached) == 1,
+    str(blocked_reply.get("reply"))[:130],
+    "engine/api/chat.py - the reply must match what actually happened",
+)
+
+# Put the policy back before anything else runs against this merchant.
+call(
+    "PUT",
+    f"/api/policy/{NORTHFIELD}",
+    {
+        "mode": before_policy.get("mode", "STANDARD"),
+        "auto_allowed": before_policy.get("auto_allowed", []),
+        "blocked": before_policy.get("blocked", []),
+    },
+)
+restored = call("GET", f"/api/policy/{NORTHFIELD}")
+check(
+    "the merchant's policy is put back",
+    restored.get("blocked") == before_policy.get("blocked"),
+    f"{restored.get('blocked')} vs {before_policy.get('blocked')}",
+)
+
+# ---------------------------------------------------------------------------
+
 section("Expiry")
 
 exp_session = f"hc_exp_{uuid.uuid4().hex[:6]}"
