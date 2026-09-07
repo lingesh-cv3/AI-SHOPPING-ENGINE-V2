@@ -76,6 +76,14 @@ class ChatRequest(BaseModel):
     #: and a fixed sentence now beats a nicer one in thirty seconds, or never,
     #: while the provider is busy.
     skip_model: bool = False
+
+    #: This message was invented by the engine, not typed by the shopper - the
+    #: /pay endpoint recursing into chat() after a decline is the one case.
+    #: Recording it as a shopper turn would put words in their mouth that the
+    #: transcript and merchant console then show as their own; the friction
+    #: itself is already recorded as a Case and read back as fact, not
+    #: conversation (see session/store.py), so nothing here needs it repeated.
+    synthetic: bool = False
 class ChatReply(BaseModel):
     """One assistant turn.
 
@@ -226,12 +234,13 @@ async def chat(
         req.session_id, req.connection_id
     )
 
-    await session_store.add_turn(
-        session_id=req.session_id,
-        connection_id=req.connection_id,
-        speaker="shopper",
-        text=req.message,
-    )
+    if not req.synthetic:
+        await session_store.add_turn(
+            session_id=req.session_id,
+            connection_id=req.connection_id,
+            speaker="shopper",
+            text=req.message,
+        )
 
     # Commerce context. Best-effort: reasoning with less is better than a turn that
     # fails because a lookup did.
@@ -554,6 +563,7 @@ async def chat(
         speaker="assistant",
         text=reply,
         case_id=case_id,
+        choices=choices,
     )
 
     return ChatReply(
@@ -879,6 +889,7 @@ async def act(
         speaker="assistant",
         text=reply,
         case_id=case_id,
+        choices=choices,
     )
 
     return ChatReply(
@@ -1089,6 +1100,7 @@ async def pay(
                 cart_id=req.cart_id,
                 order_id=order_id,
                 skip_model=True,
+                synthetic=True,
             ),
             key=key,
             who=who,

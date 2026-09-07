@@ -245,6 +245,12 @@ class SessionTurn(Base):
     #: a message to the decision it caused.
     case_id: Mapped[str | None] = mapped_column(String(40), index=True)
 
+    #: Options offered with this turn, serialized as JSON - size or variant choices
+    #: a shopper must tap before an action can run. Without this a reload restored
+    #: turns as text only, so a question offered before the refresh had nothing left
+    #: to tap after it: the buttons were never wrong, they were never saved.
+    choices_json: Mapped[str | None] = mapped_column(Text)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     __table_args__ = (Index("ix_turns_session_created", "session_id", "created_at"),)

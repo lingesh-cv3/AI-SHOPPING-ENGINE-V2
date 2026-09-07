@@ -105,10 +105,15 @@ export function ChatWidget({
         // own messages are already on screen when they send them; on a restore
         // nothing is on screen, and reusing that filter made the conversation read
         // as the assistant talking to itself.
+        //
+        // Choices are carried over too. Without them a reload mid-choice restored
+        // the question but not the buttons to answer it - the offer was still
+        // live, only the way to tap it was gone.
         onTurns(
           stored.map((t) => ({
             speaker: t.speaker,
             text: t.text,
+            choices: t.choices.length > 0 ? t.choices : undefined,
           })),
         );
       })
@@ -289,8 +294,12 @@ export function ChatWidget({
     variant_id: string;
     label: string;
     product_id: string;
+    product_title: string;
   }) {
-    return tap(c.product_id, c.label, c.variant_id);
+    // A real sentence, not the bare label. "8" recorded as the shopper's own
+    // words read as if they had typed just that - the product it answered for
+    // was gone from the transcript entirely.
+    return tap(c.product_id, `The ${c.label}, for the ${c.product_title}`, c.variant_id);
   }
 
   function send() {

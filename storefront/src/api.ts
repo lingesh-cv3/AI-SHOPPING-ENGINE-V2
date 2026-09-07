@@ -126,6 +126,15 @@ export interface StoredTurn {
   text: string;
   case_id: string | null;
   at: string | null;
+  /** Options offered with this turn, if any. Restoring these is what lets a
+   *  reload mid-choice leave the buttons tappable rather than just the text. */
+  choices: {
+    variant_id: string;
+    label: string;
+    product_id: string;
+    product_title: string;
+    left: number | null;
+  }[];
 }
 
 export interface Product {

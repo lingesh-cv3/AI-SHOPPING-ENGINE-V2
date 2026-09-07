@@ -20,6 +20,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -76,14 +77,38 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
 
 
 async def create_schema() -> None:
-    """Create tables if they do not exist.
+    """Create tables if they do not exist, and add columns a table is missing.
 
     Fine for development and for a single-instance demo. A real deployment wants
-    Alembic migrations instead, because this cannot alter an existing table - it
-    only creates missing ones, and a column added later would be silently absent.
+    Alembic migrations instead, because create_all cannot alter an existing table
+    - it only creates missing ones, and a column added later would be silently
+    absent. So each column that needs to reach a database created before it is
+    added here, idempotently, before anyone reads or writes it.
     """
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        if database_url().startswith("sqlite"):
+            # SQLite-only, and deliberately so: this is the dev database, and the
+            # production path is Alembic, not this. The shopper email arrived after
+            # the first databases existed, so it is added to those that lack it.
+            rows = await conn.execute(text("PRAGMA table_info(shoppers)"))
+            columns = {row[1] for row in rows}
+            if "email" not in columns:
+                await conn.execute(
+                    text("ALTER TABLE shoppers ADD COLUMN email VARCHAR(255)")
+                )
+
+        if database_url().startswith("sqlite"):
+            # choices_json arrived after the first databases existed, same
+            # reasoning as the shoppers migration above.
+            turn_rows = await conn.execute(text("PRAGMA table_info(session_turns)"))
+            turn_columns = {row[1] for row in turn_rows}
+            if "choices_json" not in turn_columns:
+                await conn.execute(
+                    text("ALTER TABLE session_turns ADD COLUMN choices_json TEXT")
+                )
+
     logger.info("database ready at %s", database_url().split("://")[0])
 
 

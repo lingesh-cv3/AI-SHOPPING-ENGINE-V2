@@ -22,6 +22,7 @@ The assistant should know it happened without claiming to have discussed it.
 
 from __future__ import annotations
 
+import json
 import uuid
 
 from sqlalchemy import select
@@ -63,8 +64,15 @@ async def add_turn(
     speaker: str,
     text: str,
     case_id: str | None = None,
+    choices: list[dict] | None = None,
 ) -> None:
-    """Record one thing that was said."""
+    """Record one thing that was said.
+
+    `choices` carries the options offered with this turn, when there were any -
+    a size or variant a shopper must tap before the action can run. Persisted
+    rather than left to render-only state, so a reload mid-choice restores the
+    same buttons instead of a question with nothing left to answer.
+    """
     async with session_scope() as db:
         db.add(
             SessionTurn(
@@ -74,6 +82,7 @@ async def add_turn(
                 speaker=speaker,
                 text=text,
                 case_id=case_id,
+                choices_json=json.dumps(choices) if choices else None,
             )
         )
 
@@ -197,6 +206,7 @@ async def turns(
             "text": t.text,
             "case_id": t.case_id,
             "at": (t.created_at.isoformat() if t.created_at else None),
+            "choices": json.loads(t.choices_json) if t.choices_json else [],
         }
         for t in rows
     ]
