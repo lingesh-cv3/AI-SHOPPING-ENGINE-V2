@@ -97,6 +97,10 @@ class Reasoning:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     fallback_reason: str | None = None
+    #: The provider's own retry hint when a rate limit forced the rule fallback,
+    #: so the shopper can be told a real number rather than "a few seconds". Only
+    #: set on the rate-limited fallback path; None everywhere else.
+    retry_after_seconds: float | None = None
 
 
 class ReasoningService:
@@ -175,7 +179,9 @@ class ReasoningService:
             )
         except LLMUnavailable as exc:
             logger.warning("reasoning fell back: %s", exc)
-            return self._fallback(friction, str(exc))
+            return self._fallback(
+                friction, str(exc), retry_after_seconds=exc.retry_after_seconds
+            )
 
         call = next(
             (c for c in result.tool_calls if c["name"] == "propose_actions"), None
@@ -273,7 +279,13 @@ class ReasoningService:
             )
         return out
 
-    def _fallback(self, friction: FrictionType | None, reason: str) -> Reasoning:
+    def _fallback(
+        self,
+        friction: FrictionType | None,
+        reason: str,
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> Reasoning:
         """Rule-based proposals. Identical shape to the model's output."""
         types = (
             _FALLBACK.get(friction, _FALLBACK_ASSISTANCE)
@@ -294,4 +306,5 @@ class ReasoningService:
             reply=None,
             used_model=False,
             fallback_reason=reason,
+            retry_after_seconds=retry_after_seconds,
         )

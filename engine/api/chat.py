@@ -134,11 +134,6 @@ class ChatReply(BaseModel):
     #: How many seconds the provider asked us to wait.
     retry_after_seconds: int | None = None
 
-    #: Options the shopper must pick between before the action can run. Rendered
-    #: as buttons rather than asked in prose - "which size?" followed by a list
-    #: they have to type back is worse than three things they can tap.
-    choices: list[dict] = Field(default_factory=list)
-
     awaiting_person: bool = False
     risk_rule: str | None = None
     #: Options the shopper must pick between before the action can run. Rendered
