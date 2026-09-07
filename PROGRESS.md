@@ -399,11 +399,17 @@ below; `npm run build` now exits 0.)
     not on the code. `npm run build` exits 0; `npm run lint` still carries the same
     7 pre-existing `set-state-in-effect` errors in files this work did not touch.
 
-    Browser verification for the UI half (the half no HTTP test can see) is the
-    first Playwright walk, `scripts/walk_checkout.cjs`: Leg A guest → gate → sign
-    up with email → pay (order lands); Leg B legacy account → email prompt → save →
-    picker. Both pass, model-free so the Groq throttle never interrupts them.
-    82 checks total.
+    Browser verification for the UI half (the half no HTTP test can see) is Leg
+    A/Leg B in `checkout.spec.ts` (originally a standalone script, now a standing
+    test - see #21): Leg A guest → gate → sign up with email → pay (order lands);
+    Leg B legacy account → email prompt → save → picker. Both model-free so the
+    Groq throttle never interrupts them. Leg A now asserts the basket at the card
+    picker matches the guest basket line-for-line, not just that a basket exists -
+    the point of the walk was that ownership, sign-in, cart migration and payment
+    all cross in this one flow. All the code above (`auth.py`, `chat.py`, `shop.py`,
+    `models.py`, `shoppers.py`, the storefront files, and the four harnesses) is
+    now committed; it had shipped in the working tree and in this file before the
+    commit did. 82 checks total.
 
 21. **The Playwright walk was a standalone script nobody ran on demand, and three
     small transcript bugs from an earlier walkthrough were still unfixed.** Both
