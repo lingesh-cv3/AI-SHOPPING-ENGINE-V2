@@ -64,7 +64,7 @@ conversation or order at the same merchant - see Fixed This Session.
 
 ### Tests
 
-`healthcheck.py` - 82 checks, one path end to end. Reports SKIP rather than FAIL
+`healthcheck.py` - 84 checks, one path end to end. Reports SKIP rather than FAIL
 when the provider is busy, and says how many checks never executed.
 
 `fuzz.py` - random shopper sequences, asserting after every step that the cart
@@ -478,6 +478,22 @@ below; `npm run build` now exits 0.)
     reading the code paths; no test-suite count changed (none of these were
     HTTP-observable before this commit either).
 
+23. **`handovers_across` silently hid the newest handovers.** It returned only the
+    oldest 50 open handovers, oldest first, with no total. On a long testing session
+    or a busy real merchant, the newest cases sat outside that window - an operator
+    was told a person would help a shopper while the case for it was invisible,
+    reading as "gone" until enough of the oldest were closed. The ops route also had
+    no way to ask for more than fifty.
+
+    `handovers_across` now takes `offset` and returns `(rows, total)`; the ops route
+    accepts `?offset=&limit=` and reports `total` alongside `handovers`; the console
+    pages through the list when it exceeds one page, and its "N people were promised
+    help" line uses the real total rather than the page size. Two healthcheck checks
+    pin the contract: a page showing one handover still reports a total of one, and
+    `offset=1` pages past it to nothing - proving `total` is the whole open set, not
+    the page being looked at. 84 checks total. Verified by restarting the engine and
+    running the full suite (all 82 ran, 2 model-bound SKIPs as usual).
+
 ---
 
 ## Known Issues / Pending
@@ -485,17 +501,13 @@ below; `npm run build` now exits 0.)
 Reported after a walkthrough. **Not a complete list** - walk the product before
 trusting anything.
 
-**Occasional near-duplicate assistant messages** from the poll's deduplication.
+**Occasional near-duplicate assistant messages** from the poll's deduplication -
+the last real behaviour bug, browser-only, and the likeliest by design (see Next
+Steps #2). Worth reproducing in the browser before writing its regression test,
+rather than fixing from a guess at the trigger.
 
-**`handovers_across` returns only the oldest 50 unhandled cases, across every
-merchant, not per merchant.** In a long testing session or a busy real one, the
-newest handovers fall outside that window and read as "gone" from the operations
-console - not resolved, just invisible - until enough of the oldest ones are
-closed through the ops API to let them back in. That is a shopper who was told
-someone would pick this up, waiting on a person who cannot see the case at all.
-`demo_reset.py` does not clear this - it only adds curated activity on top. Worth
-a "close everything older than N days" operator action, or pagination on the
-handovers list, before a real demo or a real deployment.
+Fixed: the `handovers_across` window (see #23 below) - the oldest-50 cap that hid
+the newest handovers from the operations console is now a paged list with a total.
 
 Additional smaller findings from an earlier session's walkthrough, not yet fixed
 (see the walkthrough transcript for full detail if this file is ever pruned): a
@@ -533,9 +545,15 @@ Playwright suite to them rather than reach for `healthcheck.py` again.
    finish a sale - whether that nudges a merchant's conversion is worth watching.
 2. The browser-level test layer now exists (`storefront/tests/checkout.spec.ts`,
    `npm test` from `storefront/`) - extend it rather than starting a second one.
-   Best next addition: the near-duplicate-message poll bug, the last real
-   browser-only Known Issue still open. The sign-in screen's merchant-name display
-   was a stale finding - it already shows `merchant.name`.
-3. Work through the smaller findings listed under Known Issues in whatever order
-   next picks up this file - none of them are architecturally risky, they just
-   didn't get to this session.
+   Best next addition: the near-duplicate-message poll bug, now the only real
+   behaviour Known Issue still open. Reproduce it in the browser first (the
+   project's standing rule against fixing a bug from a guess at its output
+   applies here too - the poll dedup is exact-match plus suffix-match, and the
+   near-duplicate survivor is precisely the case the check does not catch). The
+   sign-in screen's merchant-name display was a stale finding - it already shows
+   `merchant.name`.
+3. The remaining Known Issues are not architectural; the `DIAGNOSED`-stuck item
+   is a lifecycle-semantics decision that wants a deliberate call (the code does
+   close the case out via `record_outcome`, so it is not literally orphaned), and
+   the blank-note handover is a deliberate behaviour worth revisiting rather than
+   an obvious bug.
