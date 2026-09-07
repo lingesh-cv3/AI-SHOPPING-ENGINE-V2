@@ -36,7 +36,14 @@ from engine import db
 from engine import session as session_store
 from shared.models import CommerceError
 
-from .auth import Visitor, any_key, belongs_to, require_owner, visitor
+from .auth import (
+    Visitor,
+    any_key,
+    belongs_to,
+    require_checkout_identity,
+    require_owner,
+    visitor,
+)
 from .why import explain
 from .deps import engine
 
@@ -944,6 +951,11 @@ async def pay(
     adapter = engine.registry.adapter_for(req.connection_id)
     if adapter is None:
         raise HTTPException(404, f"unknown connection '{req.connection_id}'")
+
+    # Checkout requires an account with an email - the confirmation has to reach
+    # somebody. A guest is sent to sign in (their basket carries over), and an
+    # account without an email is prompted for one.
+    await require_checkout_identity(who, req.connection_id)
 
     # Before anything is charged. This route takes a cart_id from the caller and
     # spent against it without ever asking whose it was.

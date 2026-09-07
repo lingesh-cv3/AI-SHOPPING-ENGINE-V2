@@ -103,11 +103,20 @@ test.describe('Checkout flow', () => {
     await expect(page.locator('select.card-picker')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Pay now' })).toHaveCount(0);
 
+    // What the guest basket actually holds, so the claim below is that THIS
+    // basket survived sign-up, not merely that a basket happens to exist.
+    const linesBefore = await page.locator('.panel .line').allTextContents();
+    expect(linesBefore.length).toBeGreaterThan(0);
+
     const stamp = Date.now();
     await signUp(page, `walka_${stamp}`, `walka_${stamp}@example.com`);
 
-    // Back at the shop, the card buttons now exist - the basket carried over.
+    // Back at the shop, the card buttons now exist - and the basket is the
+    // same one the guest built, not an empty one the account started fresh.
     await expect(page.locator('select.card-picker')).toBeVisible({ timeout: 15000 });
+    const linesAfter = await page.locator('.panel .line').allTextContents();
+    expect(linesAfter).toEqual(linesBefore);
+
     await page.getByRole('button', { name: 'Pay now' }).click();
 
     const orderTitle = page.locator('.order-ok .detail-title');

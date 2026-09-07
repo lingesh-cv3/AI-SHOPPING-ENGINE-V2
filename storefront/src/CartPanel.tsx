@@ -1,5 +1,8 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
+import type { Account } from "./account";
 import type { Cart, CheckoutResult } from "./api";
+import { getConnection, pathFor } from "./api";
 
 /**
  * The cart, coupon field, and checkout.
@@ -13,6 +16,11 @@ import type { Cart, CheckoutResult } from "./api";
  * A declined checkout renders as an unpaid order rather than an error, because that
  * is what it is: the order exists, the money did not move, and the sale is still
  * recoverable.
+ *
+ * Checkout requires an account, so the card buttons only appear once somebody is
+ * signed in and has an email. A guest sees the gate and is sent to sign in - their
+ * basket carries over - and an account that predates the email field is prompted
+ * for one before the buttons appear.
  */
 /** The readable part of a variant id.
  *
@@ -43,6 +51,8 @@ export function CartPanel({
   busy,
   error,
   couponHint,
+  account,
+  onSetEmail,
   onPromo,
   onCheckout,
   onRemoveLine,
@@ -52,6 +62,10 @@ export function CartPanel({
   busy: boolean;
   error: string | null;
   couponHint?: string;
+  /** Who is signed in, if anybody. The card buttons wait on this. */
+  account: Account | null;
+  /** Save an email onto a legacy account. Undefined hides the prompt. */
+  onSetEmail?: (email: string) => Promise<void>;
   onPromo: (code: string) => void;
   onCheckout: (cardLast4: string) => void;
   /** Take a line out. Undefined hides the control, so the panel
@@ -60,6 +74,9 @@ export function CartPanel({
 }) {
   const [code, setCode] = useState("");
   const [card, setCard] = useState("1111");
+  const [email, setEmail] = useState("");
+  const [savingEmail, setSavingEmail] = useState(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
 
   return (
     <aside className="panel">
@@ -149,25 +166,86 @@ export function CartPanel({
               <p className="note">{couponHint}</p>
             )}
 
-            <select
-              className="card-picker"
-              value={card}
-              onChange={(e) => setCard(e.target.value)}
-              aria-label="Card"
-            >
-              <option value="1111">Card ending 1111 — approves</option>
-              <option value="0002">Card ending 0002 — no funds</option>
-              <option value="0003">Card ending 0003 — expired</option>
-            </select>
+            {account && account.email ? (
+              <>
+                <select
+                  className="card-picker"
+                  value={card}
+                  onChange={(e) => setCard(e.target.value)}
+                  aria-label="Card"
+                >
+                  <option value="1111">Card ending 1111 — approves</option>
+                  <option value="0002">Card ending 0002 — no funds</option>
+                  <option value="0003">Card ending 0003 — expired</option>
+                </select>
 
-            <button
-              className="add"
-              style={{ width: "100%", marginTop: 10 }}
-              disabled={busy}
-              onClick={() => onCheckout(card)}
-            >
-              {busy ? "Working…" : "Pay now"}
-            </button>
+                <button
+                  className="add"
+                  style={{ width: "100%", marginTop: 10 }}
+                  disabled={busy}
+                  onClick={() => onCheckout(card)}
+                >
+                  {busy ? "Working…" : "Pay now"}
+                </button>
+              </>
+            ) : account ? (
+              /* Signed in, but on an account made before the email field existed.
+                 The confirmation has nowhere to go, so the buttons wait on one. */
+              <div className="gate">
+                <div className="gate-label">
+                  Add your email so we can send the order confirmation
+                </div>
+                <div className="field">
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => {
+                      setEmail(e.target.value);
+                      setEmailError(null);
+                    }}
+                    placeholder="you@example.com"
+                    aria-label="Email"
+                  />
+                  <button
+                    disabled={savingEmail || !email.trim()}
+                    onClick={async () => {
+                      setSavingEmail(true);
+                      setEmailError(null);
+                      try {
+                        await onSetEmail?.(email.trim());
+                      } catch {
+                        setEmailError("That did not save. Try again.");
+                      } finally {
+                        setSavingEmail(false);
+                      }
+                    }}
+                  >
+                    {savingEmail ? "Saving…" : "Save"}
+                  </button>
+                </div>
+                {emailError && (
+                  <p className="note" style={{ color: "var(--friction)" }}>
+                    {emailError}
+                  </p>
+                )}
+              </div>
+            ) : (
+              /* A guest. No buttons at all - the confirmation has to reach them. */
+              <div className="gate">
+                <div className="gate-label">
+                  Sign in so we can send your order confirmation
+                </div>
+                <div className="gate-actions">
+                  <Link className="add" to={pathFor(getConnection(), "signin")}>
+                    Sign in
+                  </Link>
+                  <Link className="add" to={pathFor(getConnection(), "signup")}>
+                    Create an account
+                  </Link>
+                </div>
+                <p className="note">Your basket carries over when you sign in.</p>
+              </div>
+            )}
           </>
         )}
 

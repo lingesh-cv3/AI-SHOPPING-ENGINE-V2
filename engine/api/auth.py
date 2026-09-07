@@ -238,6 +238,17 @@ class Visitor:
             return [session["shopper_id"], self.key]
         return [self.key]
 
+    async def shopper_id_for(self, connection_id: str) -> str | None:
+        """The account signed in on this browser for this merchant, if any.
+
+        A guest is None. Signing in is per-merchant - an account at Kettle is not
+        an account at Northfield - so this resolves against the connection.
+        """
+        session = await db.shopper_sessions.resolve(
+            self._shopper_cookie, connection_id
+        )
+        return session["shopper_id"] if session is not None else None
+
 
 async def visitor(
     request: Request,
@@ -294,3 +305,42 @@ async def require_owner(
         404,
         detail={"code": code, "message": message, "retryable": False},
     )
+
+
+async def require_checkout_identity(who: Visitor, connection_id: str) -> str:
+    """The account id behind a payment, and one we can email.
+
+    Checkout now requires an account - the confirmation has to reach somebody, and
+    a guest has no address. Two refusals, and the status code says which:
+
+      401 SIGN_IN_REQUIRED - a guest. The storefront sends them to sign in, and
+                             their basket carries over.
+      428 EMAIL_REQUIRED   - signed in, but on an account created before the email
+                             field existed. Prompted to add one at the gate.
+
+    Hiding the button is the friendly half of this rule; this is the half that
+    holds when the route is called directly.
+    """
+    shopper_id = await who.shopper_id_for(connection_id)
+    if shopper_id is None:
+        raise HTTPException(
+            401,
+            detail={
+                "code": "SIGN_IN_REQUIRED",
+                "message": "sign in to check out",
+                "retryable": True,
+            },
+        )
+
+    shopper = await db.shoppers.by_id(shopper_id)
+    if shopper is None or not shopper.get("email"):
+        raise HTTPException(
+            428,
+            detail={
+                "code": "EMAIL_REQUIRED",
+                "message": "add an email so we can send your order confirmation",
+                "retryable": True,
+            },
+        )
+
+    return shopper_id

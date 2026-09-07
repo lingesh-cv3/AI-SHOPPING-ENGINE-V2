@@ -19,6 +19,9 @@ which is when a check is most likely to be skipped.
 
 Every run prints its seed. A failure is reproducible with --seed, which matters:
 a fuzzer that finds a bug you cannot reproduce has told you almost nothing.
+The seed replays the action sequence; the session ids are fresh each run, because
+the engine files a conversation under whoever first spoke in it and re-running
+would otherwise arrive as a stranger to its own transcript.
 
     python fuzz.py                  20 sequences of 12 steps
     python fuzz.py --seed 12345     repeat a specific run
@@ -82,6 +85,24 @@ def load_keys() -> dict[str, str]:
 KEYS = load_keys()
 
 
+#: The account the shared browser uses at each merchant, keyed by connection id.
+#:
+#: The one shopper cookie can hold only one merchant's session - signing in at
+#: the second shop overwrites the first. Reaching for a merchant again means
+#: signing back in as the same account, so the credentials are kept here rather
+#: than minting a fresh account whose shopper_id owns nothing the browser built.
+_ACCOUNTS: dict[str, tuple[str, str]] = {}
+
+#: Which merchant's shopper session the one cookie currently holds; None is guest.
+#:
+#: Tracks the cookie so an action is only signed in/out when needed. Every act is
+#: run as the owning identity: a merchant that has an account is acted on as that
+#: account - the carts and conversation it claimed are otherwise unreachable the
+#: moment the browser switches to the other shop - and one that does not is a
+#: guest, so its first basket belongs to the visitor cookie, which every shop and
+#: every later account can still reach.
+_CURRENT: str | None = None
+
 #: One cookie jar for the whole run, so the suite looks like one browser.
 #:
 #: The engine now files a cart, a conversation and an order under whichever
@@ -110,6 +131,80 @@ def call(method: str, path: str, body: dict | None = None, key: str | None = Non
         return {"_status": e.code}
     except urllib.error.URLError as e:
         return {"_unreachable": str(e.reason)}
+
+
+def signed_in_for(
+    connection: str, *, cart_id: str | None = None, tag: str = "fz"
+) -> None:
+    """Sign the shared browser in at `connection`, opening its account if needed.
+
+    Checkout now requires a signed-in account with an email, so every pay action
+    runs as one. The first call opens the browser's account at this merchant;
+    later calls re-sign in as that same account, because the one shopper cookie
+    can only hold one merchant's session at a time - signing in at the second
+    shop overwrites the first, and the first is only reachable again by signing
+    back in.
+
+    When a cart already exists in this tab, pass it as *cart_id* so whichever
+    sign-in runs (up or in) adopts it from the visitor cookie to the account.
+    Without this a cart built under a different identity stays filed under it and
+    every subsequent read or pay returns 404.
+    """
+    credentials = _ACCOUNTS.get(connection)
+    if credentials is None:
+        username = f"{tag}_{random.randrange(10**8)}"
+        password = "password123"
+        call(
+            "POST",
+            "/api/account/signup",
+            {
+                "connection_id": connection,
+                "username": username,
+                "password": password,
+                "email": f"{username}@example.com",
+                "guest_session": None,
+                "guest_cart": cart_id,
+            },
+            key=KEYS[MERCHANTS[connection]["secret"]],
+        )
+        _ACCOUNTS[connection] = (username, password)
+    else:
+        username, password = credentials
+        call(
+            "POST",
+            "/api/account/signin",
+            {
+                "connection_id": connection,
+                "username": username,
+                "password": password,
+                "guest_session": None,
+                "guest_cart": cart_id,
+            },
+            key=KEYS[MERCHANTS[connection]["secret"]],
+        )
+    _CURRENT = connection
+
+
+def sign_out() -> None:
+    """Back to a guest. The visitor cookie survives, so nothing is lost."""
+    call("POST", "/api/account/signout")
+    _CURRENT = None
+
+
+def switch_to(connection: str) -> None:
+    """Act on `connection` as whoever owns its state.
+
+    A merchant with an account is acted on as that account - signing in puts the
+    cookie back on it, so the carts and conversation it claimed stay reachable
+    however often the browser visits the other shop. A merchant without one is
+    acted on as a guest, signing out so its first basket is claimed by the
+    visitor cookie, which every account and every shop can still reach.
+    """
+    if connection in _ACCOUNTS:
+        if _CURRENT != connection:
+            signed_in_for(connection)
+    elif _CURRENT is not None:
+        sign_out()
 
 
 class Shopper:
@@ -167,6 +262,7 @@ class Shopper:
 
 
 def act_add(s: Shopper, rng: random.Random) -> str:
+    switch_to(s.connection)
     cart = s.ensure_cart()
     if not cart:
         return "add: no cart"
@@ -194,6 +290,7 @@ def act_add(s: Shopper, rng: random.Random) -> str:
 
 
 def act_remove(s: Shopper, rng: random.Random) -> str:
+    switch_to(s.connection)
     if not s.cart_id or s.expected_items == 0:
         return "remove: nothing to remove"
 
@@ -223,8 +320,13 @@ def act_remove(s: Shopper, rng: random.Random) -> str:
 
 def act_pay(s: Shopper, rng: random.Random) -> str:
     if not s.cart_id or s.expected_items == 0:
+        # The empty branch needs the right identity too: check_cart_matches reads
+        # the (empty but existing) cart right after, and with the wrong cookie on
+        # it an account-owned cart reads as a stranger's 404.
+        switch_to(s.connection)
         return "pay: empty cart"
 
+    signed_in_for(s.connection, cart_id=s.cart_id)
     card = rng.choice(["1111", "1111", "0002"])
     r = call(
         "POST",
@@ -258,6 +360,7 @@ def act_pay(s: Shopper, rng: random.Random) -> str:
 
 
 def act_read_cart(s: Shopper, rng: random.Random) -> str:
+    switch_to(s.connection)
     if not s.cart_id:
         return "read: no cart"
     call("GET", f"/api/shop/{s.connection}/cart/{s.cart_id}", key=s.key)
@@ -266,6 +369,7 @@ def act_read_cart(s: Shopper, rng: random.Random) -> str:
 
 def act_new_cart(s: Shopper, rng: random.Random) -> str:
     """Start again, the way a shopper who refreshed into a dead cart would."""
+    switch_to(s.connection)
     s.cart_id = None
     s.expected_items = 0
     s.ensure_cart()
@@ -317,7 +421,15 @@ def check_paid_cart_not_reusable(s: Shopper) -> str | None:
     So this tries the card that paid it - which now goes through the engine's
     own ledger rather than the platform's key - and a second, genuinely
     different one, which is the case that was never being asked.
+
+    Nothing to check means nobody signs in. This runs after every step, and an
+    unconditional sign-in here churned the cookie: the browser holds one shopper
+    session, so re-signing-in at the merchant just acted on leaves the previous
+    merchant's account unreachable and every cart filed under it a 404.
     """
+    if not s.paid_carts:
+        return None
+    signed_in_for(s.connection)
     for cart, paid_with in s.paid_carts.items():
         other_card = "2222" if paid_with != "2222" else "3333"
         for card in (paid_with, other_card):
@@ -419,6 +531,14 @@ if "_unreachable" in call("GET", "/health"):
 seed = args.seed if args.seed is not None else random.randrange(1, 10**9)
 rng = random.Random(seed)
 
+# A per-process nonce in the session ids. The seed makes the action sequence
+# reproducible, but the sessions themselves must not be: the engine files a
+# conversation under whoever first spoke in it, and re-running the same seed
+# (or running after any run that drew the same seed) would then arrive as a
+# different stranger and be refused the transcript - correctly, which makes
+# the run fail. Uniqueness, not reproducibility, is what a session id needs.
+_NONCE = random.randrange(1_000_000_000)
+
 print()
 print(f"  seed {seed}   {args.sequences} sequences x {args.steps} steps")
 print("  (rerun a failure with --seed)")
@@ -434,7 +554,7 @@ for n in range(args.sequences):
     shoppers = {
         connection: Shopper(
             connection,
-            f"fuzz_{seed}_{n}_{connection[-4:]}",
+            f"fuzz_{_NONCE}_{seed}_{n}_{connection[-4:]}",
             KEYS.get(MERCHANTS[connection]["secret"], ""),
         )
         for connection in MERCHANTS

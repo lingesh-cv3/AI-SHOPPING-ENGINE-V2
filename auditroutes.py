@@ -38,6 +38,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 ENGINE = "http://127.0.0.1:8000"
@@ -238,6 +239,26 @@ def scoping() -> list[tuple[str, list[str]]]:
 
     mine = Browser(PK_DEMO)
     stranger = Browser(PK_DEMO)
+
+    # Checkout requires a signed-in account with an email now, so the browser
+    # that places the order signs up first - otherwise the order probe below
+    # fails at the gate with 401 and never tests the ownership of an order.
+    code, _ = mine.call(
+        "POST",
+        "/api/account/signup",
+        {
+            "connection_id": "conn_demo",
+            "username": f"audit_{uuid.uuid4().hex[:6]}",
+            "password": "password123",
+            "email": f"audit_{uuid.uuid4().hex[:6]}@example.com",
+            "guest_session": None,
+            "guest_cart": None,
+        },
+    )
+    if code != 200:
+        found.append(("shopper scoping", [f"could not sign up to test with ({code})"]))
+        print(f"    FAIL  {'setup':22} could not sign up to test with ({code})")
+        return found
 
     code, cart = mine.call("POST", "/api/shop/conn_demo/cart")
     if code != 200 or not isinstance(cart, dict):

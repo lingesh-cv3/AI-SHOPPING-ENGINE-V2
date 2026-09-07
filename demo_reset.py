@@ -29,6 +29,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 ENGINE = "http://127.0.0.1:8000"
@@ -87,6 +88,32 @@ def key_for(path: str, body: dict | None) -> str | None:
 #: shopper every time and every second call would be refused - correctly.
 _JAR = http.cookiejar.CookieJar()
 _OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_JAR))
+
+
+def signed_in_for(shop: str) -> None:
+    """Make sure the shared browser is signed in at `shop`, with an email.
+
+    Checkout now requires a signed-in account with an email - the order
+    confirmation has to reach somebody, and the checkout route refuses a guest.
+    Everything below that places an order goes through checkout, so the jar is
+    signed up (the whole run is one browser, so one account is the honest shape)
+    and every cart the run creates afterwards is filed under that account.
+    """
+    username = f"demo_{uuid.uuid4().hex[:6]}"
+    r = call(
+        "POST",
+        "/api/account/signup",
+        {
+            "connection_id": shop,
+            "username": username,
+            "password": "password123",
+            "email": f"{username}@example.com",
+            "guest_session": None,
+            "guest_cart": None,
+        },
+    )
+    if "_error" in r:
+        die(f"could not sign up for the demo checkout: {r}")
 
 
 def call(method: str, path: str, body: dict | None = None) -> dict:
@@ -156,6 +183,7 @@ print("  policy       both merchants on Standard")
 # One recovered payment on Kettle, so the merchant report has real revenue.
 # ---------------------------------------------------------------------------
 
+signed_in_for(KETTLE)
 bag = call("POST", f"/api/shop/{KETTLE}/cart")
 if "cart_id" not in bag:
     die(f"could not create a Kettle cart: {bag}")

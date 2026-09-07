@@ -409,6 +409,12 @@ class Shopper(Base):
     #: remember a conversation is a strange thing to require.
     display_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
+    #: Where the order confirmation goes. Nullable because accounts created before
+    #: this field existed have none, and the storefront prompts for one at the
+    #: checkout gate rather than forcing a migration everywhere. Checkout is refused
+    #: until it is present - the confirmation has to reach somebody.
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now
     )

@@ -25,7 +25,7 @@ import { ProductCard } from "./ProductCard";
 import { ProductDetail } from "./ProductDetail";
 import { Hero } from "./Hero";
 import { themeFor } from "./theme";
-import { type Account, claimCart, whoAmI } from "./account";
+import { type Account, claimCart, setEmail, whoAmI } from "./account";
 
 /** Reshape a chat reply into the engine panel's Pipeline view.
  *
@@ -490,6 +490,13 @@ export default function App() {
         result={view === "order" ? null : result}
         busy={busy}
         error={error}
+        account={account}
+        onSetEmail={async (email) => {
+          // Add the email to a legacy account, and reflect it here so the
+          // payment buttons appear without a reload.
+          await setEmail(connection, email);
+          setAccount((prev) => (prev ? { ...prev, email } : prev));
+        }}
         onPromo={applyPromo}
         onCheckout={checkout}
         couponHint={merchant.couponHint}

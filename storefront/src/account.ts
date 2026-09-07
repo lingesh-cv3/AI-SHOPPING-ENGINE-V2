@@ -9,6 +9,9 @@ const ENGINE = "";
 export interface Account {
   username: string;
   display_name: string;
+  /** Where the order confirmation goes. Null on an account that predates the
+   *  email field - the checkout gate prompts for one. */
+  email: string | null;
   /** The conversation that belongs to them, rather than to this tab. */
   session_id: string;
   /** Their basket, so a returning shopper does not start empty. */
@@ -114,6 +117,7 @@ export function signUp(
   connectionId: string,
   username: string,
   password: string,
+  email: string,
   guestSession: string,
   guestCart?: string | null,
 ): Promise<Account> {
@@ -121,10 +125,26 @@ export function signUp(
     connection_id: connectionId,
     username,
     password,
+    email,
     guest_session: guestSession,
     guest_cart: guestCart ?? null,
   });
 }
+/** Add the email to an account created before the field existed.
+ *
+ *  Called from the checkout gate, which refuses to show the payment buttons until
+ *  the confirmation has somewhere to go.
+ */
+export function setEmail(
+  connectionId: string,
+  email: string,
+): Promise<{ email: string }> {
+  return post<{ email: string }>("/api/account/email", connectionId, {
+    connection_id: connectionId,
+    email,
+  });
+}
+
 export async function signOut(): Promise<void> {
   await fetch(`${ENGINE}/api/account/signout`, {
     method: "POST",

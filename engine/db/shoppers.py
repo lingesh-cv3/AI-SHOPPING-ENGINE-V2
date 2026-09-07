@@ -27,6 +27,10 @@ USERNAME = re.compile(r"^[A-Za-z0-9._@+-]{3,80}$")
 #: length beats decoration.
 MIN_PASSWORD = 8
 
+#: Permissive on purpose. The confirmation email has to be deliverable, not
+#: perfect - refusing an address over an exotic TLD is friction for no benefit.
+EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
+
 
 class SignUpError(Exception):
     """Why a sign-up was refused, in words worth showing somebody."""
@@ -54,15 +58,32 @@ def _matches(password: str, stored: str) -> bool:
         return False
 
 
+def _validate_email(email: str | None) -> str | None:
+    """The email, trimmed, or None if it is absent.
+
+    Raises SignUpError with a reason worth showing when it is present but not an
+    address. A shopper who typo'd their email deserves to know, and the field only
+    earns its keep if the confirmation actually arrives.
+    """
+    if not email:
+        return None
+    email = email.strip()
+    if not EMAIL.match(email):
+        raise SignUpError("That does not look like an email address.")
+    return email
+
+
 async def create(
     connection_id: str,
     username: str,
     password: str,
     *,
     display_name: str | None = None,
+    email: str | None = None,
 ) -> dict:
     """A new shopper at one merchant. Raises SignUpError with a reason."""
     username = username.strip()
+    email = _validate_email(email)
 
     if not USERNAME.match(username):
         raise SignUpError(
@@ -94,6 +115,7 @@ async def create(
                 username=username,
                 password_hash=_hash(password),
                 display_name=display_name or None,
+                email=email,
             )
         )
 
@@ -101,6 +123,7 @@ async def create(
         "shopper_id": shopper_id,
         "username": username,
         "display_name": display_name or username,
+        "email": email,
     }
 
 
@@ -138,6 +161,7 @@ async def verify(connection_id: str, username: str, password: str) -> dict | Non
             "shopper_id": shopper.shopper_id,
             "username": shopper.username,
             "display_name": shopper.display_name or shopper.username,
+            "email": shopper.email,
         }
 
 
@@ -152,4 +176,24 @@ async def by_id(shopper_id: str) -> dict | None:
             "connection_id": shopper.connection_id,
             "username": shopper.username,
             "display_name": shopper.display_name or shopper.username,
+            "email": shopper.email,
         }
+
+
+async def set_email(shopper_id: str, email: str) -> str:
+    """The email an existing account will be confirmed at.
+
+    For accounts created before the email field existed. The checkout gate prompts
+    for one, and this is what the prompt writes back. Raises SignUpError for an
+    address that is not one.
+    """
+    email = _validate_email(email)
+    if email is None:
+        raise SignUpError("An email is needed to send the order confirmation.")
+
+    async with session_scope() as db:
+        shopper = await db.get(Shopper, shopper_id)
+        if shopper is None:
+            raise SignUpError("That account no longer exists.")
+        shopper.email = email
+        return email

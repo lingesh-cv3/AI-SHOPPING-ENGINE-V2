@@ -41,6 +41,9 @@ class SignUp(BaseModel):
     connection_id: str
     username: str = Field(min_length=3, max_length=80)
     password: str = Field(min_length=8, max_length=200)
+    #: Where the order confirmation goes. The email is the point of asking for an
+    #: account at checkout at all, so a new account is not made without one.
+    email: str = Field(min_length=3, max_length=255)
     display_name: str | None = Field(default=None, max_length=80)
     #: The basket in this tab, if they had put anything in one before signing in.
     guest_cart: str | None = None
@@ -184,6 +187,7 @@ async def sign_up(
             body.username,
             body.password,
             display_name=body.display_name,
+            email=body.email,
         )
     except SignUpError as exc:
         # 400 with the reason, because these are all things the person can fix -
@@ -203,6 +207,7 @@ async def sign_up(
     return {
         "username": shopper["username"],
         "display_name": shopper["display_name"],
+        "email": shopper["email"],
         **restored,
     }
 
@@ -250,6 +255,7 @@ async def sign_in(
     return {
         "username": shopper["username"],
         "display_name": shopper["display_name"],
+        "email": shopper["email"],
         **restored,
     }
 
@@ -297,6 +303,10 @@ async def me(
         "signed_in": True,
         "username": shopper["username"],
         "display_name": shopper["display_name"],
+        #: Where the confirmation goes, or None on an account that predates the
+        #: field. The storefront reads this to decide whether the checkout gate
+        #: prompts for one.
+        "email": shopper["email"],
         #: Which conversation to use. Derived from the shopper and the merchant,
         #: so the storefront never has to keep a copy in step.
         "session_id": await shopper_memory.session_for(
@@ -307,6 +317,38 @@ async def me(
             session["shopper_id"], connection_id
         ),
     }
+
+
+class SetEmail(BaseModel):
+    connection_id: str
+    email: str = Field(min_length=3, max_length=255)
+
+
+@router.post("/email")
+async def set_email(
+    body: SetEmail,
+    key=Depends(any_key),
+    who: Visitor = Depends(visitor),
+    cv3_shopper: str | None = Cookie(default=None),
+) -> dict:
+    """Add the email to an account that was created without one.
+
+    Accounts made before the email field existed have no address, and checkout is
+    refused until they do - the order confirmation has to reach somebody. This is
+    what the checkout gate's prompt writes back.
+    """
+    belongs_to(key, body.connection_id)
+
+    session = await db.shopper_sessions.resolve(cv3_shopper, body.connection_id)
+    if session is None:
+        raise HTTPException(401, "Sign in to add an email.")
+
+    try:
+        email = await db.shoppers.set_email(session["shopper_id"], body.email)
+    except SignUpError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    return {"email": email}
 
 
 

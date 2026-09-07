@@ -153,6 +153,33 @@ def call(
         return {"_unreachable": str(e.reason)}
 
 
+def signed_in_for(shop: str, tag: str = "hc") -> None:
+    """Make sure the shared browser is signed in at `shop`, with an email.
+
+    Checkout now requires a signed-in account with an email - the confirmation
+    has to reach somebody, and the payment routes refuse a guest. This signs up
+    a fresh account (the whole run is one browser, so one account per run is the
+    honest shape) and leaves its session in the shared cookie jar.
+
+    The one visitor/shopper cookie can only hold one merchant's session at a
+    time - signing in at the second shop overwrites the first - so this is
+    called right before a shop's payments, never assumed to have carried over.
+    """
+    username = f"{tag}_{uuid.uuid4().hex[:6]}"
+    call(
+        "POST",
+        "/api/account/signup",
+        {
+            "connection_id": shop,
+            "username": username,
+            "password": "password123",
+            "email": f"{username}@example.com",
+            "guest_session": None,
+            "guest_cart": None,
+        },
+    )
+
+
 #: What the assistant says when the provider refused us. It means one thing
 #: only, so it is safe to key on.
 #: Keyed on the shortest phrase in the throttle message unlikely to be reworded.
@@ -439,6 +466,7 @@ section("An empty basket is told the truth")
 # card and trying again changes nothing, because there is nothing in the
 # basket to buy.
 for shop in (NORTHFIELD, KETTLE):
+    signed_in_for(shop, "hc_empty")
     empty_cart = call("POST", f"/api/shop/{shop}/cart")
     empty_session = f"hc_empty_{uuid.uuid4().hex[:6]}"
     empty_pay = call(
@@ -476,6 +504,7 @@ section("A basket is paid for once")
 
 def buy_three_ways(shop: str, product: str, variant: str) -> dict:
     """Pay for one basket three times on three cards. Report what it bought."""
+    signed_in_for(shop, "hc_once")
     basket = call("POST", f"/api/shop/{shop}/cart")
     if "cart_id" not in basket:
         return {"setup": str(basket)[:120]}
@@ -560,6 +589,7 @@ check(
 # happens after the first tap.
 def buy_twice_from_the_sidebar(shop: str, product: str, variant: str) -> dict:
     """Press Pay twice on one basket, the way a slow connection does."""
+    signed_in_for(shop, "hc_twice")
     basket = call("POST", f"/api/shop/{shop}/cart")
     if "cart_id" not in basket:
         return {"setup": str(basket)[:120]}
@@ -622,6 +652,7 @@ section("A paid cart cannot still be changed")
 
 def pay_it_off(shop: str, product: str, variant: str) -> tuple[str, str | None]:
     """A cart, bought. Returns (cart_id, order_id)."""
+    signed_in_for(shop, "hc_lock")
     basket = call("POST", f"/api/shop/{shop}/cart")
     cart_id = basket.get("cart_id")
     call(
@@ -712,6 +743,7 @@ for shop, product, variant, other_product, other_variant in (
 
 section("Northfield: a decline that cannot be recovered")
 
+signed_in_for(NORTHFIELD, "hc_nf")
 cart = call("POST", f"/api/shop/{NORTHFIELD}/cart")
 call(
     "POST",
@@ -788,6 +820,7 @@ check(
 
 section("Kettle: a decline that can be recovered")
 
+signed_in_for(KETTLE, "hc_kb")
 call(
     "PUT",
     f"/api/policy/{KETTLE}",
@@ -922,6 +955,7 @@ section("Kettle: approved recovery that fails on the platform")
 # but when a person approves a recovery the platform itself refuses it. This is
 # the approved-then-failed outcome an operator needs to see rendered honestly,
 # not buried under a success badge.
+signed_in_for(KETTLE, "hc_hcb")
 hcb_bag = call("POST", f"/api/shop/{KETTLE}/cart")
 call(
     "POST",
@@ -1015,6 +1049,7 @@ section("Shared memory")
 # being told. A resolved problem is deliberately excluded - otherwise a shopper whose
 # payment had just been recovered said hello and was told someone needed to approve
 # something.
+signed_in_for(KETTLE, "hc_mem")
 open_session = f"hc_mem_{uuid.uuid4().hex[:8]}"
 open_bag = call("POST", f"/api/shop/{KETTLE}/cart")
 call(
@@ -1122,6 +1157,7 @@ if "revenue_recovered" in report:
         return sum(f["count"] for f in rpt.get("friction") or [])
 
     before = call("GET", f"/api/report/{KETTLE}")
+    signed_in_for(KETTLE, "hc_two")
     two_session = f"hc_two_{uuid.uuid4().hex[:6]}"
     for _ in range(2):
         twobag = call("POST", f"/api/shop/{KETTLE}/cart")
@@ -1229,6 +1265,7 @@ if model_on:
     # proposing a doomed ADD_TO_CART - which succeed, so the failure branch
     # never fires. The paid-cart trigger cannot be routed around, because
     # nothing visible to the model distinguishes it.
+    signed_in_for(NORTHFIELD, "hc_fail")
     paid_for = call(
         "POST",
         "/api/shop/{}/cart".format(NORTHFIELD),
@@ -1367,6 +1404,7 @@ else:
 
 section("Rejection")
 
+signed_in_for(KETTLE, "hc_rej")
 rej_bag = call("POST", f"/api/shop/{KETTLE}/cart")
 call(
     "POST",
@@ -1452,6 +1490,27 @@ section("A promise of a person is kept")
 #
 # Northfield, because it cannot recover a payment - so a declined card there has
 # nowhere to go except a person, which is exactly the path being tested.
+
+# Drain the handover window first. handovers_across is capped at the oldest fifty,
+# and the demo database accumulates escalations from every previous run - so on a
+# well-used database this block's own fresh case would land outside the window and
+# the assertion below would fail for a backlog, not for the unblockable-floor bug
+# it guards. Oldest-first ordering means closing what the list shows is enough:
+# the next round surfaces what followed it. The new escalation from this section is
+# then the only handover in the window, which is exactly the observable being tested.
+for _ in range(6):
+    _handovers = call("GET", "/api/ops/handovers", key=OPERATOR).get("handovers", [])
+    if not _handovers:
+        break
+    for _h in _handovers:
+        call(
+            "POST",
+            f"/api/ops/handovers/{_h['connection_id']}/{_h['case_id']}",
+            {"handled_by": "healthcheck-drain"},
+            key=OPERATOR,
+        )
+
+signed_in_for(NORTHFIELD, "hc_block")
 blocked_session = f"hc_block_{uuid.uuid4().hex[:6]}"
 
 before_policy = call("GET", f"/api/policy/{NORTHFIELD}")
@@ -1610,6 +1669,7 @@ check(
 # no check, because the suite looks complete.
 #
 # Simulated rather than chatted, so it needs no model.
+signed_in_for(KETTLE, "hc_ops")
 pending_bag = call("POST", f"/api/shop/{KETTLE}/cart")
 if pending_bag.get("cart_id"):
     call(

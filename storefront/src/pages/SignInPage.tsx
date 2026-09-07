@@ -10,13 +10,10 @@ import { getConnection, pathFor } from "../api";
  * a password reset, bookmarked, returned to after a redirect. A modal can be none of
  * those, and building one now would mean building this later anyway.
  *
- * The heading says what signing in gets you rather than naming the action. Nothing
- * here is locked - a shopper can browse, fill a basket and buy without an account -
- * so "Sign in" as a heading answers a question nobody asked. What they want to know
- * is why they would bother.
- *
- * And there is a way past it. Forcing an account before somebody can shop is how a
- * shop loses people, and every real one lets you buy as a guest.
+ * The heading says what signing in gets you rather than naming the action. A
+ * shopper can browse and fill a basket without an account, but checking out now
+ * needs one - the order confirmation has to reach somebody - so "Sign in" as a
+ * heading answers the question the checkout gate just asked.
  */
 export function SignInPage({ creating = false }: { creating?: boolean }) {
   const connection = getConnection();
@@ -25,11 +22,12 @@ export function SignInPage({ creating = false }: { creating?: boolean }) {
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function submit() {
-    if (!username.trim() || !password) return;
+    if (!username.trim() || !password || (creating && !email.trim())) return;
 
     setBusy(true);
     setError(null);
@@ -44,7 +42,14 @@ export function SignInPage({ creating = false }: { creating?: boolean }) {
       const guestCart = sessionStorage.getItem(`cv3_cart_${connection}`);
 
       if (creating) {
-        await signUp(connection, username.trim(), password, guestSession, guestCart);
+        await signUp(
+          connection,
+          username.trim(),
+          password,
+          email.trim(),
+          guestSession,
+          guestCart,
+        );
       } else {
         await signIn(connection, username.trim(), password, guestSession, guestCart);
       }
@@ -118,11 +123,29 @@ export function SignInPage({ creating = false }: { creating?: boolean }) {
             )}
           </label>
 
+          {creating && (
+            <label>
+              Email
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  setError(null);
+                }}
+                autoComplete="email"
+              />
+              <span className="authhint">
+                Your order confirmation is sent here, so it needs to be real.
+              </span>
+            </label>
+          )}
+
           {error && <p className="autherror">{error}</p>}
 
           <button
             className="add authgo"
-            disabled={busy || !username.trim() || !password}
+            disabled={busy || !username.trim() || !password || (creating && !email.trim())}
             onClick={submit}
           >
             {busy

@@ -22,7 +22,13 @@ from shared.models import CapabilityUnsupported, CommerceError, Money
 
 from engine import db
 
-from .auth import Visitor, require_owner, shopper_scoped, visitor
+from .auth import (
+    Visitor,
+    require_checkout_identity,
+    require_owner,
+    shopper_scoped,
+    visitor,
+)
 from .deps import engine
 
 router = APIRouter(prefix="/api/shop", tags=["shop"])
@@ -448,7 +454,12 @@ async def checkout(
 
     A decline returns HTTP 200 with succeeded false and a real order. It is not an
     error - it is an unpaid order, which is precisely the thing worth recovering.
+
+    Checkout requires a signed-in account with an email - the confirmation has to
+    reach somebody, and a guest has no address. The storefront gates the buttons
+    and this is the API half of the same rule.
     """
+    await require_checkout_identity(who, connection_id)
     await _mine(who, connection_id, db.owners.CART, cart_id)
     adapter = _adapter(connection_id)
 
