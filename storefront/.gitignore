@@ -27,6 +27,15 @@ __pycache__/
 bin/
 obj/
 
+# Build output
+dist/
+
+# Playwright output
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
 
 venv/
 .venv/
