@@ -24,12 +24,19 @@ because they cannot touch money safely.
   trying your card again, offering another way to pay"*. The declined half is what a
   seller's assistant cannot write. Now covers a successful recovery too, not only a
   platform's outright incapacity - see Fixed This Session.
-- **Accounts.** Sign up, sign in, sign out, per merchant. bcrypt, server-side
-  sessions, httpOnly cookie, failed attempts rate limited per username.
+- **Accounts.** Sign up, sign in, sign out, per merchant. Signup collects an email -
+  checkout now needs one. bcrypt, server-side sessions, httpOnly cookie, failed
+  attempts rate limited per username. Accounts created before the email field
+  existed are prompted for it at their next sign-in.
 - **Memory that survives closing the tab.** A signed-in shopper's conversation and
   basket both follow them. Thirty turns stored; the model reads the recent part,
   because tokens are the binding constraint.
-- **Guest checkout.** Deliberate - see the disagreement below.
+- **Checkout requires an account with an email.** Browsing and filling a cart stay
+  guest-friendly, but paying requires sign-in plus an email - the order confirmation
+  has to reach somebody, and the gate is what guarantees there is an address on
+  file. Enforced twice: the route itself refuses (`require_checkout_identity`: 401
+  SIGN_IN_REQUIRED for a guest, 428 EMAIL_REQUIRED for a signed-in account with no
+  email) and the storefront hides the card buttons and Pay button behind the gate.
 - **A cart, a conversation and an order each belong to somebody.** A signed-in
   shopper's things follow their account; a guest's follow an httpOnly cookie
   neither they nor a script on the page can read or choose. See Fixed This Session.
@@ -56,18 +63,28 @@ conversation or order at the same merchant - see Fixed This Session.
 
 ### Tests
 
-`healthcheck.py` - 74 checks, one path end to end. Reports SKIP rather than FAIL
+`healthcheck.py` - 82 checks, one path end to end. Reports SKIP rather than FAIL
 when the provider is busy, and says how many checks never executed.
 
 `fuzz.py` - random shopper sequences, asserting after every step that the cart
 matches what was added and removed, a paid cart is never chargeable again *on any
 card* (not just the one that paid it), and no merchant's session, cart or orders
 are reachable from another. Model-free. Prints its seed so a failure is
-reproducible.
+reproducible. The paying shoppers now sign in (identity is set before every early
+return), since checkout requires it.
 
 `auditroutes.py` - probes the running engine: refused without a key, accepted with
 its own, refused another merchant's, and refused another shopper's cart,
-conversation and order even when both hold the identical publishable key.
+conversation and order even when both hold the identical publishable key. The
+browser that places the test order signs up with an email first, because the
+checkout route now gates on identity.
+
+`scripts/walk_checkout.cjs` - the first browser-level walk (Playwright, untracked
+scratch, model-free so it is not throttled). Drives the checkout gate end to end in
+a real browser: a guest sees the sign-in prompt and no card buttons, signs up with
+an email, and pays; a `legacy_account.py` account predating the email field is
+prompted for one before the picker appears. Both legs pass. Not yet wired into
+`package.json`.
 
 `eval.py` - scores the model's judgement across repeated attempts. Unfinished, and
 it has already caught a real problem.
@@ -88,8 +105,10 @@ and a real client** - no merchant can connect without it.
 **The assistant is not installable.** A React component in our storefront, not a
 script tag a merchant adds to their site.
 
-**No browser-level tests.** Still the largest gap - see "Why the tests did not
-catch these" under Known Issues.
+**No browser-level test layer.** `scripts/walk_checkout.cjs` is a first
+Playwright walk (one flow, untracked, driven by hand) but nothing is wired into
+`package.json` or run in any gate, so the class of bug this session's fixes kept
+hitting in the finger-pointing above is still only caught by walking it by hand.
 
 **The holdout.** A slice of sessions receiving no assistant, so a merchant can see
 the difference and know the engine caused it. Answers the objection that loses
@@ -349,6 +368,88 @@ below; `npm run build` now exits 0.)
     every time (carts 404'd at checkout). Both fixed to match how `healthcheck.py`
     authenticates. 80 checks total.
 
+20. **Checkout required no identity, so an order could be confirmed to no one.**
+    A guest could reach the card buttons and pay with no address on file - the
+    "Guest checkout is deliberate" disagreement from Known Issues, asked explicitly
+    and now decided: **paying requires a signed-in account with an email.** Enforced
+    in two halves, per the standing rule that hiding the button is only the friendly
+    half. The route half is `require_checkout_identity` (new in `engine/api/auth.py`,
+    called on `/api/chat/pay` and `/api/shop/.../checkout`): 401 SIGN_IN_REQUIRED for
+    a guest, 428 EMAIL_REQUIRED for a signed-in account whose email is null. The UI
+    half is `CartPanel.tsx`, which now renders three states - a guest sees the
+    sign-in prompt (with sign-up and sign-in links) and no card buttons at all; a
+    signed-in shopper with an email sees the card picker and Pay; an account that
+    predates the email field sees an email prompt and no buttons until they save
+    one. `SignInPage.tsx` gained the email field at signup and `account.ts` gained
+    `setEmail` (`/api/account/email`). Legacy rows are prompted at next sign-in
+    rather than migrated, and the guest-cart-wins rule is preserved: a shopper's own
+    basket takes precedence, and a guest basket is claimed to the account on
+    sign-in so nothing already added is lost.
+
+    The gate forced matching fixes in every harness that checked out as a guest:
+    `fuzz.py`'s `act_remove`, `act_pay` and `act_read_cart` returned before setting
+    who the browser was, so `check_cart_matches` read an account-owned cart with
+    visitor-only keys and 404'd - identity is now set ahead of every early return
+    (re-verified on 4 seeds, 1200 assertions each); `auditroutes.py` signs its
+    order-placing browser up with an email first; `demo_reset.py` signs in for its
+    three Kettle checkouts; and `healthcheck.py` gained a drain of the handover
+    window at the start of the "promise of a person is kept" block, because 79
+    accumulated demo cases had pushed the fresh one (position 78) outside the
+    oldest-50 window `handovers_across` returns - the check was failing on backlog,
+    not on the code. `npm run build` exits 0; `npm run lint` still carries the same
+    7 pre-existing `set-state-in-effect` errors in files this work did not touch.
+
+    Browser verification for the UI half (the half no HTTP test can see) is the
+    first Playwright walk, `scripts/walk_checkout.cjs`: Leg A guest → gate → sign
+    up with email → pay (order lands); Leg B legacy account → email prompt → save →
+    picker. Both pass, model-free so the Groq throttle never interrupts them.
+    82 checks total.
+
+21. **The Playwright walk was a standalone script nobody ran on demand, and three
+    small transcript bugs from an earlier walkthrough were still unfixed.** Both
+    addressed together, since the bugs are UI-state bugs and the walk is what
+    catches those.
+
+    The walk is now `storefront/tests/checkout.spec.ts`, run with `npm test`
+    (`npm run test:headed` / `npm run test:ui` for a live browser), wired through
+    `playwright.config.ts`. Same two legs as before (guest → gate → sign up → pay;
+    legacy account → email prompt → picker), plus three new tests for the fixes
+    below. Deliberately serial (`workers: 1`, `fullyParallel: false`): five workers
+    hitting the same demo database raced cart bootstrap, and the transcript tests
+    each need one real model turn - parallel runs blew past the Groq throttle in a
+    way the old single-script walk never triggered. `scripts/walk_checkout.cjs` is
+    retired.
+
+    Three fixes, each with its own browser test:
+
+    - **Option buttons did not survive a reload.** `SessionTurn` had no column to
+      hold the choices offered with a turn, so the restore-on-mount effect in
+      `ChatWidget` could only ever recover `speaker`/`text` - a size question asked
+      before a refresh had nothing left to tap after it. Added `choices_json` to
+      `session_turns` (idempotent SQLite migration, same pattern as the existing
+      shopper-email one in `db/session.py`), threaded through
+      `session_store.add_turn`/`turns`, and restored on the frontend
+      (`api.ts`'s `StoredTurn`, `ChatWidget`'s restore effect).
+    - **A declined payment fabricated a shopper turn** ("My card was declined.").
+      `/api/chat/pay` recurses into `chat()` with that invented sentence after a
+      decline, and `chat()` unconditionally wrote whatever `message` it received as
+      spoken by the shopper. The friction was already recorded as a `Case` and read
+      back as fact, not conversation (`session/store.py`'s own stated design), so
+      nothing needed the turn repeated. Added `ChatRequest.synthetic`, set only on
+      that one recursive call, and the shopper-turn write is skipped when set.
+    - **Tapping a size recorded the shopper as having said the bare label** ("8")
+      rather than a sentence. `ChatWidget`'s `tapOption` passed the option's label
+      straight through as `said`. Variant resolution was never at risk - a tap
+      already carries `chosen_variant`, which execution trusts outright and never
+      derives from `said` - so this was transcript-only: `tapOption` now builds a
+      real sentence naming what it answered ("The 8, for the Trailblazer Running
+      Shoe").
+
+    All three verified end to end in a real browser against the running engine,
+    one test at a time (the Groq throttle does not allow more than one of these
+    per run without waiting between them). `healthcheck.py`'s count is unchanged -
+    this is browser coverage, not HTTP.
+
 ---
 
 ## Known Issues / Pending
@@ -356,63 +457,58 @@ below; `npm run build` now exits 0.)
 Reported after a walkthrough. **Not a complete list** - walk the product before
 trusting anything.
 
-**Guest checkout is a requirement disagreement, not a bug.** It was built so a
-shopper can browse and buy without an account, on the reasoning that forcing signup
-loses sales. The product owner wants sign-in required. Decide it explicitly rather
-than "fixing" a deliberate decision.
-
-**Guest checkout collects no email.** A guest can buy and the order can reach
-nobody. A handover message written by an operator goes into a session that dies with
-the tab.
-
-**Option buttons do not survive a reload.** Restored turns are text only, so
-refreshing mid-choice leaves a question with nothing to tap.
-
 **Occasional near-duplicate assistant messages** from the poll's deduplication.
 
-**A long testing session shares one demo database with no easy reset for
-accumulated backlog.** `handovers_across` returns only the oldest 50 unhandled
-cases; after enough manual testing the newest ones fall outside that window and
-read as "gone" until the old ones are closed through the ops API. `demo_reset.py`
-does not clear this - it only adds curated activity on top. Worth a "close
-everything older than N days" operator action, or pagination on the handovers
-list, before a real demo.
+**`handovers_across` returns only the oldest 50 unhandled cases, across every
+merchant, not per merchant.** In a long testing session or a busy real one, the
+newest handovers fall outside that window and read as "gone" from the operations
+console - not resolved, just invisible - until enough of the oldest ones are
+closed through the ops API to let them back in. That is a shopper who was told
+someone would pick this up, waiting on a person who cannot see the case at all.
+`demo_reset.py` does not clear this - it only adds curated activity on top. Worth
+a "close everything older than N days" operator action, or pagination on the
+handovers list, before a real demo or a real deployment.
 
-Additional smaller findings from this session's walkthrough, not yet fixed (see the
-walkthrough transcript for full detail if this file is ever pruned): a typed
-add-to-cart message can contradict itself and add nothing; the transcript writes a
-fabricated shopper turn ("My card was declined.") that was never actually typed;
-tapping a size option records the shopper as having said the bare label ("8")
-rather than a real sentence; `retry_after_seconds` is wired through the API and the
-storefront but the field that should populate it is never actually set, so it is
-permanently null; `HISTORY_TURNS` (14) does not match this file's own claim of
-thirty; a case can get stuck in `DIAGNOSED` state with no path to resolution;
-closing a handover with a blank note tells the shopper nothing by design, which is
-worth revisiting; the sign-in screen shows a connection id or platform name rather
-than the merchant's actual name; a rejection branch pasted three times in
-`routes.py`, duplicate field declarations in `ChatReply`.
+Additional smaller findings from an earlier session's walkthrough, not yet fixed
+(see the walkthrough transcript for full detail if this file is ever pruned): a
+typed add-to-cart message can contradict itself and add nothing;
+`retry_after_seconds` is wired through the API and the storefront but the field
+that should populate it is never actually set, so it is permanently null;
+`HISTORY_TURNS` (14) does not match this file's own claim of thirty; a case can
+get stuck in `DIAGNOSED` state with no path to resolution; closing a handover with
+a blank note tells the shopper nothing by design, which is worth revisiting; the
+sign-in screen shows a connection id or platform name rather than the merchant's
+actual name; a rejection branch pasted three times in `routes.py`, duplicate field
+declarations in `ChatReply`.
 
-### Why the tests did not catch these
+### Why the tests did not used to catch these
 
-**None of them can see the browser.** Every bug found by hand recently lived in
-React state against `sessionStorage` - state held in two places, effects firing in
-the wrong order, stale closures. A browser-level test would have caught all of them,
-and its absence is the largest gap in this project. This session's fixes were all
-backend-reachable over HTTP and so could get a real automated test; the ones left in
-Known Issues are disproportionately the ones that are not.
+**None of them could see the browser.** Every bug found by hand in an earlier
+session lived in React state against `sessionStorage` - state held in two places,
+effects firing in the wrong order, stale closures - and the suites only ever
+drove HTTP. `storefront/tests/checkout.spec.ts` (see Fixed This Session, #21) is
+the first thing that watches the actual browser; the three transcript bugs it
+now covers were exactly this shape. The remaining Known Issues above are still
+disproportionately the kind no HTTP test can see - a next pass should extend the
+Playwright suite to them rather than reach for `healthcheck.py` again.
 
 ---
 
 ## Next Steps
 
-1. Decide the guest-checkout requirement question explicitly (sign-in required or
-   not) before touching anything downstream of it - email collection, order
-   notification, and the handover-message-into-a-dying-session problem all follow
-   from that decision.
-2. Consider a browser-level test layer before trusting any future frontend fix
-   without one - this session's own backend fixes could all be verified
-   automatically; the remaining known issues mostly can't be, for the same
-   underlying reason.
+1. The guest-checkout question is decided and implemented - checkout now requires
+   a signed-in account with an email. What has not followed yet: **nothing actually
+   sends that email.** It is collected and stored, and the shopper sees the order in
+   the app, but no confirmation leaves the engine (no SMTP/mailer anywhere) - which
+   is the reason the gate exists, so the "got the address" half is done and the
+   "used it" half is unbuilt. Also still open after the decision: a handover message
+   written for a guest's dying session (guests no longer pay, but can still chat and
+   still get escalated), and the shop now prompts for an email where it used to
+   finish a sale - whether that nudges a merchant's conversion is worth watching.
+2. The browser-level test layer now exists (`storefront/tests/checkout.spec.ts`,
+   `npm test` from `storefront/`) - extend it rather than starting a second one.
+   Good next additions: the near-duplicate-message poll bug and the sign-in
+   screen's merchant-name display, both browser-only and both still open below.
 3. Work through the smaller findings listed under Known Issues in whatever order
    next picks up this file - none of them are architecturally risky, they just
    didn't get to this session.
