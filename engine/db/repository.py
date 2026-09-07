@@ -793,8 +793,8 @@ async def ops_stats(connection_ids: list[str]) -> dict:
 
 
 async def handovers_across(
-    connection_ids: list[str], *, limit: int = 50
-) -> list[dict]:
+    connection_ids: list[str], *, limit: int = 50, offset: int = 0
+) -> tuple[list[dict], int]:
     """Cases handed to a person, that nobody has picked up.
 
     Escalations never reached the queue because the queue lists approvals, and an
@@ -805,23 +805,36 @@ async def handovers_across(
     A handover needs no approve button. It needs somebody to see it, do whatever it
     needs, and mark it done. The distinction matters: an approval asks "may I?", and
     a handover says "your turn".
+
+    Returns (rows, total). The total counts every open handover across the given
+    merchants, so a consumer can know there is more than the page it has. Before the
+    total existed, a busy system silently hid the newest handovers behind the
+    oldest-50 cap - new cases read as "gone" until the oldest were closed, which is
+    a shopper told a person would help while nobody could see them. The total is the
+    contract that makes paging possible instead of hiding things.
     """
     if not connection_ids:
-        return []
+        return [], 0
 
     now = datetime.now(UTC)
 
     async with session_scope() as db:
+        query = select(Case).where(
+            Case.connection_id.in_(connection_ids),
+            Case.state == str(CaseState.ESCALATED),
+            # Not yet dealt with. handled_at is set when an operator closes it.
+            Case.handled_at.is_(None),
+        )
+
+        # Count first, before the offset/limit shrink the page: the total exists to
+        # tell the consumer how many are still behind this page, so it must not be
+        # the size of the page itself.
+        total = len(
+            (await db.execute(query)).scalars().all()
+        )
+
         result = await db.execute(
-            select(Case)
-            .where(
-                Case.connection_id.in_(connection_ids),
-                Case.state == str(CaseState.ESCALATED),
-                # Not yet dealt with. handled_at is set when an operator closes it.
-                Case.handled_at.is_(None),
-            )
-            .order_by(Case.created_at.asc())
-            .limit(limit)
+            query.order_by(Case.created_at.asc()).limit(limit).offset(offset)
         )
 
         rows = []
@@ -843,7 +856,7 @@ async def handovers_across(
                     "waiting_minutes": int((now - created).total_seconds() / 60),
                 }
             )
-        return rows
+        return rows, total
 
 
 async def mark_handled(

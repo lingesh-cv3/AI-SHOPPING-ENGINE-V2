@@ -2042,6 +2042,48 @@ select.card-picker {
 }
 
 
+/* Paging over the handover list. Shown only when the total exceeds a page, so a
+ * quiet system never sees it. The count is what makes the pager honest: without a
+ * total, a busy list hid the newest handovers behind the oldest-fifty cap and they
+ * read as "gone" until the oldest were closed. */
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.pager button {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 5px 10px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.pager button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pager-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+
 /* The box an operator types a message to a shopper into. Same shape as the
  * rejection note, because both are somebody writing rather than clicking - but
  * this one reaches a customer, and the copy above it says so. */

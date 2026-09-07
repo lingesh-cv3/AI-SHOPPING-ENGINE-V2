@@ -977,8 +977,13 @@ async function opsCall<T>(path: string, init?: RequestInit): Promise<T> {
 export const ops_api = {
   queue: () => opsCall<{ approvals: OpsQueueItem[] }>("/api/ops/queue"),
 
-  handovers: () =>
-    opsCall<{ handovers: OpsHandover[] }>("/api/ops/handovers"),
+  handovers: (
+    offset: number = 0,
+    limit: number = 50,
+  ): Promise<{ handovers: OpsHandover[]; total: number }> =>
+    opsCall<{ handovers: OpsHandover[]; total: number }>(
+      `/api/ops/handovers?offset=${offset}&limit=${limit}`,
+    ),
 
   closeHandover: (connectionId: string, caseId: string, note?: string) =>
     opsCall<{ changed: boolean }>(

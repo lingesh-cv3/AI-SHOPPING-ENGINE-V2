@@ -32,6 +32,13 @@ import {
 export function OpsConsole() {
   const [queue, setQueue] = useState<OpsQueueItem[]>([]);
   const [handovers, setHandovers] = useState<OpsHandover[]>([]);
+  // How many open handovers there are in total, and where this page starts.
+  // The total is what lets the operator know the list is longer than what is
+  // on screen - without it, a busy system hid the newest handovers behind the
+  // oldest-fifty cap and they read as "gone" until the oldest were closed.
+  const [handoverTotal, setHandoverTotal] = useState(0);
+  const [handoverOffset, setHandoverOffset] = useState(0);
+  const HANDOVER_PAGE = 50;
   const [history, setHistory] = useState<OpsDecision[]>([]);
   const [stats, setStats] = useState<OpsStats | null>(null);
   const [results, setResults] = useState<Record<string, Decision>>({});
@@ -54,12 +61,13 @@ export function OpsConsole() {
         ops_api.queue(),
         ops_api.history(),
         ops_api.stats(),
-        ops_api.handovers(),
+        ops_api.handovers(handoverOffset, HANDOVER_PAGE),
       ]);
       setQueue(q.approvals);
       setHistory(h.decisions);
       setStats(s);
       setHandovers(hand.handovers);
+      setHandoverTotal(hand.total);
       setError(null);
     } catch (e) {
       // A refused key is not an outage. Conflating them would have an operator
@@ -70,7 +78,7 @@ export function OpsConsole() {
       }
       setError("Could not reach the engine.");
     }
-  }, []);
+  }, [handoverOffset]);
 
   useEffect(() => {
     if (!signedIn) return;
@@ -163,7 +171,7 @@ export function OpsConsole() {
           <div className="panel-head">
             <span className="eyebrow">Needs someone to contact the shopper</span>
             <span className="eyebrow">
-              {handovers.length} {handovers.length === 1 ? "person" : "people"} were
+              {handoverTotal} {handoverTotal === 1 ? "person" : "people"} were
               promised help and have not had it
             </span>
           </div>
@@ -276,6 +284,32 @@ export function OpsConsole() {
                 )}
               </article>
             ))}
+
+            {handoverTotal > HANDOVER_PAGE && (
+              <div className="pager">
+                <button
+                  className={handoverOffset === 0 ? "muted" : ""}
+                  disabled={handoverOffset === 0}
+                  onClick={() => setHandoverOffset(Math.max(0, handoverOffset - HANDOVER_PAGE))}
+                >
+                  Earlier
+                </button>
+                <span className="pager-count">
+                  {handoverOffset + 1}&ndash;
+                  {Math.min(handoverOffset + HANDOVER_PAGE, handoverTotal)} of{" "}
+                  {handoverTotal}
+                </span>
+                <button
+                  className={
+                    handoverOffset + HANDOVER_PAGE >= handoverTotal ? "muted" : ""
+                  }
+                  disabled={handoverOffset + HANDOVER_PAGE >= handoverTotal}
+                  onClick={() => setHandoverOffset(handoverOffset + HANDOVER_PAGE)}
+                >
+                  Later
+                </button>
+              </div>
+            )}
           </div>
         </section>
       )}

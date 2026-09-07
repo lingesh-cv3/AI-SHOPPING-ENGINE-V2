@@ -700,7 +700,9 @@ async def ops_overview(_=Depends(operator)) -> dict:
 
 
 @app.get(f"{API}/ops/handovers")
-async def ops_handovers(_=Depends(operator)) -> dict:
+async def ops_handovers(
+    offset: int = 0, limit: int = 50, _=Depends(operator)
+) -> dict:
     """Cases handed to a person that nobody has picked up.
 
     Separate from the approval queue because they are different work. An approval
@@ -709,14 +711,20 @@ async def ops_handovers(_=Depends(operator)) -> dict:
 
     Conflating them is what hid these: the queue listed approvals, escalations
     created none, and twelve shoppers were told a person would help while nobody
-    knew. Oldest first, because each one is somebody waiting.
+    knew. Oldest first, because each one is somebody waiting - and paged, because
+    capping at the oldest fifty without a total hid the newest ones entirely on a
+    busy system: a shopper told a person would help could sit outside the window,
+    invisible until the oldest were closed. `total` is how the consumer knows more
+    pages exist.
     """
-    rows = await db.handovers_across(_operator_connections())
+    rows, total = await db.handovers_across(
+        _operator_connections(), offset=max(0, offset), limit=max(1, limit)
+    )
     for row in rows:
         row["merchant_name"] = MERCHANT_NAMES.get(
             row["connection_id"], row["connection_id"]
         )
-    return {"handovers": rows}
+    return {"handovers": rows, "total": total}
 
 
 @app.post(f"{API}/ops/handovers/{{connection_id}}/{{case_id}}")

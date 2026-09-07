@@ -1581,6 +1581,37 @@ check(
     f"{restored.get('blocked')} vs {before_policy.get('blocked')}",
 )
 
+# Handover paging. Exactly one handover is open here: the drain above closed every
+# pre-existing one, and the blocked escalation just above added the only new one. So
+# a page of limit=1 must show it at offset 0 and nothing at offset 1, while `total`
+# stays 1 either way - proving total is the whole open set, not the size of the page
+# the consumer happens to be looking at. Without the total, a busy system hid the
+# newest handovers behind the oldest-fifty cap and they read as gone until the
+# oldest were closed; the total is what makes paging honest instead of a second way
+# to hide things.
+_page0 = call(
+    "GET", "/api/ops/handovers?offset=0&limit=1", key=OPERATOR
+)
+_page1 = call(
+    "GET", "/api/ops/handovers?offset=1&limit=1", key=OPERATOR
+)
+check(
+    "handovers report a total that is not the page size",
+    isinstance(_page0.get("total"), int)
+    and _page0.get("total") == _page1.get("total")
+    and _page0.get("total", 0) >= len(_page0.get("handovers", [])),
+    f"total={_page0.get('total')} page0_len={len(_page0.get('handovers', []))} "
+    f"page1_len={len(_page1.get('handovers', []))}",
+    "engine/api/routes.py ops_handovers, engine/db/repository.py handovers_across",
+)
+check(
+    "handover offset pages past the first page",
+    len(_page1.get("handovers", [])) == 0,
+    "offset=1 still returned handovers: "
+    f"{[h.get('case_id') for h in _page1.get('handovers', [])]}",
+    "engine/db/repository.py handovers_across offset",
+)
+
 # ---------------------------------------------------------------------------
 
 section("Expiry")
