@@ -29,8 +29,9 @@ because they cannot touch money safely.
   attempts rate limited per username. Accounts created before the email field
   existed are prompted for it at their next sign-in.
 - **Memory that survives closing the tab.** A signed-in shopper's conversation and
-  basket both follow them. Thirty turns stored; the model reads the recent part,
-  because tokens are the binding constraint.
+  basket both follow them. Fourteen turns stored (`HISTORY_TURNS = 14`, a deliberate
+  token-cost bound - see the comment in `engine/session/store.py`); the model reads
+  the recent part, because tokens are the binding constraint.
 - **Checkout requires an account with an email.** Browsing and filling a cart stay
   guest-friendly, but paying requires sign-in plus an email - the order confirmation
   has to reach somebody, and the gate is what guarantees there is an address on
@@ -79,12 +80,13 @@ conversation and order even when both hold the identical publishable key. The
 browser that places the test order signs up with an email first, because the
 checkout route now gates on identity.
 
-`scripts/walk_checkout.cjs` - the first browser-level walk (Playwright, untracked
-scratch, model-free so it is not throttled). Drives the checkout gate end to end in
-a real browser: a guest sees the sign-in prompt and no card buttons, signs up with
-an email, and pays; a `legacy_account.py` account predating the email field is
-prompted for one before the picker appears. Both legs pass. Not yet wired into
-`package.json`.
+`storefront/tests/checkout.spec.ts` - the browser-level walk, run with `npm test`
+from `storefront/` (serial, `workers: 1`; the Groq throttle forbids parallel model
+turns). Drives the checkout gate end to end in a real browser: a guest sees the
+sign-in prompt and no card buttons, signs up with an email, and pays; a
+`legacy_account.py` account predating the email field is prompted for one before
+the picker appears; plus three transcript-bug tests (see Fixed This Session, #21).
+`scripts/walk_checkout.cjs` is retired.
 
 `eval.py` - scores the model's judgement across repeated attempts. Unfinished, and
 it has already caught a real problem.
@@ -105,10 +107,11 @@ and a real client** - no merchant can connect without it.
 **The assistant is not installable.** A React component in our storefront, not a
 script tag a merchant adds to their site.
 
-**No browser-level test layer.** `scripts/walk_checkout.cjs` is a first
-Playwright walk (one flow, untracked, driven by hand) but nothing is wired into
-`package.json` or run in any gate, so the class of bug this session's fixes kept
-hitting in the finger-pointing above is still only caught by walking it by hand.
+**No gate runs the browser tests.** The Playwright layer now exists
+(`storefront/tests/checkout.spec.ts`, run with `npm test`) but nothing wires it
+into a daily or pre-commit gate — it still runs when somebody remembers to run it.
+The class of bug the finger-pointing above kept hitting is now catchable, just not
+yet caught automatically.
 
 **The holdout.** A slice of sessions receiving no assistant, so a merchant can see
 the difference and know the engine caused it. Answers the objection that loses
@@ -456,6 +459,25 @@ below; `npm run build` now exits 0.)
     per run without waiting between them). `healthcheck.py`'s count is unchanged -
     this is browser coverage, not HTTP.
 
+22. **Three Known-Issue cleanups, no behaviour change.** (a) The rejection branch
+    in `routes.py` was pasted three times verbatim in the `decide` handler - only
+    the first was ever reachable, the other two were dead copies. Removed them;
+    one path to read. (b) `ChatReply` declared `choices` twice with identical
+    definitions in `chat.py` - the second shadowed as a no-op. Removed it.
+    (c) `retry_after_seconds` was wired through the API and storefront but never
+    populated: the rate-limit fallback dropped the `LLMUnavailable.retry_after_seconds`
+    that `_retry_after()` reads from the provider's `retry-after` /
+    `x-ratelimit-reset-*` headers. `Reasoning` now carries the field and `_fallback`
+    threads it, so the shopper is told the real number instead of "a few seconds"
+    being the only thing the storefront can ever show.
+
+    These are the last three of the "smaller findings" listed under Known Issues.
+    With them, that paragraph is reduced to the two genuinely-open items below
+    (near-duplicate messages, `handovers_across` window) plus the `DIAGNOSED`-stuck
+    state, which needs care before touching. Verified by restarting the engine and
+    reading the code paths; no test-suite count changed (none of these were
+    HTTP-observable before this commit either).
+
 ---
 
 ## Known Issues / Pending
@@ -477,15 +499,13 @@ handovers list, before a real demo or a real deployment.
 
 Additional smaller findings from an earlier session's walkthrough, not yet fixed
 (see the walkthrough transcript for full detail if this file is ever pruned): a
-typed add-to-cart message can contradict itself and add nothing;
-`retry_after_seconds` is wired through the API and the storefront but the field
-that should populate it is never actually set, so it is permanently null;
-`HISTORY_TURNS` (14) does not match this file's own claim of thirty; a case can
-get stuck in `DIAGNOSED` state with no path to resolution; closing a handover with
-a blank note tells the shopper nothing by design, which is worth revisiting; the
-sign-in screen shows a connection id or platform name rather than the merchant's
-actual name; a rejection branch pasted three times in `routes.py`, duplicate field
-declarations in `ChatReply`.
+case can get stuck in `DIAGNOSED` state with no path to resolution (needs care -
+see Fixed This Session, #22); closing a handover with a blank note tells the
+shopper nothing by design, which is worth revisiting. Every other item that once
+sat in this paragraph is fixed - the typed add-to-cart contradiction (#15), the
+`retry_after_seconds` null (#22c), the `HISTORY_TURNS` "thirty" doc mismatch, the
+sign-in screen's merchant name (#17/`useTheme`), and the duplicated rejection
+branch and `ChatReply` field (#22a/#22b).
 
 ### Why the tests did not used to catch these
 
@@ -513,8 +533,9 @@ Playwright suite to them rather than reach for `healthcheck.py` again.
    finish a sale - whether that nudges a merchant's conversion is worth watching.
 2. The browser-level test layer now exists (`storefront/tests/checkout.spec.ts`,
    `npm test` from `storefront/`) - extend it rather than starting a second one.
-   Good next additions: the near-duplicate-message poll bug and the sign-in
-   screen's merchant-name display, both browser-only and both still open below.
+   Best next addition: the near-duplicate-message poll bug, the last real
+   browser-only Known Issue still open. The sign-in screen's merchant-name display
+   was a stale finding - it already shows `merchant.name`.
 3. Work through the smaller findings listed under Known Issues in whatever order
    next picks up this file - none of them are architecturally risky, they just
    didn't get to this session.
