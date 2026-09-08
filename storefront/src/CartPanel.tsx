@@ -9,9 +9,12 @@ import { getConnection, pathFor } from "./api";
  *
  * The card picker is not something a real storefront would have. It exists so a
  * decline can be produced on demand, because waiting for a real card to fail is not
- * a demo. The three listed here fail the same way on both platforms; merchant
- * specific ones were removed after a card that did nothing on one shop made the
- * demo look broken.
+ * a demo. A shared list was tried first and reverted: a card that did nothing on
+ * one shop read as broken. The two platforms disagree about what a decline even
+ * means - Northfield cannot recover a payment at all, so every decline there
+ * escalates outright; Kettle can, so its cards are the only place a recovery, or
+ * an approved recovery that still fails on the platform, can be demonstrated. The
+ * options below are per-merchant for exactly that reason - see CARD_OPTIONS.
  *
  * A declined checkout renders as an unpaid order rather than an error, because that
  * is what it is: the order exists, the money did not move, and the sale is still
@@ -22,6 +25,32 @@ import { getConnection, pathFor } from "./api";
  * basket carries over - and an account that predates the email field is prompted
  * for one before the buttons appear.
  */
+
+/** Which test cards to offer, per merchant.
+ *
+ *  Kept per-connection rather than one shared list: a card that silently does
+ *  nothing on a platform which does not recognise it reads as a broken demo, not
+ *  as "not applicable here". conn_demo (Northfield) cannot recover a payment at
+ *  all, so 0004 there always escalates outright. conn_kettle (Kettle) can, so its
+ *  cards are the only place a recovery - or an approved recovery that still fails
+ *  on the platform (0006, hard-blocked) - can be shown live.
+ */
+const CARD_OPTIONS: Record<string, { value: string; label: string }[]> = {
+  conn_demo: [
+    { value: "1111", label: "Card ending 1111 — approves" },
+    { value: "0002", label: "Card ending 0002 — no funds" },
+    { value: "0003", label: "Card ending 0003 — expired" },
+    { value: "0004", label: "Card ending 0004 — bank refused" },
+  ],
+  conn_kettle: [
+    { value: "1111", label: "Card ending 1111 — approves" },
+    { value: "0002", label: "Card ending 0002 — no funds" },
+    { value: "0003", label: "Card ending 0003 — expired" },
+    { value: "0005", label: "Card ending 0005 — issuer unavailable" },
+    { value: "0006", label: "Card ending 0006 — blocked, needs a person" },
+  ],
+};
+
 /** The readable part of a variant id.
  *
  *  Ids are the platform's own and they are not built to be read: Kettle's look
@@ -174,9 +203,13 @@ export function CartPanel({
                   onChange={(e) => setCard(e.target.value)}
                   aria-label="Card"
                 >
-                  <option value="1111">Card ending 1111 — approves</option>
-                  <option value="0002">Card ending 0002 — no funds</option>
-                  <option value="0003">Card ending 0003 — expired</option>
+                  {(CARD_OPTIONS[getConnection()] ?? CARD_OPTIONS.conn_demo).map(
+                    (opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ),
+                  )}
                 </select>
 
                 <button
