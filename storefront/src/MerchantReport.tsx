@@ -76,15 +76,17 @@ export function MerchantReport() {
           </p>
         ) : (
           <>
-            <div className="headline-figure">
-              <div className="eyebrow">Sales recovered</div>
-              <div className="bignum num">
-                {report.revenue_recovered} {report.currency}
+            {report.supports_payment_recovery && (
+              <div className="headline-figure">
+                <div className="eyebrow">Sales recovered</div>
+                <div className="bignum num">
+                  {report.revenue_recovered} {report.currency}
+                </div>
+                <p className="note" style={{ margin: "4px 0 0" }}>
+                  Money that would otherwise have been lost to a failed payment.
+                </p>
               </div>
-              <p className="note" style={{ margin: "4px 0 0" }}>
-                Money that would otherwise have been lost to a failed payment.
-              </p>
-            </div>
+            )}
 
             <div className="figures">
               <Figure value={report.shoppers_helped} label="Shoppers helped" />

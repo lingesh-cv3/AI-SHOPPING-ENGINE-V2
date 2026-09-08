@@ -870,6 +870,7 @@ export interface MerchantReport {
   waiting_for_you: number;
   revenue_recovered: string;
   currency: string;
+  supports_payment_recovery: boolean;
   median_resolution_ms: number | null;
   /** Null until at least one session has landed in the holdout group - a
    *  merchant who has never turned this on should see nothing here rather
