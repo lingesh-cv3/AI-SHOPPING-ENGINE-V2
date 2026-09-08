@@ -153,6 +153,8 @@ engine/execution/    carrying actions out
 engine/api/          routes, auth, accounts, shopper sessions
 engine/db/           models, repository, keys, shopper accounts
 engine/session/      conversation memory
+engine/notify/       order-confirmation mail (fails soft; recorded, not
+                     delivered, until the MAILER_SMTP_HOST env var is set)
 adapters/            one per platform
 shared/              the commerce interface and action types
 storefront/          React, Vite
@@ -297,6 +299,21 @@ of bug cost a day on the payment route once (`key` shadowing `key`), so names in
 this codebase shadowing their module-scope cousins deserve a second look on sight.
 
 ---
+
+## Agents
+
+Project subagents live in `.claude/agents/`. One line each:
+
+- **adapter-builder** — adds a new merchant platform folder implementing the commerce interface. Use when onboarding a new platform or demo merchant.
+- **action-builder** — adds a new `ActionType` through all six pipeline steps. Use when the engine needs to propose/execute a kind of action it can't yet.
+- **invariant-guard** — read-only check of a diff against the six hard invariants and the idempotency-key rule. Use after any change to `engine/risk`, `engine/execution`, `engine/api`, `engine/db`, or `shared/`.
+- **test-runner** — runs `healthcheck.py` / `fuzz.py` / `auditroutes.py` against the running services and interprets SKIP/FAIL correctly. Use to validate any change to `engine/`.
+- **frontend-verifier** — runs the real typecheck guard (`npm run build`, not `dev`) plus lint, then walks the changed feature by hand. Use after any change under `storefront/`.
+- **progress-scribe** — updates PROGRESS.md in its existing terse style, cross-checked against real git state. Use at the end of a session, not mid-task.
+- **bug-reproducer** — reproduces a bug first and records the exact call and response, before any fix is written. Use before starting any bug fix, so the eventual regression test asserts against a real reproduction rather than the fix's own logic.
+- **doc-auditor** — reads CLAUDE.md and PROGRESS.md against the actual code and reports contradictions (stale counts, renamed things, drifted claims). Use periodically or whenever a docs claim looks suspicious.
+
+**Wiring:** after any change under `engine/`, run `invariant-guard` and `test-runner` before considering the change done. After any change under `storefront/`, run `frontend-verifier` before considering the change done. Do this even if not asked explicitly — it's the equivalent of the checks a human would run before calling the work finished.
 
 ## The constraint
 

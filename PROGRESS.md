@@ -38,6 +38,9 @@ because they cannot touch money safely.
   file. Enforced twice: the route itself refuses (`require_checkout_identity`: 401
   SIGN_IN_REQUIRED for a guest, 428 EMAIL_REQUIRED for a signed-in account with no
   email) and the storefront hides the card buttons and Pay button behind the gate.
+- **The confirmation actually gets sent.** `engine/notify/` - the gate above existed
+  for this and, until this session, nothing used the address it collected. See
+  Fixed This Session, #26.
 - **A cart, a conversation and an order each belong to somebody.** A signed-in
   shopper's things follow their account; a guest's follow an httpOnly cookie
   neither they nor a script on the page can read or choose. See Fixed This Session.
@@ -544,6 +547,49 @@ below; `npm run build` now exits 0.)
     `healthcheck.py` calling `card_last4: "0006"` directly was not the same claim
     as a shopper being able to select it.
 
+    After #25, a broader pass re-verified the rest of "Features Built" live in a
+    real browser rather than trusting an earlier code-read or an HTTP-only test:
+    tappable add-to-cart (152ms, no model call), sign-up with the merchant name
+    (not a connection id) shown afterward, cart persistence across a reload, the
+    sign-in screen for both merchants (only ever checked by reading the code
+    before this pass), the "Why this?" engine panel rendering a real diagnosis
+    from a live dead search, and a merchant policy toggle actually persisting
+    across a reload rather than only looking flipped. No further "claimed but
+    not reachable" gaps turned up.
+
+26. **Checkout requires an email, and until now nothing sent one.** The gate in
+    #20 collected an address for exactly this reason; the "used it" half was
+    unbuilt (see the old Next Steps #1). New `engine/notify/` package: `Mailer`
+    (`engine/notify/mailer.py`) sends over SMTP if `MAILER_SMTP_HOST` is set, and
+    otherwise records rather than delivers - the same "recorded rather than
+    pretended" shape `NOTIFY_BACK_IN_STOCK` already uses for an unbuilt
+    capability, chosen because no real SMTP credentials exist for this project
+    (local, SQLite, no hosting - see "No Postgres, no hosting" below). Real SMTP
+    is switched on by setting the environment variable; nothing else changes.
+
+    Every attempt is recorded regardless of whether it actually sent
+    (`db.record_sent_mail`, a new `sent_mail` table - `create_all` picks up a new
+    table with no migration needed, unlike adding a column to an existing one).
+    Wired at both places a payment actually succeeds: `/api/chat/pay`
+    (`engine/api/chat.py`) and `/api/shop/{connection}/checkout`
+    (`engine/api/shop.py`) - the sidebar Pay button and the chat-driven pay tap
+    are two different routes to the same money moving, and both needed the same
+    confirmation. `require_checkout_identity` now returns the shopper's email
+    alongside the shopper id, since both call sites need it and it was already
+    being looked up to get this far.
+
+    No route exposes `sent_mail` - there is no merchant-facing "sent emails"
+    view to build one for, and adding an endpoint with no consumer would be
+    speculative. Verified instead by reading the table directly after a real
+    checkout, on both call sites: paid as a shopper on Northfield via the sidebar
+    button (`ORD00007`, recorded, `delivered=False` since no SMTP is
+    configured), paid on Kettle the same way (`KB-0029`, recorded), and called
+    `/api/chat/pay` directly for a fresh signed-up shopper (`ORD00008`,
+    recorded) to cover the second route. `healthcheck.py` still holds at 84
+    checks (82 passed, 2 model-bound SKIPs this run) and `auditroutes.py` still
+    holds; the new table needed no changes to either since neither previously
+    touched checkout's success path in a way this could regress.
+
 ---
 
 ## Known Issues / Pending
@@ -585,11 +631,9 @@ Playwright suite to them rather than reach for `healthcheck.py` again.
 ## Next Steps
 
 1. The guest-checkout question is decided and implemented - checkout now requires
-   a signed-in account with an email. What has not followed yet: **nothing actually
-   sends that email.** It is collected and stored, and the shopper sees the order in
-   the app, but no confirmation leaves the engine (no SMTP/mailer anywhere) - which
-   is the reason the gate exists, so the "got the address" half is done and the
-   "used it" half is unbuilt. Also still open after the decision: a handover message
+   a signed-in account with an email, and as of #26 the confirmation is actually
+   sent (recorded, not delivered, until `MAILER_SMTP_HOST` is set to a real
+   merchant's credentials). Still open after the decision: a handover message
    written for a guest's dying session (guests no longer pay, but can still chat and
    still get escalated), and the shop now prompts for an email where it used to
    finish a sale - whether that nudges a merchant's conversion is worth watching.
