@@ -164,6 +164,46 @@ async def holdout_status(
         return assigned
 
 
+async def resolve_holdout_case_for_cart(connection_id: str, cart_id: str) -> None:
+    """Mark a holdout case resolved when its cart is eventually paid.
+
+    A holdout case is recorded unresolved the instant its friction happens,
+    because nothing has fixed it yet - but a shopper who was declined and left
+    alone often retries the same card, or a different one, entirely on their
+    own. If that succeeds, the honest answer to "did this resolve" is yes, even
+    though the assistant never touched it. Without this, `holdout_resolved`
+    would read as a permanent zero regardless of what actually happened next,
+    which measures "did the assistant act" rather than "did the problem get
+    fixed" - the wrong question for a comparison whose whole point is the
+    second one.
+
+    Looked up by cart, not by session, because that is the thing a payment
+    success actually names - and a cart can only ever have been declined and
+    then paid, never the reverse, so the most recent unresolved holdout case
+    for it is unambiguous.
+    """
+    async with session_scope() as db:
+        result = await db.execute(
+            select(Case)
+            .where(
+                Case.connection_id == connection_id,
+                Case.cart_id == cart_id,
+                Case.is_holdout.is_(True),
+            )
+            .order_by(Case.created_at.desc())
+        )
+        case = result.scalars().first()
+        if case is None:
+            return
+
+        outcome_result = await db.execute(
+            select(Outcome).where(Outcome.case_id == case.case_id)
+        )
+        outcome = outcome_result.scalars().first()
+        if outcome is not None and not outcome.resolved:
+            outcome.resolved = True
+
+
 async def list_cases(connection_id: str, *, limit: int = 50) -> list[Case]:
     """Recent cases for one merchant, newest first."""
     async with session_scope() as db:

@@ -1718,6 +1718,71 @@ check(
     "engine/db/repository.py merchant_report",
 )
 
+# A holdout shopper who fixes their own problem must count as resolved, or
+# the comparison measures "did the assistant act" rather than "did the
+# problem get fixed" - the wrong question. Decline a real cart, then pay the
+# same cart with a working card, entirely without the assistant's help, and
+# check the holdout case for it flips from unresolved to resolved.
+#
+# Measured as a delta, not an absolute count: the report window can already
+# hold resolved holdout cases from an earlier run, so ">= 1" alone would pass
+# even if this specific cart's case were never actually resolved.
+resolved_before = (
+    (call("GET", f"/api/report/{KETTLE}").get("holdout") or {}).get(
+        "holdout_resolved", 0
+    )
+)
+signed_in_for(KETTLE, "hc_holdout_resolve")
+resolve_cart = call("POST", f"/api/shop/{KETTLE}/cart")
+resolve_cart_id = resolve_cart.get("cart_id")
+call(
+    "POST",
+    f"/api/shop/{KETTLE}/cart/{resolve_cart_id}/lines",
+    {"product_id": "KB-ETH-01", "variant_id": "KB-ETH-01::250g whole bean", "quantity": 1},
+)
+resolve_session = f"hc_holdout_resolve_{uuid.uuid4().hex[:6]}"
+declined = call(
+    "POST",
+    "/api/chat/pay",
+    {
+        "connection_id": KETTLE,
+        "session_id": resolve_session,
+        "cart_id": resolve_cart_id,
+        "card_last4": "0005",
+    },
+)
+check(
+    "the declined cart is a holdout case with no assistance",
+    "HOLDOUT_NO_ASSISTANCE" in str(declined.get("risk_rule")),
+    str(declined.get("risk_rule")),
+    "engine/api/chat.py _holdout_reply",
+)
+retried = call(
+    "POST",
+    "/api/chat/pay",
+    {
+        "connection_id": KETTLE,
+        "session_id": resolve_session,
+        "cart_id": resolve_cart_id,
+        "card_last4": "1111",
+    },
+)
+check(
+    "retrying the same cart on their own pays it",
+    retried.get("payment", {}).get("paid") is True,
+    str(retried.get("payment")),
+)
+holdout_report_after_resolve = call("GET", f"/api/report/{KETTLE}")
+resolved_after = (holdout_report_after_resolve.get("holdout") or {}).get(
+    "holdout_resolved", 0
+)
+check(
+    "a holdout shopper who fixes their own problem counts as resolved",
+    resolved_after > resolved_before,
+    f"before={resolved_before} after={resolved_after}",
+    "engine/db/repository.py resolve_holdout_case_for_cart",
+)
+
 # Put the policy back before anything else runs against this merchant.
 call(
     "PUT",
