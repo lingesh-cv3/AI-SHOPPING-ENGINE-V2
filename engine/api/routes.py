@@ -632,7 +632,12 @@ async def merchant_report(
     and how much of it needed their time.
     """
     _adapter(connection_id)
-    return await db.merchant_report(connection_id, days=days)
+    report = await db.merchant_report(connection_id, days=days)
+    caps = await engine.registry.get(connection_id)
+    report["supports_payment_recovery"] = bool(
+        caps and caps.payment_recovery_methods
+    )
+    return report
 
 
 @app.post(f"{API}/admin/expire")

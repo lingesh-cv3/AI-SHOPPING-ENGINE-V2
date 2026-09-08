@@ -828,6 +828,7 @@ export interface MerchantReport {
   waiting_for_you: number;
   revenue_recovered: string;
   currency: string;
+  supports_payment_recovery: boolean;
   median_resolution_ms: number | null;
   friction: { type: string; count: number }[];
   recent: {
