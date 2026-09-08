@@ -92,22 +92,106 @@ should extend the Playwright suite to them rather than reach for
 
 ## Next Steps
 
-1. Still open: a handover message written for a guest's dying session (guests
-   no longer pay, but can still chat and still get escalated), and the shop
-   now prompts for an email where it used to finish a sale - whether that
-   nudges a merchant's conversion is worth watching.
-2. The browser-level test layer now exists (`storefront/tests/checkout.spec.ts`,
-   `npm test` from `storefront/`) - extend it rather than starting a second one.
-   Best next addition: the near-duplicate-message poll bug, now the only real
-   behaviour Known Issue still open. Reproduce it in the browser first with a
-   different trigger (see Known Issues above) rather than repeating the same
-   race shape already tried once.
-3. The remaining Known Issues are not architectural; the `DIAGNOSED`-stuck item
-   is a lifecycle-semantics decision that wants a deliberate call, and the
-   blank-note handover is a deliberate behaviour worth revisiting rather than
-   an obvious bug.
-4. Webhooks are built (Kettle only - see `Completed.md`, #31). Of what remains
-   unbuilt, the installable widget is the next thing standing between the
-   engine and a merchant actually adding it to their own site; a CI gate for
-   the browser tests, `eval.py`'s reliability number, and Postgres/hosting are
-   all valuable but not load-bearing for onboarding a first real merchant.
+### Existing Engineering Work
+
+1. **Guest handover / session behaviour:** still open. Guests no longer pay,
+   but can still chat and get escalated, and the shop now prompts for an email
+   where it used to finish a sale. Whether this nudges merchant conversion is
+   worth watching.
+
+2. **Browser-level test coverage:** the Playwright layer now exists
+   (`storefront/tests/checkout.spec.ts`, `npm test` from `storefront/`).
+   Extend this existing suite rather than starting a second one. Best next
+   addition is the near-duplicate-message poll bug: reproduce it in the
+   browser with a different trigger before attempting a fix.
+
+3. **Remaining Known Issues:** the `DIAGNOSED`-stuck item needs a deliberate
+   lifecycle-semantics decision. The blank-note handover is also a deliberate
+   behaviour worth revisiting rather than an obvious bug.
+
+4. **Installable storefront assistant:** the next major onboarding gap.
+   The current assistant is a React component in the CV3 storefront rather
+   than a merchant-installable widget/script.
+
+5. **Automated browser-test gate:** Playwright exists but is not yet wired
+   into a daily, pre-commit, or CI gate.
+
+6. **Reliability evaluation:** `eval.py` exists but the evaluation system and
+   published reliability number remain unfinished.
+
+7. **Production infrastructure:** Postgres, hosting, and separation of the
+   shopper storefront and CV3 operations deployment remain unbuilt.
+
+8. **Webhooks:** Kettle webhook support is completed (`Completed.md`, #31).
+   Broader webhook support across real merchant/platform adapters remains
+   future work where required by a platform.
+
+---
+
+## Research-Backed Product Work
+
+The research roadmap is maintained in `CLAUDE.md`.
+
+These features are planned product directions, not implemented functionality.
+
+### Shopper — Initial Priorities
+
+- [ ] Advanced Product Discovery
+- [ ] Smart Product Comparison - **partially covered by `Completed.md` #27.**
+      Checked directly against the code, not assumed: the comparison action
+      (`ActionType.COMPARE_PRODUCTS`) fetches both products fresh via
+      `adapter.get_product()` on every call - never from anything cached
+      earlier in the conversation - and returns structured fields (title,
+      price, description, availability), which satisfies "compare products
+      using structured, live product information" in full.
+
+      Not covered: "explain meaningful differences rather than simply
+      listing specifications." `execution/service.py`'s `COMPARE_PRODUCTS`
+      dispatch (lines ~466-495) returns exactly that - a plain listing of
+      the same fields for each product, with no synthesis of which
+      differences actually matter for the shopper's situation. It cannot be
+      otherwise as built: the model's reply is written by
+      `engine.reasoning.reason()` *before* `execute_case()` ever runs (the
+      reasoning step precedes execution in `_process_turn`, confirmed at
+      `chat.py:374` vs `:552`), so the reply is generic ("Let's see how they
+      differ in price, stock and features") rather than a claim grounded in
+      the actual fetched values - it is written before those values exist.
+      Closing this gap needs a second reasoning pass *over* the fetched
+      comparison (or a different pipeline shape entirely), not a UI or
+      prompt change - it is a real, unimplemented capability, kept here
+      rather than marked done.
+- [ ] Personalized Recommendations
+- [ ] Mission-Based Shopping
+- [ ] Smart Cart & Checkout Recovery
+
+### Merchant — Initial Priorities
+
+- [ ] CV3 Merchant Copilot
+- [ ] AI Store Diagnosis
+- [ ] Recovery Opportunity Radar
+- [ ] Catalog Intelligence
+- [ ] Inventory Intelligence
+
+### CV3 Operations — Initial Priorities
+
+- [ ] CV3 Operations Copilot
+- [ ] Cross-Merchant Command Center
+- [ ] Integration Health Monitoring
+- [ ] Automatic Incident Detection
+
+These should not be treated as completed until each feature is implemented
+end-to-end, all relevant tests pass, and the real user-facing behaviour has
+been verified.
+
+### Implementation Priority
+
+Existing correctness, security, testing, and merchant-onboarding work takes
+priority over new product features.
+
+When a research-backed feature is selected for active implementation, keep it
+in this file until it is fully implemented and verified. Then remove it from
+`PROGRESS.md` and add the completed work to `Completed.md`.
+
+Do not add the entire future roadmap to `PROGRESS.md`; the complete roadmap
+belongs in `CLAUDE.md`. This file tracks only the features currently queued
+for implementation and existing unfinished work.
