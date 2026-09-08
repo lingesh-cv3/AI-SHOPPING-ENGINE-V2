@@ -76,7 +76,7 @@ conversation or order at the same merchant - see Fixed This Session.
 
 ### Tests
 
-`healthcheck.py` - 88 checks, one path end to end. Reports SKIP rather than FAIL
+`healthcheck.py` - 91 checks, one path end to end. Reports SKIP rather than FAIL
 when the provider is busy, and says how many checks never executed.
 
 `fuzz.py` - random shopper sequences, asserting after every step that the cart
@@ -674,6 +674,28 @@ below; `npm run build` now exits 0.)
     (same 7 pre-existing lint errors, untouched - one new one was introduced
     and fixed by moving a derived-state update out of `useEffect` and into
     render, per React's own pattern for state derived from a prop).
+
+    **A real gap in the first version, found by walking the product with the
+    user rather than by a review.** `holdout_resolved` was recorded unresolved
+    the instant a friction happened and never revisited - so it read as a
+    permanent zero regardless of what the shopper actually did next, which
+    measures "did the assistant act" rather than "did the problem get fixed".
+    A holdout shopper who is declined and simply retries the same card, or a
+    different one, on their own - with no recovery ever offered - has resolved
+    their own problem, and the comparison's entire point is answering how
+    often that happens without help. `db.resolve_holdout_case_for_cart` is
+    called from both places a payment can succeed (`shop.py`'s checkout route
+    and `chat.py`'s pay route, the same two routes `confirm_order` already
+    hooks into) and marks the most recent unresolved holdout case for that
+    cart resolved, whatever paid it. Verified end to end: declined a real cart
+    on a forced 100% holdout, confirmed the case recorded unresolved,
+    paid the same cart with a working card with no assistance in between, and
+    confirmed the outcome flipped to resolved and the merchant report's
+    `holdout_resolved` incremented. Three more healthcheck checks, using a
+    before/after delta rather than an absolute count - the report window can
+    already hold resolved holdout cases from an earlier run, so ">= 1" alone
+    would have passed even if this specific cart were never actually
+    resolved. 91 checks total. `auditroutes.py` and `fuzz.py` hold again.
 
 ---
 
