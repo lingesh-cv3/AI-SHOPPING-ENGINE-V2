@@ -209,7 +209,7 @@ class KettleAdapter(StandardCommerceInterface, SupportsWebhooks):
                 PaymentRecoveryMethod.PAYMENT_LINK,
                 PaymentRecoveryMethod.RETRY_SAME_METHOD,
             ],
-            supports_webhooks=False,
+            supports_webhooks=True,
             declared_at=datetime.now(UTC),
         )
 
