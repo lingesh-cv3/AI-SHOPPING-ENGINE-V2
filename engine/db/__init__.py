@@ -38,7 +38,7 @@ from .repository import (
     record_case,
     record_outcome,
     record_sent_mail,
-    resolve_holdout_case_for_cart,
+    resolve_unresolved_payment_cases_for_cart,
     save_policy,
     sent_mail_for_order,
     stats,
@@ -92,5 +92,5 @@ __all__ = [
     "sent_mail_for_order",
     "SessionHoldout",
     "holdout_status",
-    "resolve_holdout_case_for_cart",
+    "resolve_unresolved_payment_cases_for_cart",
 ]

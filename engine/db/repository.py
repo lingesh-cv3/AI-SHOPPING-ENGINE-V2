@@ -164,44 +164,53 @@ async def holdout_status(
         return assigned
 
 
-async def resolve_holdout_case_for_cart(connection_id: str, cart_id: str) -> None:
-    """Mark a holdout case resolved when its cart is eventually paid.
+async def resolve_unresolved_payment_cases_for_cart(
+    connection_id: str, cart_id: str
+) -> None:
+    """Mark unresolved payment-decline cases for a cart resolved once it pays.
 
-    A holdout case is recorded unresolved the instant its friction happens,
-    because nothing has fixed it yet - but a shopper who was declined and left
-    alone often retries the same card, or a different one, entirely on their
-    own. If that succeeds, the honest answer to "did this resolve" is yes, even
-    though the assistant never touched it. Without this, `holdout_resolved`
-    would read as a permanent zero regardless of what actually happened next,
-    which measures "did the assistant act" rather than "did the problem get
-    fixed" - the wrong question for a comparison whose whole point is the
-    second one.
+    Three separate call sites record a payment-decline case unresolved and
+    then never look at it again: a holdout decline (nothing was attempted), an
+    operator's rejection of a proposed recovery, and an approval that expired
+    unactioned. All three share the same gap - a shopper who was declined and
+    then simply retried the same card, or a different one, on their own has
+    resolved their own problem, and none of those three code paths ever find
+    that out. Fixed once, here, rather than three times at the call sites,
+    specifically so the next friction type that gets this same shape does not
+    reopen it a fourth time.
 
-    Looked up by cart, not by session, because that is the thing a payment
-    success actually names - and a cart can only ever have been declined and
-    then paid, never the reverse, so the most recent unresolved holdout case
-    for it is unambiguous.
+    Scoped to `friction_type == PAYMENT_DECLINED`: a cart eventually being paid
+    is an unambiguous, causally-connected resolution signal for a payment that
+    was previously declined against the same cart. It is not evidence that an
+    unrelated friction against the same cart (a dead search, a failed coupon)
+    was resolved, so those are deliberately left alone rather than marked
+    resolved on a signal that says nothing about them.
+
+    Marks every matching unresolved case, not just the most recent - a cart
+    declined twice before it finally paid represents two real friction events
+    the shopper lived through, and the eventual success resolves both of them,
+    not only the last.
     """
     async with session_scope() as db:
         result = await db.execute(
-            select(Case)
-            .where(
+            select(Case).where(
                 Case.connection_id == connection_id,
                 Case.cart_id == cart_id,
-                Case.is_holdout.is_(True),
+                Case.friction_type == "PAYMENT_DECLINED",
             )
-            .order_by(Case.created_at.desc())
         )
-        case = result.scalars().first()
-        if case is None:
+        cases = list(result.scalars())
+        if not cases:
             return
 
         outcome_result = await db.execute(
-            select(Outcome).where(Outcome.case_id == case.case_id)
+            select(Outcome).where(
+                Outcome.case_id.in_([c.case_id for c in cases])
+            )
         )
-        outcome = outcome_result.scalars().first()
-        if outcome is not None and not outcome.resolved:
-            outcome.resolved = True
+        for outcome in outcome_result.scalars():
+            if not outcome.resolved:
+                outcome.resolved = True
 
 
 async def list_cases(connection_id: str, *, limit: int = 50) -> list[Case]:

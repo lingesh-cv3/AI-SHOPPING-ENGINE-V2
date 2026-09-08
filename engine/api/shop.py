@@ -536,12 +536,13 @@ async def checkout(
             order_id=order.order_id,
             to_email=shopper_email,
         )
-        # A holdout shopper who was declined and left alone often retries -
-        # here, on their own, with no recovery offer prompting them. If this
-        # cart is what a holdout case was recorded against, that case is now
-        # resolved, and the merchant report should say so rather than reading
-        # a permanent zero regardless of what the shopper actually did next.
-        await db.resolve_holdout_case_for_cart(connection_id, cart_id)
+        # A shopper whose card was declined against this cart and who then
+        # paid it - here, on their own - resolved their own problem, whether
+        # nobody ever helped (a holdout), an operator turned down a proposed
+        # recovery, or an approval simply expired unactioned. All three
+        # record a decline unresolved and never look at it again; this is
+        # the one place that closes the loop for all of them.
+        await db.resolve_unresolved_payment_cases_for_cart(connection_id, cart_id)
 
     return {
         "succeeded": result.succeeded,

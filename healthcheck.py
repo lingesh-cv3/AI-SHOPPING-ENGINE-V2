@@ -1509,6 +1509,71 @@ else:
         "engine/api/chat.py - a decline should create an approval",
     )
 
+# A rejected recovery is recorded unresolved and nothing ever looks at it
+# again - the same gap the holdout fix closed, on a different call site
+# (engine/api/routes.py's not-approved branch, rather than chat.py's
+# holdout short-circuit). Decline a real cart, reject the proposed recovery,
+# then pay the same cart with a working card with no further help, and
+# confirm the merchant report's resolved count moves - not the holdout
+# split, since this shopper was never in the holdout group, just the
+# ordinary resolution_rate the top of the report shows.
+signed_in_for(KETTLE, "hc_rej_resolve")
+rej_resolve_cart = call("POST", f"/api/shop/{KETTLE}/cart")
+rej_resolve_cart_id = rej_resolve_cart.get("cart_id")
+call(
+    "POST",
+    f"/api/shop/{KETTLE}/cart/{rej_resolve_cart_id}/lines",
+    {"product_id": "KB-COL-02", "variant_id": "KB-COL-02::250g whole bean", "quantity": 1},
+)
+rej_resolve_session = f"hc_rej_resolve_{uuid.uuid4().hex[:6]}"
+rej_resolve_declined = call(
+    "POST",
+    "/api/chat/pay",
+    {
+        "connection_id": KETTLE,
+        "session_id": rej_resolve_session,
+        "cart_id": rej_resolve_cart_id,
+        "card_last4": "0002",
+    },
+)
+rej_resolve_case_id = rej_resolve_declined.get("case_id")
+
+queue3 = (call("GET", f"/api/approvals/{KETTLE}").get("approvals")) or []
+mine = next((a for a in queue3 if a.get("case_id") == rej_resolve_case_id), None)
+if mine:
+    call(
+        "POST",
+        f"/api/approvals/{KETTLE}/{mine['approval_id']}",
+        {
+            "approved": False,
+            "decided_by": "healthcheck",
+            "note": "declined for this check",
+        },
+    )
+
+report_before_rej_resolve = call("GET", f"/api/report/{KETTLE}")
+resolved_before_rej = report_before_rej_resolve.get("problems_solved", 0)
+
+call(
+    "POST",
+    "/api/chat/pay",
+    {
+        "connection_id": KETTLE,
+        "session_id": rej_resolve_session,
+        "cart_id": rej_resolve_cart_id,
+        "card_last4": "1111",
+    },
+)
+report_after_rej_resolve = call("GET", f"/api/report/{KETTLE}")
+resolved_after_rej = report_after_rej_resolve.get("problems_solved", 0)
+check(
+    "a shopper who fixes their own problem after a rejection counts as resolved",
+    mine is not None and resolved_after_rej > resolved_before_rej,
+    f"had approval to reject: {mine is not None}, "
+    f"before={resolved_before_rej} after={resolved_after_rej}",
+    "engine/db/repository.py resolve_unresolved_payment_cases_for_cart",
+)
+
 # ---------------------------------------------------------------------------
 
 section("A promise of a person is kept")
@@ -1780,7 +1845,7 @@ check(
     "a holdout shopper who fixes their own problem counts as resolved",
     resolved_after > resolved_before,
     f"before={resolved_before} after={resolved_after}",
-    "engine/db/repository.py resolve_holdout_case_for_cart",
+    "engine/db/repository.py resolve_unresolved_payment_cases_for_cart",
 )
 
 # Put the policy back before anything else runs against this merchant.
@@ -1854,6 +1919,64 @@ if backdated:
         f"{len(exp_turns)} turns, none reporting the timeout",
         "engine/expiry.py::sweep_once",
     )
+
+    # An expired approval is recorded unresolved and nothing ever looks at it
+    # again - the same gap the holdout fix closed, on a third call site
+    # (engine/expiry.py's sweep, rather than chat.py's holdout short-circuit
+    # or routes.py's not-approved branch). Decline a real cart, let its
+    # approval expire, then pay the same cart with a working card, and
+    # confirm resolution moves.
+    signed_in_for(KETTLE, "hc_exp_resolve")
+    exp_resolve_cart = call("POST", f"/api/shop/{KETTLE}/cart")
+    exp_resolve_cart_id = exp_resolve_cart.get("cart_id")
+    call(
+        "POST",
+        f"/api/shop/{KETTLE}/cart/{exp_resolve_cart_id}/lines",
+        {"product_id": "KB-BLD-05", "variant_id": "KB-BLD-05::250g ground", "quantity": 1},
+    )
+    exp_resolve_session = f"hc_exp_resolve_{uuid.uuid4().hex[:6]}"
+    call(
+        "POST",
+        "/api/chat/pay",
+        {
+            "connection_id": KETTLE,
+            "session_id": exp_resolve_session,
+            "cart_id": exp_resolve_cart_id,
+            "card_last4": "0002",
+        },
+    )
+
+    try:
+        conn = sqlite3.connect("cv3.db")
+        conn.execute(
+            "update approvals set expires_at=? where state='PENDING'", (past,)
+        )
+        conn.commit()
+        conn.close()
+        call("POST", "/api/admin/expire")
+        report_before_exp_resolve = call("GET", f"/api/report/{KETTLE}")
+        resolved_before_exp = report_before_exp_resolve.get("problems_solved", 0)
+
+        call(
+            "POST",
+            "/api/chat/pay",
+            {
+                "connection_id": KETTLE,
+                "session_id": exp_resolve_session,
+                "cart_id": exp_resolve_cart_id,
+                "card_last4": "1111",
+            },
+        )
+        report_after_exp_resolve = call("GET", f"/api/report/{KETTLE}")
+        resolved_after_exp = report_after_exp_resolve.get("problems_solved", 0)
+        check(
+            "a shopper who fixes their own problem after an expiry counts as resolved",
+            resolved_after_exp > resolved_before_exp,
+            f"before={resolved_before_exp} after={resolved_after_exp}",
+            "engine/db/repository.py resolve_unresolved_payment_cases_for_cart",
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"  SKIP  expiry-then-resolve (could not backdate: {e})")
 
 # ---------------------------------------------------------------------------
 

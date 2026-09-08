@@ -1181,10 +1181,13 @@ async def pay(
                 order_id=order_id,
                 to_email=shopper_email,
             )
-        # See shop.py's checkout route for why: a holdout shopper who was
-        # declined and retried this cart on their own, with no recovery offer,
-        # just resolved their own case.
-        await db.resolve_holdout_case_for_cart(req.connection_id, req.cart_id)
+        # See shop.py's checkout route for why: a shopper whose card was
+        # declined here and who then retried this same cart - however they
+        # got there, whether nobody helped, an operator said no, or nobody
+        # got to it in time - just resolved their own problem.
+        await db.resolve_unresolved_payment_cases_for_cart(
+            req.connection_id, req.cart_id
+        )
     else:
         # Runs the decline through the same pipeline a decline anywhere else takes,
         # rather than writing a reply here and stopping. The earlier version told
