@@ -47,6 +47,14 @@ KETTLE_ID = "conn_kettle"
 KETTLE_NAME = "Kettle & Bloom Coffee"
 KETTLE_URL = os.getenv("KETTLE_MERCHANT_URL", "http://127.0.0.1:8002")
 
+#: Demo-only default so webhooks are provably wired end to end without extra
+#: setup - a real merchant's would come from their own vault, never a
+#: source-controlled fallback. See engine/notify/mailer.py for the same
+#: pattern with SMTP credentials.
+KETTLE_WEBHOOK_SECRET = os.getenv(
+    "KETTLE_WEBHOOK_SECRET", "demo-kettle-webhook-secret"
+)
+
 #: Display names for the consoles. The engine itself never reads this - it works in
 #: connection ids, because a merchant's trading name is not an identifier.
 MERCHANT_NAMES: dict[str, str] = {
@@ -97,6 +105,7 @@ def build_engine() -> Engine:
             connection_id=KETTLE_ID,
             base_url=KETTLE_URL,
             storefront_url="http://localhost:5173",
+            webhook_secret=KETTLE_WEBHOOK_SECRET,
         )
     )
 

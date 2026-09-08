@@ -22,6 +22,8 @@ look at.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import sys
 import urllib.error
 import http.cookiejar
@@ -907,14 +909,28 @@ check(
 # lose on ranking. trace.rejected stays empty on a ranking-only outcome, and
 # "why" returned None for it: a shopper on the one platform able to do more
 # than one thing saw no explanation at all, on the exact turn CLAUDE.md names
-# as the reason this toggle exists. RETRY_PAYMENT is checked for specifically
-# because it is documented as always ranked last of the three, so it is
-# reliably the one outranked whichever of the other two wins.
+# as the reason this toggle exists.
+#
+# Checked against any of the three recovery phrasings, not RETRY_PAYMENT's
+# specifically. That version assumed the model always proposes all three
+# recovery actions, so RETRY_PAYMENT (documented as always ranked last) is
+# reliably the one outranked - reproduced directly against the running
+# engine and found false: the model sometimes proposes only two of the
+# three, and when RETRY_PAYMENT is not among them there is nothing for
+# ranking to outrank and nothing for why() to explain. What this check can
+# actually promise is that *whichever* runner-up the model proposed reached
+# why() as ranked-lower, not which specific action that runner-up was.
+_RECOVERY_PHRASES = (
+    "trying your card again",  # RETRY_PAYMENT
+    "offering another way to pay",  # OFFER_ALTERNATE_PAYMENT
+    "splitting the payment",  # SPLIT_PAYMENT
+)
 check(
     "a successful recovery still explains what it did not do",
     any(
-        "trying your card again" in line
+        phrase in line
         for line in (kb_case.get("why") or {}).get("declined", [])
+        for phrase in _RECOVERY_PHRASES
     ),
     str(kb_case.get("why")),
     "engine/api/chat.py - ranked-lower survivors must reach why(), not just rejections",
@@ -2127,6 +2143,118 @@ if rows:
             f"first: {first_close}, second: {second_close}",
             "engine/db/repository.py::mark_handled",
         )
+
+# ---------------------------------------------------------------------------
+
+section("Webhooks")
+
+# A merchant's own platform reporting friction, not our storefront. Kettle is
+# the one demo adapter that implements SupportsWebhooks - Northfield
+# deliberately does not (see adapters/kettle/adapter.py's own docstring on
+# why only one does). The shared secret matches the demo default in
+# engine/api/deps.py; a real deployment reads a real one from a vault.
+_WEBHOOK_SECRET = "demo-kettle-webhook-secret"
+
+
+def _signed(body: bytes) -> str:
+    return hmac.new(_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _webhook(connection: str, payload: dict, *, signature: str | None) -> dict:
+    """POST directly - webhooks carry no bearer key, only a platform signature,
+    so this bypasses `call()`'s key auto-lookup entirely."""
+    body = json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"}
+    if signature is not None:
+        headers["X-Kettle-Signature"] = signature
+    req = urllib.request.Request(
+        f"{ENGINE}/api/webhooks/{connection}", data=body, method="POST", headers=headers
+    )
+    try:
+        with _OPENER.open(req, timeout=15) as r:
+            return {"_status": r.status, **json.loads(r.read() or "{}")}
+    except urllib.error.HTTPError as e:
+        return {"_status": e.code, "_body": e.read().decode()[:200]}
+
+
+wh_payload = {
+    "event": "payment.declined",
+    "order_id": "KB-WEBHOOK-TEST",
+    "cart_id": "BAG-WEBHOOK-TEST",
+    "decline_code": "CARD_DECLINED_NSF",
+}
+wh_body = json.dumps(wh_payload).encode()
+
+unsigned = _webhook(KETTLE, wh_payload, signature=None)
+check(
+    "an unsigned webhook is refused",
+    unsigned.get("_status") == 401,
+    str(unsigned),
+    "adapters/kettle/adapter.py::verify_webhook",
+)
+
+wrong_sig = _webhook(KETTLE, wh_payload, signature="0" * 64)
+check(
+    "a wrongly-signed webhook is refused",
+    wrong_sig.get("_status") == 401,
+    str(wrong_sig),
+    "adapters/kettle/adapter.py::verify_webhook",
+)
+
+unknown_conn = _webhook("conn_nope", wh_payload, signature=_signed(wh_body))
+check(
+    "an unknown connection is refused",
+    unknown_conn.get("_status") == 404,
+    str(unknown_conn),
+    "engine/api/webhooks.py",
+)
+
+no_support = _webhook(NORTHFIELD, wh_payload, signature=_signed(wh_body))
+check(
+    "a platform with no declared webhook support is refused",
+    no_support.get("_status") == 404,
+    str(no_support),
+    "engine/api/webhooks.py - Northfield does not implement SupportsWebhooks",
+)
+
+verified = _webhook(KETTLE, wh_payload, signature=_signed(wh_body))
+check(
+    "a correctly signed webhook is processed",
+    verified.get("_status") == 200 and verified.get("received") == 1,
+    str(verified),
+    "engine/api/webhooks.py, adapters/kettle/adapter.py",
+)
+
+wh_case_id = None
+if verified.get("processed"):
+    wh_case_id = verified["processed"][0].get("case_id")
+
+if wh_case_id:
+    wh_queue = call("GET", f"/api/approvals/{KETTLE}", key=OPERATOR)
+    wh_entry = next(
+        (a for a in wh_queue.get("approvals", []) if a.get("case_id") == wh_case_id),
+        None,
+    )
+    check(
+        "the resulting case runs the real pipeline and reaches the ops queue",
+        wh_entry is not None
+        and wh_entry.get("friction_type") == "PAYMENT_DECLINED"
+        and wh_entry.get("query", "").startswith("[MERCHANT_WEBHOOK]"),
+        str(wh_entry),
+        "engine/api/webhooks.py::_handle_signal - same pipeline as chat.py",
+    )
+
+unrecognised = _webhook(
+    KETTLE,
+    {"event": "something.unheard.of"},
+    signature=_signed(json.dumps({"event": "something.unheard.of"}).encode()),
+)
+check(
+    "an unrecognised event type is accepted and produces no signal",
+    unrecognised.get("_status") == 200 and unrecognised.get("received") == 0,
+    str(unrecognised),
+    "adapters/kettle/adapter.py::parse_webhook",
+)
 
 # ---------------------------------------------------------------------------
 

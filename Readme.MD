@@ -391,6 +391,7 @@ safe actions run. Populating it narrows that; it can never widen it.
 | `SQL_ECHO` | off | Log every statement. |
 | `SAMPLE_MERCHANT_URL` | `http://127.0.0.1:8001` | Demo store one. |
 | `KETTLE_MERCHANT_URL` | `http://127.0.0.1:8002` | Demo store two. |
+| `KETTLE_WEBHOOK_SECRET` | `demo-kettle-webhook-secret` | HMAC secret Kettle's webhook signature is checked against. The default is a demo convenience, not a real merchant's secret - set your own before this leaves a laptop. |
 
 On rate limits: Groq's free tier allows roughly 8,000 tokens a minute, and a turn
 costs around 2,000. Past that the engine falls back to rules and says so. If the
@@ -427,6 +428,23 @@ POST  /api/simulate
 `/api/chat` takes a message and optionally a friction type, and returns the reply,
 any products it fetched, and the full pipeline trace. `/api/simulate` runs the
 pipeline for a friction type without a conversation.
+
+**Webhooks:**
+
+```
+POST  /api/webhooks/{connection}
+```
+
+A merchant's own platform reporting friction, rather than our storefront
+reporting it. No bearer key - authenticated by the platform's own signature
+instead, checked by that connection's adapter (`SupportsWebhooks.verify_webhook`).
+An unverified signature is refused (401) before the body is ever parsed. Every
+verified signal runs through the identical reasoning/decision/risk/execution
+pipeline `/api/chat` uses, so a webhook-reported decline on Kettle produces
+the same recovery proposal, the same risk gate outcome, and the same approval
+queue entry a shopper-reported one would. Only Kettle implements this today;
+Northfield declaring it unsupported is deliberate, not an oversight - see
+`adapters/kettle/adapter.py`.
 
 **Merchant and operator:**
 
@@ -478,21 +496,20 @@ forgetting a filter.
 
 ## Project status
 
-Working: two platforms behind one interface, AI reasoning with a rules fallback,
-the risk gate, the approval queue with real execution, payment recovery on the
-platform that supports it, persistence, and shared session memory.
+This section predates most of the project's actual history and is kept here
+only for the architectural framing above it - for current build status, read
+`Completed.md` (what's done, verified end to end) and `PROGRESS.md` (what's
+still open) instead of this list. Authentication, for one example, shipped
+long ago and is not "not built" the way an older draft of this file once said.
 
-Not built:
+**Webhooks are built for one platform.** `SupportsWebhooks` is implemented on
+Kettle (`adapters/kettle/adapter.py`) - HMAC-signed events run through the
+identical pipeline `/api/chat` uses. Northfield does not implement it; that is
+a deliberate choice about which platform's events were worth wiring first, not
+an oversight. See `Completed.md` for the full verification.
 
-**Authentication.** The engine is open to anyone who can reach it. Publishable and
-secret keys, per-merchant credential storage, and domain locking are all needed
-before a client can connect.
-
-**Installable widget.** The assistant is a component in the demo storefront, not a
-script tag.
-
-**Webhooks.** `SupportsWebhooks` is defined and unimplemented. The engine only
-learns about friction from our own storefront.
+**Installable widget.** Still not built - the assistant is a component in the
+demo storefront, not a script tag a merchant could add to their own site.
 
 **Approval expiry.** An expired approval leaves the queue and the case stays
 `PENDING_APPROVAL` with nobody informed.

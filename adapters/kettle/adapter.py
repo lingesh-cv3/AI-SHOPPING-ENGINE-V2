@@ -22,7 +22,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from shared.interfaces import StandardCommerceInterface
+import hashlib
+import hmac
+import json
+import logging
+import uuid
+from datetime import UTC as _UTC
+from datetime import datetime as _datetime
+
+from shared.interfaces import StandardCommerceInterface, SupportsWebhooks
 from shared.models import (
     CapabilitySet,
     CapabilityUnsupported,
@@ -30,6 +38,7 @@ from shared.models import (
     CheckoutResult,
     CommerceError,
     ErrorCode,
+    FrictionType,
     InventoryStatus,
     Money,
     Operation,
@@ -40,7 +49,22 @@ from shared.models import (
     Product,
     ProductSearchResult,
     PromotionResult,
+    Signal,
+    SignalSource,
 )
+
+logger = logging.getLogger(__name__)
+
+#: This platform's own event names, mapped onto the normalized friction
+#: vocabulary. Deliberately small: only events a merchant's *own backend*
+#: could plausibly know about without our storefront ever being open. A dead
+#: search is not on this list on purpose - that is something a shopper's
+#: browser observes, not something Kettle's own systems would ever emit.
+_EVENT_FRICTION: dict[str, FrictionType] = {
+    "payment.declined": FrictionType.PAYMENT_DECLINED,
+    "cart.abandoned": FrictionType.CART_ABANDONED,
+    "checkout.error": FrictionType.CHECKOUT_ERROR,
+}
 
 from ..framework.http import PlatformClient
 from . import mapping
@@ -56,8 +80,16 @@ _METHOD = {
 }
 
 
-class KettleAdapter(StandardCommerceInterface):
-    """One merchant connection to a Kettle & Bloom storefront."""
+class KettleAdapter(StandardCommerceInterface, SupportsWebhooks):
+    """One merchant connection to a Kettle & Bloom storefront.
+
+    The one adapter that implements SupportsWebhooks, deliberately: it is the
+    only demo platform with payment recovery, so it is the only one where a
+    merchant's own backend reporting a decline (rather than our storefront
+    reporting it) is a scenario worth proving end to end. Northfield's own
+    lack of webhook support is not an oversight - a real integration adds it
+    when that platform's own events are worth wiring, not before.
+    """
 
     def __init__(
         self,
@@ -66,10 +98,16 @@ class KettleAdapter(StandardCommerceInterface):
         base_url: str,
         api_key: str | None = None,
         storefront_url: str | None = None,
+        webhook_secret: str | None = None,
     ) -> None:
         self.connection_id = connection_id
         self.platform = PLATFORM_NAME
         self.storefront_url = storefront_url
+        #: Shared secret for verifying this platform's webhook signatures.
+        #: None means webhooks cannot be verified for this connection, so
+        #: verify_webhook below refuses everything rather than accepting an
+        #: unsigned event on the strength of "nothing was configured".
+        self._webhook_secret = webhook_secret
 
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._client = PlatformClient(
@@ -315,3 +353,79 @@ class KettleAdapter(StandardCommerceInterface):
             amount_recovered=order.amount_paid if recovered else None,
             reason=raw.get("message"),
         )
+
+    # ---- SupportsWebhooks --------------------------------------------------
+    #
+    # A minimal, real signature scheme: HMAC-SHA256 of the raw request body,
+    # hex-encoded, sent in an `X-Kettle-Signature` header. The same family of
+    # scheme Stripe and Shopify actually use - verify the bytes as received,
+    # never the parsed JSON, so a byte reordered in transit that would still
+    # parse to the same dict cannot slip past a signature computed over the
+    # object instead of the wire bytes.
+
+    async def verify_webhook(self, headers: dict[str, str], body: bytes) -> bool:
+        """Verify this event actually came from this merchant's platform.
+
+        No configured secret means no connection can ever be verified for it
+        - refusing everything is the safe default, not raising, because a
+        webhook that cannot be checked is exactly the case this method exists
+        to reject.
+        """
+        if not self._webhook_secret:
+            return False
+
+        signature = headers.get("x-kettle-signature", "")
+        if not signature:
+            return False
+
+        expected = hmac.new(
+            self._webhook_secret.encode(), body, hashlib.sha256
+        ).hexdigest()
+        # Constant-time comparison. A signature check that returns early on
+        # the first mismatched byte leaks how many leading bytes were right,
+        # which is exactly the side channel that lets an attacker forge one
+        # byte at a time.
+        return hmac.compare_digest(expected, signature)
+
+    async def parse_webhook(self, headers: dict[str, str], body: bytes) -> list[Signal]:
+        """Translate one verified Kettle event into normalized Signals.
+
+        Never called on an unverified body - the route above checks that
+        first. An event type this adapter does not recognise returns an empty
+        list rather than raising, per the interface's own contract: an event
+        carrying no signal is valid, not an error.
+        """
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return []
+
+        event = str(payload.get("event", ""))
+        friction = _EVENT_FRICTION.get(event)
+        if friction is None:
+            logger.info("kettle webhook: unrecognised event %r, ignored", event)
+            return []
+
+        occurred_raw = payload.get("occurred_at")
+        try:
+            occurred_at = (
+                _datetime.fromisoformat(occurred_raw) if occurred_raw else _datetime.now(_UTC)
+            )
+        except ValueError:
+            occurred_at = _datetime.now(_UTC)
+
+        return [
+            Signal(
+                signal_id=f"kwh_{uuid.uuid4().hex[:16]}",
+                source=SignalSource.MERCHANT_WEBHOOK,
+                connection_id=self.connection_id,
+                session_id=payload.get("session_id"),
+                friction_type=friction,
+                occurred_at=occurred_at,
+                received_at=_datetime.now(_UTC),
+                cart_id=payload.get("cart_id"),
+                order_id=payload.get("order_id"),
+                decline_reason=mapping.decline_reason_for(payload.get("decline_code")),
+                raw=payload,
+            )
+        ]
