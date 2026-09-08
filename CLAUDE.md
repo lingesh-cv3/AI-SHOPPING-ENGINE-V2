@@ -4,10 +4,14 @@ Context for whoever picks this up. Written after a stretch of development that
 produced real features and a real mess, and the honest version of both is more use
 than a tidy summary.
 
-**Read PROGRESS.md before believing anything else here.** It carries what's fixed,
-what's still broken, and what's next, and it is kept current every session - this
-file is architecture and practices, and goes stale the moment it tries to describe
-current state instead.
+**Read Completed.md and PROGRESS.md before believing anything else here.**
+Completed.md is what's built and fixed, verified end to end - the durable
+record. PROGRESS.md is the opposite list: what's still broken, unbuilt, or
+open. Both are kept current every session; this file is architecture and
+practices, and goes stale the moment it tries to describe current state
+instead. The rule that keeps the split honest lives in PROGRESS.md's own
+maintenance note - a finished item moves out of PROGRESS.md into Completed.md
+once every test suite it needs has actually passed, not before.
 
 ---
 
@@ -217,16 +221,17 @@ Frontend, from `storefront/`:
 ```
 npm run build    # tsc -b && vite build - the typecheck guard. npm run dev does NOT
                  # catch type errors, and build did fail for a session the dev server
-                 # never flagged (see the #14 note in PROGRESS.md)
+                 # never flagged (see #14 in Completed.md)
 npm run lint     # eslint .
 npm run dev      # Vite, port 5173
 ```
 
 ## Current status
 
-See PROGRESS.md for what's built, what's broken, and what's not built yet.
-It's updated at the end of every session — read it before assuming anything
-about current state.
+See Completed.md for what's built and fixed, verified end to end. See
+PROGRESS.md for what's still broken, unbuilt, or open. Both are updated at
+the end of every session — read them before assuming anything about current
+state.
 
 ---
 
@@ -327,9 +332,9 @@ Project subagents live in `.claude/agents/`. One line each:
 - **invariant-guard** — read-only check of a diff against the six hard invariants and the idempotency-key rule. Use after any change to `engine/risk`, `engine/execution`, `engine/api`, `engine/db`, or `shared/`.
 - **test-runner** — runs `healthcheck.py` / `fuzz.py` / `auditroutes.py` against the running services and interprets SKIP/FAIL correctly. Use to validate any change to `engine/`.
 - **frontend-verifier** — runs the real typecheck guard (`npm run build`, not `dev`) plus lint, then walks the changed feature by hand. Use after any change under `storefront/`.
-- **progress-scribe** — updates PROGRESS.md in its existing terse style, cross-checked against real git state. Use at the end of a session, not mid-task.
+- **progress-scribe** — updates PROGRESS.md and Completed.md in their existing terse style, cross-checked against real git state. Moves an item from PROGRESS.md to Completed.md only once every test suite it needs has actually passed - never mid-task, and never on the strength of "the code is written." Use at the end of a session, not mid-task.
 - **bug-reproducer** — reproduces a bug first and records the exact call and response, before any fix is written. Use before starting any bug fix, so the eventual regression test asserts against a real reproduction rather than the fix's own logic.
-- **doc-auditor** — reads CLAUDE.md and PROGRESS.md against the actual code and reports contradictions (stale counts, renamed things, drifted claims). Use periodically or whenever a docs claim looks suspicious.
+- **doc-auditor** — reads CLAUDE.md, Completed.md and PROGRESS.md against the actual code and reports contradictions (stale counts, renamed things, drifted claims, or an item described as done in Completed.md that a suite no longer backs). Use periodically or whenever a docs claim looks suspicious.
 
 **Wiring:** after any change under `engine/`, run `invariant-guard` and `test-runner` before considering the change done. After any change under `storefront/`, run `frontend-verifier` before considering the change done. Do this even if not asked explicitly — it's the equivalent of the checks a human would run before calling the work finished.
 
