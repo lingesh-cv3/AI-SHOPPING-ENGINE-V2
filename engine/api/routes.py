@@ -20,7 +20,7 @@ import logging
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from engine import db, expiry
+from engine import copilot, db, expiry
 from engine import session as session_store
 from engine.decision import operation_for
 from engine.risk import RULE_ORDER, AutomationMode, RiskPolicy, explain_rules
@@ -39,6 +39,8 @@ from .schemas import (
     ActionInfo,
     ApprovalDecision,
     ConnectionSummary,
+    CopilotAnswer,
+    CopilotQuestion,
     PolicyUpdate,
     RejectionView,
     RuleView,
@@ -637,6 +639,24 @@ async def merchant_report(
     """
     _adapter(connection_id)
     return await db.merchant_report(connection_id, days=days)
+
+
+@app.post(f"{API}/copilot/{{connection_id}}", response_model=CopilotAnswer)
+async def merchant_copilot(
+    connection_id: str,
+    body: CopilotQuestion,
+    _=Depends(merchant_scoped()),
+) -> CopilotAnswer:
+    """A merchant's own question about their own store, answered from real data.
+
+    Read-only: proposes nothing, decides nothing, executes nothing, and never
+    reaches the risk gate - there is no action here for the gate to classify.
+    Scoped by merchant_scoped the same as /report and /stats, so one client
+    can never ask about another's figures with their own key.
+    """
+    _adapter(connection_id)
+    reply = await copilot.ask(connection_id, body.question)
+    return CopilotAnswer(answer=reply.answer, used_model=reply.used_model)
 
 
 @app.post(f"{API}/admin/expire")

@@ -846,7 +846,20 @@ export const console_api = {
   stats: () => merchantCall<Stats>(`/api/stats/${getConnection()}`),
 
   report: () => merchantCall<MerchantReport>(`/api/report/${getConnection()}`),
+
+  askCopilot: (question: string) =>
+    merchantCall<CopilotAnswer>(`/api/copilot/${getConnection()}`, {
+      method: "POST",
+      body: JSON.stringify({ question }),
+    }),
 };
+
+export interface CopilotAnswer {
+  answer: string;
+  /** False means the model was unreachable and nothing was actually
+   *  answered - the console must not render that as a real figure. */
+  used_model: boolean;
+}
 
 export interface MerchantReport {
   days: number;

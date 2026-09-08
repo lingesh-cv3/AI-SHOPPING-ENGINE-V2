@@ -166,7 +166,7 @@ These features are planned product directions, not implemented functionality.
 
 ### Merchant — Initial Priorities
 
-- [ ] CV3 Merchant Copilot
+- [x] CV3 Merchant Copilot - built and verified end to end, see `Completed.md` #32
 - [ ] AI Store Diagnosis
 - [ ] Recovery Opportunity Radar
 - [ ] Catalog Intelligence

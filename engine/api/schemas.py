@@ -42,6 +42,20 @@ class RejectionView(BaseModel):
     detail: str
 
 
+class CopilotQuestion(BaseModel):
+    """A merchant's own question about their own store."""
+
+    question: str = Field(min_length=1, max_length=500)
+
+
+class CopilotAnswer(BaseModel):
+    """The copilot's reply. `used_model` tells a merchant when nothing was
+    actually answered, rather than letting a fallback sentence pass as one."""
+
+    answer: str
+    used_model: bool
+
+
 class SimulateRequest(BaseModel):
     """Run the pipeline for a situation.
 
