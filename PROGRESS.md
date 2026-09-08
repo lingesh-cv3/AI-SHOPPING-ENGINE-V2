@@ -54,6 +54,11 @@ because they cannot touch money safely.
 Their own console at `/merchant`, behind their own secret key: revenue recovered
 from real outcomes, what shoppers ran into, what was said to them, the ten rules
 (now eleven - see Fixed This Session), and per-action policy that persists.
+**The holdout** - a percentage of new sessions get no assistance at all, so the
+console can show the resolution rate with the assistant against without it,
+proving the engine caused the difference rather than reporting a number that
+would have happened anyway. Off (0%) unless a merchant deliberately turns it on.
+See Fixed This Session, #28.
 
 ### For CV3
 
@@ -71,7 +76,7 @@ conversation or order at the same merchant - see Fixed This Session.
 
 ### Tests
 
-`healthcheck.py` - 86 checks, one path end to end. Reports SKIP rather than FAIL
+`healthcheck.py` - 88 checks, one path end to end. Reports SKIP rather than FAIL
 when the provider is busy, and says how many checks never executed.
 
 `fuzz.py` - random shopper sequences, asserting after every step that the cart
@@ -119,11 +124,6 @@ script tag a merchant adds to their site.
 into a daily or pre-commit gate — it still runs when somebody remembers to run it.
 The class of bug the finger-pointing above kept hitting is now catchable, just not
 yet caught automatically.
-
-**The holdout.** A slice of sessions receiving no assistant, so a merchant can see
-the difference and know the engine caused it. Answers the objection that loses
-deals, nobody in the market does it, and it costs a flag on the session. **Highest
-commercial value of anything unbuilt.**
 
 **A published reliability number.** `eval.py` exists and is unfinished. Nobody in
 this market publishes one.
@@ -624,6 +624,56 @@ below; `npm run build` now exits 0.)
     invariant across 20 sequences (run because this touches
     `execution/service.py` directly), and `auditroutes.py` holds. `npm run build`
     and `npm run lint` both clean (same 7 pre-existing lint errors, untouched).
+
+28. **Built the holdout - the highest commercial value of anything unbuilt.**
+    A slice of new sessions gets no assistance at all, so a merchant can compare
+    their outcome against the assisted group's and see the difference the
+    engine actually caused, rather than a number that includes sales that would
+    have happened anyway.
+
+    Gated behind a new per-merchant policy field, `holdout_percent`, defaulting
+    to 0 - a merchant who never asked for an experiment must never have
+    shoppers silently left unhelped by one, and every existing deterministic
+    test (which assumes every friction turn gets real reasoning) keeps passing
+    unchanged. Threaded through the same path as every other policy field:
+    `RiskPolicy`, `MerchantPolicy` (new column, migrated idempotently the same
+    way the shopper email and `choices_json` columns were), `PolicyUpdate`, the
+    GET/PUT `/api/policy` routes, and startup hydration.
+
+    Assignment lives in a new `session_holdouts` table (`db.holdout_status`):
+    drawn once, at a session's first friction event, and read back unchanged
+    after that - a fresh draw on every friction event would let one shopper
+    land in both groups over a single visit, which is not a controlled
+    comparison of anything. The check sits in `engine/api/chat.py`, before
+    reasoning ever runs: a friction turn for a holdout-assigned session
+    short-circuits to `_holdout_reply`, which records a real `Case`
+    (`is_holdout=True`, a new column on `cases`) and an unresolved `Outcome`,
+    then answers with one fixed, context-free sentence - no diagnosis, no
+    proposal, no model call. A shopper's own freeform question is unaffected
+    either way; the holdout is specifically about the recovery mechanism the
+    business case rests on, not general assistance.
+
+    `merchant_report` gained a holdout comparison (holdout vs. assisted
+    resolution rate, from the same time window), null until at least one
+    holdout case exists so a merchant who has never turned this on sees
+    nothing rather than a confusing 0%-vs-0% panel. The merchant console
+    gained a control for it under "Your settings", and the report gained a
+    "with the assistant vs. without" panel.
+
+    Verified end to end: forced `holdout_percent` to 100% via the API,
+    confirmed a real friction turn returns `risk_rule=HOLDOUT_NO_ASSISTANCE`
+    with `used_model` false and no model call spent, confirmed the same
+    session stays in the holdout group on a second friction turn, confirmed
+    the merchant report splits correctly, then reverted to 0% and confirmed a
+    normal session is completely unaffected. Also verified live in the
+    browser: set 15% through the actual settings UI, reloaded, and confirmed
+    it held - not just the API round-trip. Four new healthcheck checks pin
+    the whole chain. 88 checks total. `auditroutes.py` and `fuzz.py` (every
+    invariant, 20 sequences - run because this touches `chat.py`'s core
+    request path) both hold. `npm run build` and `npm run lint` both clean
+    (same 7 pre-existing lint errors, untouched - one new one was introduced
+    and fixed by moving a derived-state update out of `useEffect` and into
+    render, per React's own pattern for state derived from a prop).
 
 ---
 
