@@ -856,3 +856,24 @@ async def close_handover(
             logger.exception("could not pass an update to the shopper")
 
     return {"case_id": case_id, "changed": True}
+
+
+@app.post(f"{API}/ops/copilot", response_model=CopilotAnswer)
+async def ops_copilot(
+    body: CopilotQuestion,
+    _=Depends(operator),
+) -> CopilotAnswer:
+    """A CV3 operator's own question about workload across every merchant
+    they cover, answered from real data.
+
+    Read-only, the same shape as the merchant copilot: proposes nothing,
+    decides nothing, executes nothing, and never reaches the risk gate.
+    Gated by the same `operator` dependency as the rest of /api/ops/*, so
+    this answers from exactly the merchants that operator can already see -
+    no per-merchant key can reach it, and no wider set than /ops/queue
+    itself already exposes.
+    """
+    reply = await copilot.ask_ops(
+        body.question, _operator_connections(), MERCHANT_NAMES
+    )
+    return CopilotAnswer(answer=reply.answer, used_model=reply.used_model)

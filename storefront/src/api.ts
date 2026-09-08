@@ -1057,6 +1057,12 @@ export const ops_api = {
 
   stats: () => opsCall<OpsStats>("/api/ops/stats"),
 
+  askCopilot: (question: string) =>
+    opsCall<CopilotAnswer>("/api/ops/copilot", {
+      method: "POST",
+      body: JSON.stringify({ question }),
+    }),
+
   /** The connection id comes from the item, not from the current shop. */
   decide: (
     connectionId: string,

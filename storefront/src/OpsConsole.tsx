@@ -1,6 +1,7 @@
 ﻿import { useCallback, useEffect, useState } from "react";
 import { NotAuthorised, operatorKey } from "./api";
 import { OperatorSignIn } from "./OperatorSignIn";
+import { Copilot } from "./Copilot";
 import {
   ops_api,
   type Decision,
@@ -9,6 +10,28 @@ import {
   type OpsQueueItem,
   type OpsStats,
 } from "./api";
+
+/** A handful of real questions the cross-merchant workload data can answer,
+ *  shown as starter chips before the first question is typed. */
+const OPS_SUGGESTED_QUESTIONS = [
+  "What's waiting on me right now, oldest first?",
+  "Which merchant has the longest wait?",
+  "What's been decided today?",
+  "Are there any handovers nobody has picked up?",
+];
+
+function OpsCopilot() {
+  return (
+    <Copilot
+      eyebrow="Operations copilot"
+      title="Ask about your queue"
+      intro="Ask in plain language - what's waiting, which merchant needs attention, what's been decided. Answers are grounded in real workload data across every merchant you cover, never guessed."
+      suggestions={OPS_SUGGESTED_QUESTIONS}
+      placeholder="Ask a question about your queue…"
+      ask={ops_api.askCopilot}
+    />
+  );
+}
 
 /**
  * Where a CV3 operator works.
@@ -165,6 +188,8 @@ export function OpsConsole() {
           />
         </div>
       )}
+
+      <OpsCopilot />
 
       {handovers.length > 0 && (
         <section className="panel handovers">

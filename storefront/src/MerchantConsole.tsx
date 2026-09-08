@@ -1,7 +1,6 @@
 import { NotAuthorised, getConnection, merchantKey } from "./api";
 import { MerchantSignIn } from "./MerchantSignIn";
-import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   console_api,
   type ActionInfo,
@@ -10,14 +9,9 @@ import {
   type Policy,
   type Rule,
 } from "./api";
+import { Copilot } from "./Copilot";
 import { Gates } from "./Gates";
 import { MerchantReport } from "./MerchantReport";
-
-interface CopilotTurn {
-  question: string;
-  answer: string;
-  usedModel: boolean;
-}
 
 /** A handful of real questions the data can actually answer, shown as
  *  starter chips so a merchant sees what this can do before typing
@@ -30,218 +24,16 @@ const SUGGESTED_QUESTIONS = [
   "What can this platform do?",
 ];
 
-/** Turns **bold** and simple "- " bullet lines into real markup, and a
- *  "| a | b |" markdown table into an actual table - without pulling in a
- *  markdown library for what the model reliably produces: short prose,
- *  the occasional bold figure, an occasional bulleted or tabular list. */
-function renderAnswer(text: string) {
-  const lines = text.split("\n");
-  const blocks: ReactNode[] = [];
-  let bullets: string[] = [];
-  let table: string[][] = [];
-
-  const flushBullets = () => {
-    if (bullets.length) {
-      blocks.push(
-        <ul className="copilot-list" key={`ul-${blocks.length}`}>
-          {bullets.map((b, i) => (
-            <li key={i}>{renderInline(b)}</li>
-          ))}
-        </ul>,
-      );
-      bullets = [];
-    }
-  };
-  const flushTable = () => {
-    if (table.length) {
-      const [header, ...rows] = table;
-      blocks.push(
-        <div className="copilot-table-wrap" key={`tbl-${blocks.length}`}>
-          <table className="copilot-table">
-            <thead>
-              <tr>
-                {header.map((h, i) => (
-                  <th key={i}>{renderInline(h)}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, i) => (
-                <tr key={i}>
-                  {row.map((cell, j) => (
-                    <td key={j}>{renderInline(cell)}</td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>,
-      );
-      table = [];
-    }
-  };
-
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (!line) {
-      flushBullets();
-      flushTable();
-      continue;
-    }
-    if (/^\|.*\|$/.test(line)) {
-      const cells = line
-        .slice(1, -1)
-        .split("|")
-        .map((c) => c.trim());
-      // Skip a markdown separator row ("---|---").
-      if (!cells.every((c) => /^:?-{2,}:?$/.test(c))) table.push(cells);
-      continue;
-    }
-    flushTable();
-    if (/^[-*]\s+/.test(line)) {
-      bullets.push(line.replace(/^[-*]\s+/, ""));
-      continue;
-    }
-    flushBullets();
-    blocks.push(<p key={`p-${blocks.length}`}>{renderInline(line)}</p>);
-  }
-  flushBullets();
-  flushTable();
-  return blocks;
-}
-
-function renderInline(text: string): ReactNode {
-  const parts = text.split(/(\*\*[^*]+\*\*)/g);
-  return parts.map((part, i) =>
-    part.startsWith("**") && part.endsWith("**") ? (
-      <strong key={i}>{part.slice(2, -2)}</strong>
-    ) : (
-      part
-    ),
-  );
-}
-
-/**
- * A merchant's own question about their own store, answered in plain
- * language from real, live data - report figures, platform capabilities,
- * current settings, stock alerts, and what shoppers search for and don't
- * find. Read-only: it cannot approve anything or change a setting, and says
- * so if asked. Keeps a running transcript rather than one overwritten
- * answer, since a second question building on the first is the normal way
- * to use something like this.
- */
-function Copilot() {
-  const [question, setQuestion] = useState("");
-  const [turns, setTurns] = useState<CopilotTurn[]>([]);
-  const [asking, setAsking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const transcriptRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const el = transcriptRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [turns, asking]);
-
-  async function ask(text?: string) {
-    const q = (text ?? question).trim();
-    if (!q || asking) return;
-    setQuestion("");
-    setAsking(true);
-    setError(null);
-    try {
-      const reply = await console_api.askCopilot(q);
-      setTurns((prev) => [
-        ...prev,
-        { question: q, answer: reply.answer, usedModel: reply.used_model },
-      ]);
-    } catch {
-      setError("Could not reach the copilot. Is the engine running?");
-    } finally {
-      setAsking(false);
-    }
-  }
-
+function MerchantCopilot() {
   return (
-    <section className="panel copilot-panel">
-      <div className="panel-head">
-        <div>
-          <span className="eyebrow">Merchant copilot</span>
-          <h3 className="copilot-title">Ask about your store</h3>
-        </div>
-        <span className="copilot-badge">Read-only</span>
-      </div>
-      <div className="panel-body copilot-body">
-        {turns.length === 0 ? (
-          <div className="copilot-empty">
-            <p>
-              Ask in plain language - shoppers helped, what's out of stock,
-              what people search for and can't find, or what this platform
-              can do. Answers are grounded in your real data, never guessed.
-            </p>
-            <div className="copilot-chips">
-              {SUGGESTED_QUESTIONS.map((q) => (
-                <button
-                  key={q}
-                  className="copilot-chip"
-                  onClick={() => ask(q)}
-                  disabled={asking}
-                >
-                  {q}
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="copilot-transcript" ref={transcriptRef}>
-            {turns.map((t, i) => (
-              <div className="copilot-turn" key={i}>
-                <div className="copilot-question">{t.question}</div>
-                <div className="copilot-answer">
-                  {renderAnswer(t.answer)}
-                  {!t.usedModel && (
-                    <p className="copilot-fallback-note">
-                      Not generated by the model - shown as a fallback.
-                    </p>
-                  )}
-                </div>
-              </div>
-            ))}
-            {asking && (
-              <div className="copilot-turn">
-                <div className="copilot-answer copilot-thinking">
-                  <span />
-                  <span />
-                  <span />
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {error && <p className="note">{error}</p>}
-
-        <div className="copilot-inputrow">
-          <input
-            type="text"
-            className="copilot-input"
-            value={question}
-            placeholder="Ask a question about your store…"
-            onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") ask();
-            }}
-            aria-label="Ask the copilot a question"
-          />
-          <button
-            className="copilot-ask"
-            disabled={asking || !question.trim()}
-            onClick={() => ask()}
-          >
-            {asking ? "Asking…" : "Ask"}
-          </button>
-        </div>
-      </div>
-    </section>
+    <Copilot
+      eyebrow="Merchant copilot"
+      title="Ask about your store"
+      intro="Ask in plain language - shoppers helped, what's out of stock, what people search for and can't find, or what this platform can do. Answers are grounded in your real data, never guessed."
+      suggestions={SUGGESTED_QUESTIONS}
+      placeholder="Ask a question about your store…"
+      ask={console_api.askCopilot}
+    />
   );
 }
 /**
@@ -350,7 +142,7 @@ export function MerchantConsole() {
   return (
     <div className="layout">
       <main style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-        <Copilot />
+        <MerchantCopilot />
         <MerchantReport />
 
         <section className="panel">

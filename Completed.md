@@ -87,6 +87,13 @@ proposes nothing, decides nothing, writes nothing. See Completed Work, #32.
 One queue at `/operations` across every client, behind the operator key. Approvals
 with rejection notes that stay private, and **handovers** - work needing a person
 rather than a decision - with a waiting clock and a message back to the shopper.
+**The Operations Copilot** - a free-text "ask about your queue" panel in
+`/operations`, answering from the same cross-merchant stats, pending queue,
+handover and history data the console already shows, resolving bare connection
+ids to real merchant names, and read-only: it proposes nothing, decides
+nothing, writes nothing. Declines merchant-specific questions and redirects to
+the Merchant Copilot instead of answering them from cross-merchant data. See
+Completed Work, #33.
 
 ### Security
 
@@ -1022,3 +1029,82 @@ below; `npm run build` now exits 0.)
     touching no existing route's behaviour. `npm run build` and `npm run
     lint` both clean (same 7 pre-existing `set-state-in-effect` errors in
     unrelated files, none in `MerchantConsole.tsx`).
+
+33. **Built the Operations Copilot** - CV3 Operations Roadmap Phase 1, item #1
+    - the operator-side counterpart to the Merchant Copilot (#32). A free-text
+    "ask about your queue" panel in `/operations`, answering from the same
+    cross-merchant data the console already shows: `db.ops_stats`,
+    `db.pending_across`, `db.handovers_across`, `db.decided_across` - the
+    identical repository functions `/api/ops/stats`, `/api/ops/queue`,
+    `/api/ops/handovers` and `/api/ops/history` already use, for the
+    operator's visible connection set.
+
+    `engine/copilot/service.py`'s shared "call the model, handle the
+    fallback" logic was pulled out into a new `_complete(system, context)`
+    helper, reused by both the existing merchant-side `ask()` (confirmed by
+    diff to be a straight move, no behaviour change) and a new
+    `ask_ops(question, connection_ids, merchant_names)`. `ask_ops` resolves
+    each row's bare `connection_id` to a human-readable merchant name via a
+    `merchant_names` dict (mirroring the enrichment the existing ops routes
+    already do) before building the JSON context, and sends it against a new
+    `OPS_SYSTEM_PROMPT` that forbids inventing a merchant name, case id, or
+    figure not in that context; forbids the model claiming it can act
+    (approve, close a handover, change a setting); and - the one adapted from
+    a real gap found while writing it - instructs the model to decline a
+    merchant-specific question ("what's my resolution rate") and point to the
+    Merchant Copilot instead of answering it from cross-merchant workload
+    data, since that's a different question this copilot has no business
+    answering. New route `POST /api/ops/copilot` in `engine/api/routes.py`,
+    gated by the same `Depends(operator)` every other `/api/ops/*` route
+    already uses, calling the existing (unchanged) `_operator_connections()`
+    helper and `MERCHANT_NAMES`.
+
+    Frontend: the merchant console's copilot UI was extracted into a shared,
+    parameterized `storefront/src/Copilot.tsx` (props: eyebrow, title,
+    intro, suggestions, placeholder, an `ask` function) - confirmed no
+    behaviour or visual change for the merchant console after the
+    extraction. `MerchantConsole.tsx` now uses a thin `MerchantCopilot`
+    wrapper around it; `OpsConsole.tsx` gained a matching `OpsCopilot`
+    wrapper and panel, placed after the stat grid and before the handovers
+    panel, with its own starter questions ("What's waiting on me right now,
+    oldest first?", "Which merchant has the longest wait?", "What's been
+    decided today?", "Are there any handovers nobody has picked up?").
+
+    Verified end to end against the running engine, not just read: a live
+    declined Kettle payment was triggered specifically to give the copilot
+    something real and current to find, then a direct API call confirmed the
+    "waiting on me" answer named the actual merchant ("Kettle & Bloom
+    Coffee", never the bare `conn_kettle`), with real wait times and real
+    friction/action types. A merchant-specific question ("what's my
+    resolution rate this month?") was confirmed to get an honest decline
+    pointing to the merchant console, per the prompt's explicit instruction
+    - proving that boundary holds in practice, not just on paper. The
+    merchant copilot was re-checked after the shared-component extraction
+    and still returns the same real answer as before - a direct regression
+    check on the refactor, not an assumption of safety by similarity.
+
+    `invariant-guard` reviewed the diff: confirmed `_operator_connections()`
+    is unchanged pre-existing behaviour, confirmed `ask_ops` and everything
+    it calls are pure reads with no db/adapter writes reachable, confirmed
+    the new context is still pure informational JSON with no path back into
+    the risk gate, confirmed the `_complete()` extraction left the
+    merchant-side `ask()`'s behaviour unchanged. Verdict: SAFE, no
+    violations. One pre-existing gap noted, not introduced or worsened here:
+    `_complete()` only catches `LLMUnavailable` specifically, so a different,
+    unexpected exception from the OpenAI client would leak as a raw 500
+    rather than the honest fallback message - this already existed in the
+    merchant copilot before this session; flagged as a known gap, not fixed
+    in this pass.
+
+    `test-runner` ran all three suites against the live, extended engine:
+    `healthcheck.py` 101 PASS / 2 FAIL / 0 SKIP, `fuzz.py` 20/20 sequences
+    (1200 assertions), `auditroutes.py` held. The 2 FAILs are pre-existing
+    and unrelated - a documented model-behaviour difference from this
+    session's earlier Groq-to-OpenAI (gpt-4o-mini) provider switch (two
+    checks tied to gpt-4o-mini sometimes proposing fewer recovery-action
+    candidates than Groq's model did on specific edge-case turns), confirmed
+    by instrumenting the live responses rather than modifying the test files,
+    and already known/tracked separately before this feature was built - zero
+    regressions attributable to the copilot/refactor changes themselves.
+    `npm run build` and `npm run lint` both clean (same pre-existing lint
+    errors in unrelated files, none new).

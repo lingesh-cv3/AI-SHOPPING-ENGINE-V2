@@ -1,17 +1,21 @@
-"""The merchant copilot.
+"""The merchant and operations copilots.
 
-Answers a merchant's own questions about their own store, in plain language,
-grounded in the same figures the merchant console already shows them - never
-in anything invented. Read-only by design: this module proposes no action,
-decides nothing, and never touches the risk gate, because there is nothing
-here to decide - a question about last week's resolution rate has no verdict
-for the gate to reach. Acting on a merchant's instruction ("approve that
-case", "turn off refunds") is a different, later capability - the roadmap's
-own Phase 3 "Merchant Approval & Action Center" - and deliberately not what
-this module does. Building it as a chatbot response is the right shape here
-specifically because answering a question is all it is; CLAUDE.md's own rule
-against isolated chatbot responses is about the actions/risk/outcome case,
-which this is not.
+Two read-only Q&A surfaces sharing one module because they share everything
+except which questions they can answer: `ask()` answers a merchant's
+questions about their own store; `ask_ops()` answers a CV3 operator's
+questions about workload across every merchant they cover (CLAUDE.md's CV3
+Operations Roadmap #1, "CV3 Operations Copilot"). Both are grounded in real
+data given to them for that turn - never in anything invented - and both
+propose no action, decide nothing, and never touch the risk gate, because
+there is nothing here to decide - a question about last week's resolution
+rate, or about which merchant has the oldest wait right now, has no verdict
+for the gate to reach. Acting on an instruction ("approve that case", "turn
+off refunds") is a different, later capability - the roadmap's own Phase 3
+"Merchant Approval & Action Center" / Operations "Adaptive Approval Queue" -
+and deliberately not what this module does. Building each as a chatbot
+response is the right shape here specifically because answering a question
+is all it is; CLAUDE.md's own rule against isolated chatbot responses is
+about the actions/risk/outcome case, which this is not.
 """
 
 from __future__ import annotations
@@ -127,7 +131,18 @@ async def ask(
         report, pending, capabilities, policy, rules, actions,
         catalog_alerts, unmet_demand, question,
     )
+    return await _complete(SYSTEM_PROMPT, context)
 
+
+async def _complete(system: str, context: str) -> CopilotReply:
+    """Shared by `ask()` and `ask_ops()`: call the model over one already-built
+    context string, or fall back to an honest, non-invented answer.
+
+    Kept as one place so a merchant's and an operator's copilot degrade the
+    same way under the same conditions (no key configured, provider
+    unreachable) rather than drifting into two different fallback sentences
+    over time.
+    """
     if not LLMConfig.available():
         return CopilotReply(
             answer=(
@@ -140,7 +155,7 @@ async def ask(
     try:
         client = LLMClient()
         result = await client.complete(
-            system=SYSTEM_PROMPT,
+            system=system,
             messages=[{"role": "user", "content": context}],
         )
     except LLMUnavailable as exc:
@@ -213,5 +228,147 @@ def _build_context(
     }
     return (
         f"Here is your shop's current data:\n{json.dumps(data, indent=2)}\n\n"
+        f"Question: {question}"
+    )
+
+
+#: The operator's own system prompt. Deliberately separate from the merchant
+#: one rather than a shared template with a flag: an operator's data is cross-
+#: merchant, and conflating the two prompts risks the model answering an
+#: operator's question with one merchant's figures, or vice versa - clearer
+#: to keep the two prompts textually distinct than to parametrize one.
+OPS_SYSTEM_PROMPT = """You are CV3's operations copilot. You answer a CV3 operator's \
+questions about workload across every merchant they cover, using only the data given to \
+you for this turn - never a number, a merchant name, or a claim you were not given. If \
+the data does not answer their question, say so plainly rather than guessing.
+
+The data given to you each turn covers:
+- **Workload right now**: how many approvals are waiting across all merchants, the
+  longest anyone has been waiting, and today's decided-so-far count.
+- **The approval queue**: what's waiting on a person right now, oldest first, each with
+  which merchant it belongs to, the action proposed, and how long it's waited.
+- **Handovers**: cases handed to a person where the decision is already made and someone
+  just needs to act (distinct from an approval, which is still asking "may I?").
+- **Recent decisions**: what was approved or rejected recently and what came of it,
+  including cases where an approval later failed on the platform.
+
+This is a workload and triage question, not any one merchant's own performance report -
+a question like "how is my shop doing" or "what's my resolution rate" is a Merchant
+Copilot question, not yours; say so and point them to the merchant console rather than
+answering it from operator-side data that doesn't measure that.
+
+There is no cross-merchant revenue, incident, or SLA-breach data available yet (that's
+future roadmap work) - say so plainly if asked, never estimate one from workload counts.
+
+Rules:
+- Never invent a number, a merchant name, a case id, or a shopper's identity. Every claim \
+you state must come from the data given to you this turn.
+- You cannot take any action - you cannot approve anything, close a handover, or change a \
+setting. If asked to do one of those, say plainly that you can only report on what's \
+waiting or what's already happened, and point them to the queue to actually act.
+- Be concise. An operator triaging their queue wants a specific, actionable answer, not a
+  report.
+- Cite the actual figure or merchant name when you have one ("Kettle & Bloom, waiting 14
+  minutes", not "one of them, waiting a while").
+- Never mention that you are an AI model, a prompt, or anything about how you work \
+internally - answer as the operations console's own dashboard would.
+"""
+
+
+async def ask_ops(
+    question: str, connection_ids: list[str], merchant_names: dict[str, str]
+) -> CopilotReply:
+    """Answer one operator's question about workload across every merchant
+    they cover.
+
+    `connection_ids` is the same set `_operator_connections()` already
+    resolves for /ops/queue, /ops/history, /ops/stats and /ops/handovers -
+    passed in rather than resolved here, so this module never has to know
+    how an operator's visibility is determined; that stays the route's job.
+    `merchant_names` is the same `MERCHANT_NAMES` lookup those routes already
+    use to turn a connection id into a name a human reads - the repository
+    functions here return bare `connection_id`, same as they do for those
+    routes, and each one is resolved through this the same way before the
+    model ever sees it, so the answer names "Kettle & Bloom" rather than
+    "conn_kettle". Every call re-reads current data, the same "never go
+    stale between questions" reasoning as the merchant copilot's `ask()`.
+    """
+    stats = await db.ops_stats(connection_ids)
+    pending = await db.pending_across(connection_ids, limit=20)
+    handovers, handover_total = await db.handovers_across(
+        connection_ids, offset=0, limit=20
+    )
+    decisions = await db.decided_across(connection_ids, limit=20)
+
+    def name_for(cid: str | None) -> str | None:
+        return merchant_names.get(cid, cid) if cid else cid
+
+    stats = {
+        **stats,
+        "by_merchant": {
+            name_for(cid): count for cid, count in (stats.get("by_merchant") or {}).items()
+        },
+    }
+    for row in pending:
+        row["merchant_name"] = name_for(row.get("connection_id"))
+    for row in handovers:
+        row["merchant_name"] = name_for(row.get("connection_id"))
+    for row in decisions:
+        row["merchant_name"] = name_for(row.get("connection_id"))
+
+    context = _build_ops_context(stats, pending, handovers, handover_total, decisions, question)
+    return await _complete(OPS_SYSTEM_PROMPT, context)
+
+
+def _build_ops_context(
+    stats: dict,
+    pending: list[dict],
+    handovers: list[dict],
+    handover_total: int,
+    decisions: list[dict],
+    question: str,
+) -> str:
+    """The operator's real cross-merchant workload, as the model's entire
+    world for this turn. Same JSON-not-prose reasoning as `_build_context`."""
+    data = {
+        "workload_right_now": {
+            "approvals_waiting": stats.get("waiting"),
+            "oldest_wait_minutes": stats.get("oldest_wait_minutes"),
+            "waiting_by_merchant": stats.get("by_merchant"),
+            "decided_today": stats.get("today"),
+        },
+        "approval_queue_oldest_first": [
+            {
+                "merchant": p.get("merchant_name"),
+                "action": p.get("action_type"),
+                "friction": p.get("friction_type"),
+                "waiting_minutes": p.get("waiting_minutes"),
+                "order_id": p.get("order_id"),
+            }
+            for p in pending
+        ],
+        "handovers_someone_needs_to_act_on": {
+            "total_open": handover_total,
+            "shown": [
+                {
+                    "merchant": h.get("merchant_name"),
+                    "friction": h.get("friction_type"),
+                    "waiting_minutes": h.get("waiting_minutes"),
+                }
+                for h in handovers
+            ],
+        },
+        "recent_decisions": [
+            {
+                "merchant": d.get("merchant_name"),
+                "action": d.get("action_type"),
+                "state": d.get("state"),
+                "final_state": d.get("final_state"),
+            }
+            for d in decisions
+        ],
+    }
+    return (
+        f"Here is the current cross-merchant workload:\n{json.dumps(data, indent=2)}\n\n"
         f"Question: {question}"
     )
