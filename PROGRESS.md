@@ -517,6 +517,33 @@ below; `npm run build` now exits 0.)
     still lays out correctly under the same rework. `npm run build` and `npm run
     lint` both clean (same 7 pre-existing lint errors, untouched).
 
+25. **Card 0006 - the only way to demo an approved-then-failed recovery live -
+    was not reachable anywhere in the shopper UI.** Reported directly, after #19
+    (this session) claimed the scenario was demoable. The card picker was one
+    shared list (1111/0002/0003) across both merchants, a leftover from an
+    earlier shared-list attempt that was reverted for a different reason (a card
+    doing nothing on one shop read as broken) - but the revert never restored
+    each platform's actual declined-card set, so Northfield's 0004 and Kettle's
+    0005/0006 were simply absent everywhere, not merchant-gated as intended.
+
+    `CARD_OPTIONS` in `CartPanel.tsx` is now keyed by connection: `conn_demo`
+    (Northfield, no recovery capability - every decline there escalates outright)
+    gets 1111/0002/0003/0004; `conn_kettle` (can recover) gets
+    1111/0002/0003/0005/0006. Verified end to end in a real browser across all
+    three surfaces, not just the build: paid with 0006 on Kettle as a shopper
+    (declined, chat opened with "someone at the shop needs to approve it"),
+    approved the resulting case in the operations console (landed in history as
+    "approved, did not run" with the exact "has not been told it worked" note),
+    and confirmed the case appears in the Kettle merchant console's activity feed.
+    Northfield's picker confirmed to show 0004 and not 0005/0006.
+
+    The instruction behind this fix, worth restating: a claim that something is
+    "done" is only true if it is reachable through the actual UI on all three
+    surfaces (shopper, operations, merchant) that a real user would use - not
+    just provable by a script or a direct API call. `demo_reset.py` and
+    `healthcheck.py` calling `card_last4: "0006"` directly was not the same claim
+    as a shopper being able to select it.
+
 ---
 
 ## Known Issues / Pending
