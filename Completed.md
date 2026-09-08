@@ -834,6 +834,27 @@ below; `npm run build` now exits 0.)
     `MerchantReport`, plus `console_api.askCopilot` and the `CopilotAnswer`
     type in `api.ts`.
 
+    Extended the same session, before ever being committed: a live test
+    asking "what are the current capabilities of this site" exposed that
+    the copilot had no capabilities/policy/rules/actions data in its
+    context at all - it only ever fetched report + pending approvals, so
+    that class of question was unanswerable even when the model was
+    reachable, not just when throttled. `ask()` now takes optional
+    `capabilities`/`policy`/`rules`/`actions` keyword params folded into the
+    same JSON context by a new `_build_context` signature. The four existing
+    routes `GET /connections/{id}/capabilities`, `GET /policy/{id}`,
+    `GET /policy/rules`, `GET /policy/actions` had their bodies extracted
+    into shared helpers (`_capabilities_dict`, `_policy_dict`, `_rules_list`,
+    `_actions_list`) so `merchant_copilot` can call the same helpers and pass
+    real data in; each route now just calls its helper and returns the
+    result unchanged (verified identical behaviour). The system prompt was
+    updated to describe all four categories - performance figures, platform
+    capabilities, risk policy, risk rules/action types - and to tell the
+    model that a "what can this site do" question is answerable from the
+    capabilities/actions data, not something to brush off. The copilot now
+    answers from report figures, platform capabilities, risk policy, and
+    risk rules/action types together.
+
     Verified end to end against the running engine (restarted to pick up the
     route), not just read: a real question against Northfield's key returned
     an answer citing the exact `shoppers_helped` figure from
@@ -861,6 +882,44 @@ below; `npm run build` now exits 0.)
     is a clean regression pass confirming nothing else broke, not new
     coverage of the copilot route.
 
+    The extension (capabilities/policy/rules/actions folded in) was
+    re-reviewed and re-tested separately rather than assumed safe by
+    similarity. `invariant-guard` confirmed the four extracted helpers
+    preserve identical auth/response behaviour to the original routes;
+    confirmed `merchant_copilot` bypassing the individual
+    `Depends(merchant_scoped())` on the helpers is safe because
+    `merchant_copilot`'s own `Depends(merchant_scoped())` already validates
+    `connection_id` against the caller's key before any helper is called -
+    verified by reading `merchant_scoped()`'s actual implementation in
+    `engine/api/auth.py`, not just observed behaviour; confirmed
+    `_capabilities_dict`'s only possible `HTTPException` (404, unknown
+    connection) is caught in `merchant_copilot`'s try/except rather than
+    leaking raw; and confirmed the new context is still pure read-only
+    informational data with no path back into the risk gate. Verdict: SAFE,
+    no violations. `test-runner` re-ran all three suites against the live,
+    refactored engine: `healthcheck.py` 96 PASS / 0 FAIL / 4 SKIP (SKIPs are
+    the usual Groq-throttle ones, unrelated - the two checks directly
+    exercising the refactored code, policy-persistence and
+    empty-allowlist, both passed), `fuzz.py` 20/20 sequences (1200
+    assertions), `auditroutes.py` held including the four
+    specifically-refactored routes. Direct verification without spending a
+    model call: called `_capabilities_dict`, `_policy_dict`, `_rules_list`,
+    `_actions_list` directly against `conn_demo` and confirmed real data
+    (11 operations, STANDARD mode, 11 risk rules, 20 action types) resolves
+    correctly; separately called `_build_context` directly with stub data to
+    confirm the new fields serialize into the prompt correctly. One real
+    live end-to-end proof once the throttle briefly cleared: asked the
+    running engine "what are the current capabilities of this site" against
+    Northfield's real key and got back a real model-generated answer
+    (`used_model: true`) correctly describing Northfield's real capability
+    declaration - no webhooks, no payment recovery, 10 supported operations
+    listed by name, and `recoverPayment` correctly named as the one
+    unsupported operation with the adapter's real reason ("platform exposes
+    no payment-recovery or refund endpoint"). A follow-up question
+    immediately re-hit the throttle (`used_model: false`, the honest
+    fallback), confirming this is the documented Groq free-tier constraint
+    (CLAUDE.md's "The constraint") rather than a code defect.
+
     Frontend: `npm run build` and `npm run lint` both clean (same 7
     pre-existing `set-state-in-effect` lint errors, none in the new code).
     Live-verified in a real browser against the running Vite dev server
@@ -878,3 +937,9 @@ below; `npm run build` now exits 0.)
     No conversation memory - each question stands alone, the same scope
     `/api/simulate` already has - which is a documented, deliberate limit
     of this first version, not a gap found and left unfixed.
+
+    The capabilities/policy/rules/actions extension touched no frontend
+    files - `npm run build` re-confirmed clean against the extended
+    backend, but no new browser walkthrough was needed since the UI itself
+    (the Ask panel, its states) was already verified above and is unchanged
+    by this extension.

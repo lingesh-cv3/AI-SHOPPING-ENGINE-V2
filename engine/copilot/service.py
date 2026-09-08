@@ -30,18 +30,36 @@ logger = logging.getLogger(__name__)
 #: do not count toward the rate limit. Anything that varies per question belongs
 #: in the user message, never here.
 SYSTEM_PROMPT = """You are CV3's merchant copilot. You answer a merchant's questions about \
-their own shop, using only the figures given to you for this turn - never a number, an \
+their own shop, using only the data given to you for this turn - never a number, an \
 order id, or a claim you were not given. If the data does not answer their question, say so \
 plainly rather than guessing or estimating.
 
+The data given to you each turn covers four things a merchant might ask about:
+- **Performance figures**: shoppers helped, resolution rate, revenue recovered, what
+  shoppers ran into, what is waiting on them right now.
+- **Platform capabilities**: what their specific commerce platform can actually do through
+  this engine (e.g. whether it supports payment recovery, webhooks, which operations are
+  available and why an unsupported one isn't).
+- **Risk policy**: their current automation mode, which actions are set to run
+  automatically vs. always need a person, and their holdout percentage.
+- **Risk rules and action types**: the fixed rules that decide automatic vs.
+  needs-approval vs. blocked, and which actions exist and their risk properties
+  (financial, reversible, whether they touch customer data).
+
+A question like "what can this site do" or "what are your capabilities" is answered from
+the platform-capabilities and action-types data, not brushed off as unanswerable - that
+data is given to you specifically to answer questions like that.
+
 Rules:
-- Never invent a number, an order id, or a shopper's identity. Every figure you state must \
-come from the data given to you this turn.
+- Never invent a number, an order id, a capability, or a shopper's identity. Every claim \
+you state must come from the data given to you this turn.
 - You cannot take any action - you cannot approve anything, issue a refund, or change a \
 setting. If asked to do one of those, say plainly that you can only report on what has \
-already happened, and point them to the approval queue or their settings to actually do it.
+already happened or is currently configured, and point them to the approval queue or \
+their settings to actually do it.
 - Be concise. A merchant asking a quick question wants a specific answer, not a report.
-- Cite the actual figure when you have one ("74%", not "most of them").
+- Cite the actual figure or fact when you have one ("74%", not "most of them"; "payment \
+recovery is supported on this platform", not "some things are supported").
 - Never mention that you are an AI model, a prompt, or anything about how you work \
 internally - answer as the shop's own dashboard would.
 """
@@ -58,7 +76,15 @@ class CopilotReply:
     model_name: str | None = None
 
 
-async def ask(connection_id: str, question: str) -> CopilotReply:
+async def ask(
+    connection_id: str,
+    question: str,
+    *,
+    capabilities: dict | None = None,
+    policy: dict | None = None,
+    rules: list[dict] | None = None,
+    actions: list[dict] | None = None,
+) -> CopilotReply:
     """Answer one question about one merchant's store.
 
     Every call re-reads the merchant's own current data - report figures,
@@ -66,10 +92,19 @@ async def ask(connection_id: str, question: str) -> CopilotReply:
     questions. No conversation memory yet: each question stands alone, the
     same way /api/simulate does for the shopper side. Multi-turn memory is a
     natural extension, not something this first version needs to claim.
+
+    `capabilities`, `policy`, `rules` and `actions` are optional and supplied
+    by the caller (the route already assembles the identical shapes for
+    /connections/{id}/capabilities, /policy/{id}, /policy/rules and
+    /policy/actions) so a merchant can ask what their platform can do, what
+    their current settings are, or how the risk gate decides - not just
+    "how many shoppers" style report questions. Omitted when a caller can't
+    supply them (e.g. a future non-HTTP caller); the model is told plainly
+    when a category of data wasn't given, rather than guessing.
     """
     report = await db.merchant_report(connection_id, days=30)
     pending = await db.pending_approvals(connection_id, limit=10)
-    context = _build_context(report, pending, question)
+    context = _build_context(report, pending, capabilities, policy, rules, actions, question)
 
     if not LLMConfig.available():
         return CopilotReply(
@@ -100,8 +135,16 @@ async def ask(connection_id: str, question: str) -> CopilotReply:
     )
 
 
-def _build_context(report: dict, pending: list[dict], question: str) -> str:
-    """The merchant's real figures, as the model's entire world for this turn.
+def _build_context(
+    report: dict,
+    pending: list[dict],
+    capabilities: dict | None,
+    policy: dict | None,
+    rules: list[dict] | None,
+    actions: list[dict] | None,
+    question: str,
+) -> str:
+    """The merchant's real figures and settings, as the model's entire world for this turn.
 
     Serialized as JSON rather than folded into prose, so the model reads
     exact values rather than a paraphrase of them that could drift from the
@@ -129,6 +172,14 @@ def _build_context(report: dict, pending: list[dict], question: str) -> str:
             }
             for p in pending
         ],
+        "platform_capabilities": capabilities
+        if capabilities is not None
+        else "not supplied this turn",
+        "current_risk_policy": policy if policy is not None else "not supplied this turn",
+        "risk_rules_in_order": rules if rules is not None else "not supplied this turn",
+        "action_types_and_their_risk_properties": (
+            actions if actions is not None else "not supplied this turn"
+        ),
     }
     return (
         f"Here is your shop's current data:\n{json.dumps(data, indent=2)}\n\n"

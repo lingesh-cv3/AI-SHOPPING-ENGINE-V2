@@ -149,14 +149,13 @@ async def list_connections() -> list[ConnectionSummary]:
     return out
 
 
-@app.get(f"{API}/connections/{{connection_id}}/capabilities")
-async def get_capabilities(
-    connection_id: str, _=Depends(merchant_scoped())
-) -> dict:
+async def _capabilities_dict(connection_id: str) -> dict:
     """What this connection's platform can actually do.
 
     The honest answer, straight from the adapter. Unsupported operations carry the
-    reason, so the console can explain rather than just show a cross.
+    reason, so the console (and the copilot) can explain rather than just show a
+    cross. Factored out of the route below so the copilot can reuse the identical
+    shape rather than a second, drifting summary of the same data.
     """
     _adapter(connection_id)
     caps = await engine.registry.get(connection_id, force=True)
@@ -179,12 +178,19 @@ async def get_capabilities(
     }
 
 
-@app.get(f"{API}/policy/rules", response_model=list[RuleView])
-def get_rules() -> list[RuleView]:
+@app.get(f"{API}/connections/{{connection_id}}/capabilities")
+async def get_capabilities(
+    connection_id: str, _=Depends(merchant_scoped())
+) -> dict:
+    return await _capabilities_dict(connection_id)
+
+
+def _rules_list() -> list[RuleView]:
     """The risk rules in evaluation order, first match wins.
 
     Served from the gate itself rather than duplicated in the frontend, so the
-    console can never drift out of step with the code that actually decides.
+    console (and the copilot) can never drift out of step with the code that
+    actually decides.
     """
     explanations = dict(explain_rules())
     return [
@@ -193,8 +199,12 @@ def get_rules() -> list[RuleView]:
     ]
 
 
-@app.get(f"{API}/policy/actions", response_model=list[ActionInfo])
-def get_actions() -> list[ActionInfo]:
+@app.get(f"{API}/policy/rules", response_model=list[RuleView])
+def get_rules() -> list[RuleView]:
+    return _rules_list()
+
+
+def _actions_list() -> list[ActionInfo]:
     """Every action type and its fixed risk properties.
 
     can_ever_be_automatic lets the policy editor disable financial actions in the
@@ -220,10 +230,12 @@ def get_actions() -> list[ActionInfo]:
     return out
 
 
-@app.get(f"{API}/policy/{{connection_id}}")
-def get_policy(
-    connection_id: str, _=Depends(merchant_scoped())
-) -> dict:
+@app.get(f"{API}/policy/actions", response_model=list[ActionInfo])
+def get_actions() -> list[ActionInfo]:
+    return _actions_list()
+
+
+def _policy_dict(connection_id: str) -> dict:
     policy = engine.policies.get(connection_id)
     return {
         "connection_id": policy.connection_id,
@@ -233,6 +245,13 @@ def get_policy(
         "approval_timeout_minutes": policy.approval_timeout_minutes,
         "holdout_percent": policy.holdout_percent,
     }
+
+
+@app.get(f"{API}/policy/{{connection_id}}")
+def get_policy(
+    connection_id: str, _=Depends(merchant_scoped())
+) -> dict:
+    return _policy_dict(connection_id)
 
 
 @app.put(f"{API}/policy/{{connection_id}}")
@@ -653,9 +672,28 @@ async def merchant_copilot(
     reaches the risk gate - there is no action here for the gate to classify.
     Scoped by merchant_scoped the same as /report and /stats, so one client
     can never ask about another's figures with their own key.
+
+    Passes the same capabilities/policy/rules/actions data the console's other
+    panels already show, via the shared `_capabilities_dict`/`_policy_dict`/
+    `_rules_list`/`_actions_list` helpers - so a question like "what can this
+    platform do" or "what's my current automation mode" is answerable, not
+    just report-figure questions. Capabilities lookup is best-effort: a
+    connection with no capability declaration yet must not break the whole
+    answer over one missing category of data.
     """
     _adapter(connection_id)
-    reply = await copilot.ask(connection_id, body.question)
+    try:
+        capabilities = await _capabilities_dict(connection_id)
+    except HTTPException:
+        capabilities = None
+    reply = await copilot.ask(
+        connection_id,
+        body.question,
+        capabilities=capabilities,
+        policy=_policy_dict(connection_id),
+        rules=[r.model_dump() for r in _rules_list()],
+        actions=[a.model_dump() for a in _actions_list()],
+    )
     return CopilotAnswer(answer=reply.answer, used_model=reply.used_model)
 
 
