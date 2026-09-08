@@ -1132,6 +1132,52 @@ select.card-picker {
   margin-top: 3px;
 }
 
+/* The checkout gates in the cart panel (sign-in prompt, legacy-account email
+ * prompt) - a message, then either a button row or a field, then a note. Cannot
+ * reuse .gate above: that one is a fixed two-column grid (a numbered mark plus one
+ * content block), built for the "why this?" pipeline explanation, and forcing three
+ * stacked elements through a 22px/1fr grid split each of them across the wrong
+ * columns instead of stacking them - the sign-in and create-account links in
+ * particular rendered squeezed into a 22px-wide column. */
+.checkout-gate {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 0;
+}
+
+.gate-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* .add above is scoped to `button.add` everywhere else it is used, so a Link
+ * rendering the same class (an <a>, not a <button>) matched none of it and
+ * rendered as bare underlined text - the actual "not properly there" bug. Same
+ * visual treatment as button.add, applied here for the anchor case. */
+.gate-actions .add {
+  flex: 1;
+  display: block;
+  box-sizing: border-box;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--surface);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  padding: 11px;
+  border-radius: 2px;
+  text-transform: uppercase;
+  text-align: center;
+  text-decoration: none;
+  transition: filter 0.15s var(--ease);
+}
+
+.gate-actions .add:hover {
+  filter: brightness(1.35);
+}
+
 .verdict {
   font-family: var(--display);
   font-weight: var(--display-weight);

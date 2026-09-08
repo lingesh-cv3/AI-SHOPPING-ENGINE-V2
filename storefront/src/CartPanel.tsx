@@ -191,7 +191,7 @@ export function CartPanel({
             ) : account ? (
               /* Signed in, but on an account made before the email field existed.
                  The confirmation has nowhere to go, so the buttons wait on one. */
-              <div className="gate">
+              <div className="checkout-gate">
                 <div className="gate-label">
                   Add your email so we can send the order confirmation
                 </div>
@@ -231,7 +231,7 @@ export function CartPanel({
               </div>
             ) : (
               /* A guest. No buttons at all - the confirmation has to reach them. */
-              <div className="gate">
+              <div className="checkout-gate">
                 <div className="gate-label">
                   Sign in so we can send your order confirmation
                 </div>
