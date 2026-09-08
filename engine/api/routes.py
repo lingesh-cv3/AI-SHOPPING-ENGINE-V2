@@ -27,6 +27,7 @@ from engine.risk import RULE_ORDER, AutomationMode, RiskPolicy, explain_rules
 from shared.models import (
     ACTION_RISK_PROPERTIES,
     ActionType,
+    Availability,
     CommerceError,
     ProposedAction,
     risk_properties_for,
@@ -665,6 +666,28 @@ async def merchant_report(
     return report
 
 
+async def _catalog_alerts(connection_id: str, *, limit: int = 20) -> list[dict]:
+    """Products currently out of stock or low, straight from the adapter's own
+    catalog - not tracked or cached anywhere, read fresh every call so an
+    answer can never describe stock that has since changed.
+
+    Best-effort like every other catalog read in this codebase (see
+    `/api/simulate`'s identical `except CommerceError: pass`): a platform
+    outage here should degrade the copilot's answer, not break the whole
+    turn over one adapter call.
+    """
+    adapter = _adapter(connection_id)
+    try:
+        browse = await adapter.search_products("", limit=100)
+    except CommerceError:
+        return []
+    return [
+        {"title": p.title, "availability": str(p.availability)}
+        for p in browse.products
+        if p.availability in (Availability.OUT_OF_STOCK, Availability.LOW_STOCK)
+    ][:limit]
+
+
 @app.post(f"{API}/copilot/{{connection_id}}", response_model=CopilotAnswer)
 async def merchant_copilot(
     connection_id: str,
@@ -698,6 +721,8 @@ async def merchant_copilot(
         policy=_policy_dict(connection_id),
         rules=[r.model_dump() for r in _rules_list()],
         actions=[a.model_dump() for a in _actions_list()],
+        catalog_alerts=await _catalog_alerts(connection_id),
+        unmet_demand=await db.unmet_demand(connection_id, days=30),
     )
     return CopilotAnswer(answer=reply.answer, used_model=reply.used_model)
 

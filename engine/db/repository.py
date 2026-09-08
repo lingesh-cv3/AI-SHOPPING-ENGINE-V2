@@ -618,6 +618,42 @@ async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
     }
 
 
+async def unmet_demand(connection_id: str, *, days: int = 30, limit: int = 10) -> list[dict]:
+    """What shoppers keep asking for and not finding - a real, grounded signal
+    for "should I stock this" that costs nothing new to compute.
+
+    Built from the same `Case.query` text already recorded on every
+    DEAD_SEARCH friction event (see `Case.query`'s own docstring) - nothing
+    new is tracked, this only aggregates what the engine already writes down
+    every time a search comes back empty. Grouped case-insensitively and
+    trimmed, since "Running Shoes" and "running shoes" are the same unmet
+    request. Query text is optional on a case (`Case.query: str | None`), so
+    rows with nothing recorded are skipped rather than counted as a blank
+    request.
+    """
+    since = datetime.now(UTC) - timedelta(days=days)
+    async with session_scope() as db:
+        result = await db.execute(
+            select(Case.query).where(
+                Case.connection_id == connection_id,
+                Case.friction_type == "DEAD_SEARCH",
+                Case.created_at >= since,
+                Case.query.is_not(None),
+            )
+        )
+        raw_queries = [row[0] for row in result.all() if row[0] and row[0].strip()]
+
+    counts: dict[str, int] = {}
+    for q in raw_queries:
+        key = q.strip().lower()
+        counts[key] = counts.get(key, 0) + 1
+
+    return [
+        {"query": q, "times_asked": n}
+        for q, n in sorted(counts.items(), key=lambda kv: -kv[1])[:limit]
+    ]
+
+
 async def expire_approvals() -> list[dict]:
     """Close out approvals nobody actioned in time.
 

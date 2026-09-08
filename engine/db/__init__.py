@@ -42,6 +42,7 @@ from .repository import (
     save_policy,
     sent_mail_for_order,
     stats,
+    unmet_demand,
 )
 from .session import create_schema, database_url, dispose, session_scope
 
@@ -85,6 +86,7 @@ __all__ = [
     "load_policies",
     "save_policy",
     "merchant_report",
+    "unmet_demand",
     "owners",
     "ResourceOwner",
     "SentMail",

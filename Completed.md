@@ -943,3 +943,72 @@ below; `npm run build` now exits 0.)
     backend, but no new browser walkthrough was needed since the UI itself
     (the Ask panel, its states) was already verified above and is unchanged
     by this extension.
+
+    Extended again the same session, before ever being committed, with two
+    real grounded data sources and a full UI redesign - the copilot's
+    context and its panel had both stayed thin relative to what the data
+    already on disk could answer.
+
+    New data, both read-only, nothing new tracked: `db.unmet_demand
+    (connection_id, *, days=30, limit=10)` in `engine/db/repository.py`
+    (exported via `engine/db/__init__.py`) aggregates the `query` text
+    already recorded on every `DEAD_SEARCH` friction `Case` - a group-by
+    count over data the engine already writes on every dead search,
+    case-insensitive, most-frequent first, nothing new instrumented.
+    `_catalog_alerts(connection_id, *, limit=20)` in `engine/api/routes.py`
+    calls the adapter's `search_products("", limit=100)` fresh on every
+    call (no caching) and returns products whose `availability` is
+    `OUT_OF_STOCK` or `LOW_STOCK`, wrapped in `except CommerceError:
+    return []` so an adapter outage degrades the answer rather than
+    breaking the turn. Both threaded into `copilot.ask()` as new optional
+    kwargs and folded into the model's context by `_build_context`
+    (`engine/copilot/service.py`). The system prompt was extended to state
+    explicitly that there is currently no order/successful-search
+    tracking, so a "what's my bestseller/top-selling product" question
+    must get an honest "not available yet" rather than being inferred from
+    the unmet-demand or stock-alert data, which measure something
+    different (search failures and stock levels, not purchases) - a
+    deliberate scope decision, since real bestseller tracking needs new
+    order-line instrumentation this pass does not add.
+
+    UI: the "Ask about your store" panel (`Copilot` component in
+    `storefront/src/MerchantConsole.tsx`, new `.copilot-*` classes in
+    `storefront/src/styles.css` built on the project's existing
+    per-merchant design tokens rather than hardcoded, so it themes
+    correctly for both Northfield and Kettle) was rebuilt from a single
+    input-plus-overwritten-answer into a running conversation transcript
+    (question/answer bubbles, auto-scrolling), five starter suggested-
+    question chips shown before the first question is asked, an animated
+    "thinking" indicator while waiting on the model, a "Read-only" badge in
+    the panel header, and a local markdown-lite renderer (bold, bullet
+    lists, and markdown tables rendered as real HTML) written as plain
+    string parsing rather than a new dependency, since the model's output
+    is simple enough not to need one.
+
+    Verified end to end against the running engine and live database, not
+    just read: called `db.unmet_demand('conn_demo', days=30)` and
+    `_catalog_alerts('conn_demo')` directly and confirmed real results -
+    "trainers" searched 136 times with zero results, and real out-of-stock/
+    low-stock titles (Marathon Pro Racing Shoe, Court Classic Tennis Shoe,
+    Winter Road Shoe, Windproof Gilet, Thermal Half Zip) matching the
+    actual catalog. Two live model calls once the Groq throttle briefly
+    cleared: "what's out of stock right now?" got a real answer correctly
+    listing exactly the three genuinely out-of-stock Northfield products by
+    name; "what are shoppers searching for that we don't carry?" correctly
+    ranked "trainers" (136 times) above the one-off noise entries.
+    `invariant-guard` reviewed the diff: `unmet_demand`'s WHERE clause
+    correctly scopes by `Case.connection_id`, `_catalog_alerts` resolves
+    the adapter via the same `connection_id` already validated by
+    `merchant_copilot`'s own `Depends(merchant_scoped())` (no cross-
+    merchant leak possible), both new functions are read-only (no db
+    writes, no adapter mutations), the `except CommerceError: return []`
+    correctly guards the one fallible call, and the new data is still pure
+    informational JSON with no path back into the risk gate. Verdict: SAFE,
+    no violations. `test-runner` ran all three suites live against the
+    extended engine: `healthcheck.py` 98 PASS / 0 FAIL / 2 SKIP (Groq
+    throttle, unrelated), `fuzz.py` 20/20 sequences (1200 assertions),
+    `auditroutes.py` held at every probe (15 locked-route checks, 4
+    shopper-scoping checks, 4 public-route checks) - purely additive,
+    touching no existing route's behaviour. `npm run build` and `npm run
+    lint` both clean (same 7 pre-existing `set-state-in-effect` errors in
+    unrelated files, none in `MerchantConsole.tsx`).
