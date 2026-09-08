@@ -494,6 +494,29 @@ below; `npm run build` now exits 0.)
     the page being looked at. 84 checks total. Verified by restarting the engine and
     running the full suite (all 82 ran, 2 model-bound SKIPs as usual).
 
+24. **The cart's "Sign in" and "Create an account" buttons rendered as bare
+    underlined text, not buttons** - reported directly ("not properly there") and
+    confirmed in a real browser. Two bugs compounding: the gate wrapper in
+    `CartPanel.tsx` reused `.gate`, a class built for `Gates.tsx`'s pipeline
+    explanation - a fixed 22px/1fr two-column grid meant for exactly one
+    numbered-mark-plus-content pair. CartPanel's gates have three stacked children
+    (a label, then either a button row or an email field, then a note) with no mark,
+    so the grid scattered them across the wrong columns instead of stacking them.
+    Separately, the two links carried `className="add"`, but every `.add` rule in
+    the stylesheet is scoped to `button.add` or a parent class (`.qbuttons .add`,
+    `.payactions .add`, ...) - none of which match a bare `<Link>` rendering an
+    `<a>`, so the buttons had no button styling applied at all.
+
+    CartPanel's gates now use their own `.checkout-gate` (flex column, no grid),
+    and `.gate-actions .add` gives the anchor case the same visual treatment
+    `button.add` already has everywhere else. Also fixed while in there: the
+    handovers count line's subject-verb agreement ("1 person were" → "1 person
+    was...has not had it"), caught by the same visual pass. Verified in a real
+    browser (not just the build): the guest sign-in gate now shows two full-width
+    dark buttons side by side, and the legacy-account email prompt (field + Save)
+    still lays out correctly under the same rework. `npm run build` and `npm run
+    lint` both clean (same 7 pre-existing lint errors, untouched).
+
 ---
 
 ## Known Issues / Pending
