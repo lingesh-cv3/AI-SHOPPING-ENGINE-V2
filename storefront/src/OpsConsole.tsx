@@ -171,8 +171,10 @@ export function OpsConsole() {
           <div className="panel-head">
             <span className="eyebrow">Needs someone to contact the shopper</span>
             <span className="eyebrow">
-              {handoverTotal} {handoverTotal === 1 ? "person" : "people"} were
-              promised help and have not had it
+              {handoverTotal}{" "}
+              {handoverTotal === 1
+                ? "person was promised help and has not had it"
+                : "people were promised help and have not had it"}
             </span>
           </div>
           <div className="panel-body">
