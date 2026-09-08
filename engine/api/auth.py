@@ -307,8 +307,10 @@ async def require_owner(
     )
 
 
-async def require_checkout_identity(who: Visitor, connection_id: str) -> str:
-    """The account id behind a payment, and one we can email.
+async def require_checkout_identity(
+    who: Visitor, connection_id: str
+) -> tuple[str, str]:
+    """The account id behind a payment, and the address the confirmation goes to.
 
     Checkout now requires an account - the confirmation has to reach somebody, and
     a guest has no address. Two refusals, and the status code says which:
@@ -343,4 +345,4 @@ async def require_checkout_identity(who: Visitor, connection_id: str) -> str:
             },
         )
 
-    return shopper_id
+    return shopper_id, shopper["email"]

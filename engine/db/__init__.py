@@ -18,6 +18,7 @@ from .models import (
     MerchantPolicy,
     Outcome,
     ResourceOwner,
+    SentMail,
 )
 from .repository import (
     decide_approval,
@@ -34,7 +35,9 @@ from .repository import (
     pending_approvals,
     record_case,
     record_outcome,
+    record_sent_mail,
     save_policy,
+    sent_mail_for_order,
     stats,
 )
 from .session import create_schema, database_url, dispose, session_scope
@@ -81,4 +84,7 @@ __all__ = [
     "merchant_report",
     "owners",
     "ResourceOwner",
+    "SentMail",
+    "record_sent_mail",
+    "sent_mail_for_order",
 ]

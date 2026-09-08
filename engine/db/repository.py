@@ -20,7 +20,7 @@ from sqlalchemy import func, select
 
 from shared.models import CaseState
 
-from .models import Approval, Case, MerchantPolicy, Outcome
+from .models import Approval, Case, MerchantPolicy, Outcome, SentMail
 from .session import session_scope
 
 logger = logging.getLogger(__name__)
@@ -892,3 +892,58 @@ async def mark_handled(
             "session_id": case.session_id,
             "connection_id": case.connection_id,
         }
+
+
+async def record_sent_mail(
+    connection_id: str,
+    *,
+    order_id: str,
+    to_email: str,
+    subject: str,
+    body: str,
+    delivered: bool,
+) -> None:
+    """One row per order-confirmation attempt, sent or merely recorded.
+
+    Written regardless of `delivered`, so "did we even try" is answerable from
+    the database rather than the log - the same reasoning `record_outcome` uses
+    for every other action the engine takes.
+    """
+    async with session_scope() as db:
+        db.add(
+            SentMail(
+                row_id=_id("mail"),
+                connection_id=connection_id,
+                order_id=order_id,
+                to_email=to_email,
+                subject=subject,
+                body=body,
+                delivered=delivered,
+            )
+        )
+
+
+async def sent_mail_for_order(connection_id: str, order_id: str) -> list[dict]:
+    """Every confirmation attempt for one order, oldest first.
+
+    Scoped by connection like everything else here - a merchant's own console
+    should never be able to ask about another merchant's order.
+    """
+    async with session_scope() as db:
+        result = await db.execute(
+            select(SentMail)
+            .where(
+                SentMail.connection_id == connection_id,
+                SentMail.order_id == order_id,
+            )
+            .order_by(SentMail.created_at.asc())
+        )
+        return [
+            {
+                "to_email": row.to_email,
+                "subject": row.subject,
+                "delivered": row.delivered,
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in result.scalars()
+        ]

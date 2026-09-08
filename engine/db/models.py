@@ -578,3 +578,34 @@ class ResourceOwner(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now
     )
+
+
+class SentMail(Base):
+    """A record of every order confirmation the engine tried to send.
+
+    Checkout requires an email precisely so a confirmation can reach somebody -
+    collecting the address and never using it would make that gate empty
+    ceremony. `delivered` is honest about whether a real send happened: no SMTP
+    credentials means every row here is `delivered=False`, the same
+    recorded-rather-than-pretended shape `NOTIFY_BACK_IN_STOCK` already uses when
+    a capability isn't built. The row still exists either way, because "did we
+    even try" has to be answerable without reading the log.
+    """
+
+    __tablename__ = "sent_mail"
+
+    row_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+    order_id: Mapped[str] = mapped_column(String(64), index=True)
+    to_email: Mapped[str] = mapped_column(String(255))
+    subject: Mapped[str] = mapped_column(String(255))
+    body: Mapped[str] = mapped_column(Text)
+
+    #: True only for a real SMTP send that succeeded. False either because no
+    #: SMTP is configured, or because a configured send failed.
+    delivered: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now
+    )

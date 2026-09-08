@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from engine import db
 from engine import session as session_store
+from engine.notify import confirm_order
 from shared.models import CommerceError
 
 from .auth import (
@@ -45,7 +46,7 @@ from .auth import (
     visitor,
 )
 from .why import explain
-from .deps import engine
+from .deps import MERCHANT_NAMES, engine
 
 logger = logging.getLogger(__name__)
 
@@ -950,7 +951,7 @@ async def pay(
     # Checkout requires an account with an email - the confirmation has to reach
     # somebody. A guest is sent to sign in (their basket carries over), and an
     # account without an email is prompted for one.
-    await require_checkout_identity(who, req.connection_id)
+    _shopper_id, shopper_email = await require_checkout_identity(who, req.connection_id)
 
     # Before anything is charged. This route takes a cart_id from the caller and
     # spent against it without ever asking whose it was.
@@ -1083,6 +1084,14 @@ async def pay(
             f"Paid. Your order is {order_id} and you will get a confirmation "
             "shortly. Thank you."
         )
+        if order_id:
+            await confirm_order(
+                engine.mailer,
+                connection_id=req.connection_id,
+                merchant_name=MERCHANT_NAMES.get(req.connection_id, req.connection_id),
+                order_id=order_id,
+                to_email=shopper_email,
+            )
     else:
         # Runs the decline through the same pipeline a decline anywhere else takes,
         # rather than writing a reply here and stopping. The earlier version told

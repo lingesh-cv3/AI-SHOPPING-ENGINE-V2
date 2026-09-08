@@ -30,6 +30,7 @@ from adapters.kettle import KettleAdapter
 from adapters.sample import SampleMerchantAdapter
 from engine.decision import CapabilityRegistry, DecisionEngine
 from engine.execution import ExecutionService
+from engine.notify import Mailer
 from engine.reasoning import ReasoningService
 from engine.risk import PolicyStore, RiskGate
 
@@ -68,6 +69,7 @@ class Engine:
     gate: RiskGate
     reasoning: ReasoningService
     execution: ExecutionService
+    mailer: Mailer
 
     async def close(self) -> None:
         for connection_id in self.registry.connection_ids():
@@ -107,6 +109,9 @@ def build_engine() -> Engine:
         # runs on rule-based proposals without a model.
         reasoning=ReasoningService.from_env(),
         execution=ExecutionService(registry),
+        # Unconfigured (records rather than delivers) unless MAILER_SMTP_HOST is
+        # set - see engine/notify/mailer.py.
+        mailer=Mailer.from_env(),
     )
 
 

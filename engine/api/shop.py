@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from shared.models import CapabilityUnsupported, CommerceError, Money
 
 from engine import db
+from engine.notify import confirm_order
 
 from .auth import (
     Visitor,
@@ -29,7 +30,7 @@ from .auth import (
     shopper_scoped,
     visitor,
 )
-from .deps import engine
+from .deps import MERCHANT_NAMES, engine
 
 router = APIRouter(prefix="/api/shop", tags=["shop"])
 
@@ -459,7 +460,7 @@ async def checkout(
     reach somebody, and a guest has no address. The storefront gates the buttons
     and this is the API half of the same rule.
     """
-    await require_checkout_identity(who, connection_id)
+    _shopper_id, shopper_email = await require_checkout_identity(who, connection_id)
     await _mine(who, connection_id, db.owners.CART, cart_id)
     adapter = _adapter(connection_id)
 
@@ -525,6 +526,15 @@ async def checkout(
         keys = await who.keys_for(connection_id)
         await db.owners.take(
             connection_id, db.owners.ORDER, order.order_id, keys[0]
+        )
+
+    if result.succeeded and order is not None:
+        await confirm_order(
+            engine.mailer,
+            connection_id=connection_id,
+            merchant_name=MERCHANT_NAMES.get(connection_id, connection_id),
+            order_id=order.order_id,
+            to_email=shopper_email,
         )
 
     return {
