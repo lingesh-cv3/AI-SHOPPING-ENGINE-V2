@@ -224,6 +224,66 @@ async def _mine(who: Visitor, connection_id: str, *, session_id: str, cart_id: s
         )
 
 
+#: What a holdout shopper is told: nothing tailored, nothing that promises help,
+#: because none was attempted. One sentence rather than one per friction type -
+#: the point is that no reasoning ran, and a reply that read as though it had
+#: (even a generic-sounding one written per situation) would misrepresent that.
+_HOLDOUT_REPLY = "Sorry, that didn't work. Please try again in a moment."
+
+
+async def _holdout_reply(req: ChatRequest, friction_type: FrictionType) -> ChatReply:
+    """Record the friction and answer as though there were no assistant.
+
+    Still writes a Case - the whole point of a holdout is measuring what
+    happens without help, and that requires a row to measure. is_holdout=True
+    is what lets the merchant report tell this apart from a genuine AUTO
+    clearance: nothing was proposed, nothing ran, and the outcome is recorded
+    unresolved unless the shopper's own next action resolves it some other way.
+    """
+    case_id = await db.record_case(
+        connection_id=req.connection_id,
+        friction=req.friction,
+        query=(req.query or req.message)[:300],
+        cart_id=req.cart_id,
+        order_id=req.order_id,
+        session_id=req.session_id,
+        reasoning={},
+        decision={},
+        risk={
+            "outcome": "AUTO",
+            "rule": "HOLDOUT_NO_ASSISTANCE",
+            "reason": "this session was assigned to the merchant's holdout slice",
+            "financial": False,
+        },
+        is_holdout=True,
+    )
+    await db.record_outcome(
+        connection_id=req.connection_id,
+        case_id=case_id,
+        resolved=False,
+        final_state="OUTCOME",
+        friction_type=req.friction,
+        required_human=False,
+    )
+    # The shopper's own turn is already recorded by the caller before this
+    # runs (chat() writes it as soon as the message arrives, before friction
+    # is even parsed) - only the reply is this function's to write.
+    await session_store.add_turn(
+        session_id=req.session_id,
+        connection_id=req.connection_id,
+        speaker="assistant",
+        text=_HOLDOUT_REPLY,
+        case_id=case_id,
+    )
+    return ChatReply(
+        reply=_HOLDOUT_REPLY,
+        session_id=req.session_id,
+        case_id=case_id,
+        used_model=False,
+        risk_rule="HOLDOUT_NO_ASSISTANCE",
+    )
+
+
 @router.post("", response_model=ChatReply)
 async def chat(
     req: ChatRequest,
@@ -271,6 +331,24 @@ async def chat(
             friction_type = FrictionType(req.friction)
         except ValueError:
             friction_type = None
+
+    # The holdout. Only friction turns are eligible - a shopper's own freeform
+    # question (friction_type is None) is general assistance, not the recovery
+    # mechanism the holdout exists to prove caused a sale, so it is answered
+    # normally either way. Checked here, before reasoning ever runs, so a
+    # holdout session costs no tokens and gets no proposal to withhold - the
+    # point is that nothing was attempted, not that something was attempted
+    # and then hidden.
+    if friction_type is not None:
+        policy = engine.policies.get(req.connection_id)
+        if policy.holdout_percent > 0:
+            in_holdout = await db.holdout_status(
+                req.connection_id,
+                req.session_id,
+                holdout_percent=policy.holdout_percent,
+            )
+            if in_holdout:
+                return await _holdout_reply(req, friction_type)
 
     reasoning = await engine.reasoning.reason(
         skip_model=req.skip_model,

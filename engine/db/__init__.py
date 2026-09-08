@@ -19,12 +19,14 @@ from .models import (
     Outcome,
     ResourceOwner,
     SentMail,
+    SessionHoldout,
 )
 from .repository import (
     decide_approval,
     decided_across,
     expire_approvals,
     handovers_across,
+    holdout_status,
     mark_handled,
     ops_stats,
     pending_across,
@@ -87,4 +89,6 @@ __all__ = [
     "SentMail",
     "record_sent_mail",
     "sent_mail_for_order",
+    "SessionHoldout",
+    "holdout_status",
 ]

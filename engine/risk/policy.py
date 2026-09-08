@@ -68,6 +68,15 @@ class RiskPolicy(BaseModel):
         "staring at a declined card will not wait long.",
     )
 
+    holdout_percent: int = Field(
+        default=0,
+        ge=0,
+        le=100,
+        description="What fraction of new sessions get no assistance at all, so "
+        "their outcome can be compared against the assisted group's. Zero unless "
+        "a merchant deliberately turns it on.",
+    )
+
     def __hash__(self) -> int:
         return hash(self.connection_id)
 

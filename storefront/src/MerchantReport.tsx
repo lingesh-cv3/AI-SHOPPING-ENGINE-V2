@@ -109,6 +109,31 @@ export function MerchantReport() {
               />
             </div>
 
+            {report.holdout && (
+              <>
+                <div className="gate-label" style={{ margin: "22px 0 8px" }}>
+                  With the assistant vs. without
+                </div>
+                <p className="note" style={{ marginTop: 0 }}>
+                  A slice of your shoppers get no help at all, so this line is
+                  the difference the assistant actually made - not a number
+                  that includes sales that would have happened anyway.
+                </p>
+                <div className="figures">
+                  <Figure
+                    value={pct(report.holdout.assisted_resolution_rate)}
+                    label="Resolved, assisted"
+                    title={`${report.holdout.assisted_resolved} of ${report.holdout.assisted_cases}`}
+                  />
+                  <Figure
+                    value={pct(report.holdout.holdout_resolution_rate)}
+                    label="Resolved, holdout"
+                    title={`${report.holdout.holdout_resolved} of ${report.holdout.holdout_cases} - no assistance given`}
+                  />
+                </div>
+              </>
+            )}
+
             {report.friction.length > 0 && (
               <>
                 <div className="gate-label" style={{ margin: "22px 0 8px" }}>

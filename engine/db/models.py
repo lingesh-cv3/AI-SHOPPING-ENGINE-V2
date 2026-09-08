@@ -67,6 +67,15 @@ class Case(Base):
     friction_type: Mapped[str | None] = mapped_column(String(40))
     state: Mapped[str] = mapped_column(String(24), index=True)
 
+    #: True when this friction was left to resolve itself - the shopper's
+    #: session was in the merchant's holdout slice, so no reasoning ran, no
+    #: action was proposed, and no recovery was attempted. Exists so the
+    #: merchant report can compare the holdout's own resolution rate against
+    #: the assisted group's - the only way to show a merchant that a sale
+    #: was actually caused by the engine rather than one that would have
+    #: happened anyway.
+    is_holdout: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
     # What the shopper was doing. Kept so a human picking the case up can see the
     # situation without reconstructing it.
     query: Mapped[str | None] = mapped_column(String(300))
@@ -307,6 +316,13 @@ class MerchantPolicy(Base):
     auto_allowed: Mapped[list] = mapped_column(JSON, default=list)
     blocked: Mapped[list] = mapped_column(JSON, default=list)
     approval_timeout_minutes: Mapped[int] = mapped_column(Integer, default=15)
+
+    #: What fraction of new sessions get no assistance at all, so their outcome
+    #: can be compared against the assisted group's. Zero unless a merchant
+    #: deliberately turns it on - a merchant who never asked for an experiment
+    #: should never have shoppers silently left unhelped by one.
+    holdout_percent: Mapped[int] = mapped_column(Integer, default=0)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
@@ -607,5 +623,25 @@ class SentMail(Base):
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now
+    )
+
+
+class SessionHoldout(Base):
+    """Whether one session was assigned to the no-assistance holdout group.
+
+    Assigned once, at the first friction event of a session, and never
+    reassigned - a shopper compared against the "no assistant" outcome for one
+    problem and the "assisted" outcome for the next would not be a controlled
+    comparison of anything. The row is the memory that makes the assignment
+    sticky for the rest of that visit.
+    """
+
+    __tablename__ = "session_holdouts"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+    is_holdout: Mapped[bool] = mapped_column(Boolean)
+    assigned_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now
     )

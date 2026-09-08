@@ -12,6 +12,7 @@ have that failure mode.
 from __future__ import annotations
 
 import logging
+import random
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -20,7 +21,7 @@ from sqlalchemy import func, select
 
 from shared.models import CaseState
 
-from .models import Approval, Case, MerchantPolicy, Outcome, SentMail
+from .models import Approval, Case, MerchantPolicy, Outcome, SentMail, SessionHoldout
 from .session import session_scope
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ async def record_case(
     decision: dict,
     risk: dict,
     approval_timeout_minutes: int = 15,
+    is_holdout: bool = False,
 ) -> str:
     """Write a case, and an approval when one is needed.
 
@@ -103,6 +105,7 @@ async def record_case(
                 financial=bool(risk.get("financial")),
                 prompt_tokens=reasoning.get("prompt_tokens"),
                 completion_tokens=reasoning.get("completion_tokens"),
+                is_holdout=is_holdout,
             )
         )
 
@@ -121,6 +124,44 @@ async def record_case(
             )
 
     return case_id
+
+
+async def holdout_status(
+    connection_id: str, session_id: str, *, holdout_percent: int
+) -> bool:
+    """Whether this session is in the no-assistance holdout group.
+
+    Assigned once, at the first friction event a session ever hits, and read
+    back unchanged after that - drawing a fresh random number on every friction
+    event would let the same shopper land in both groups over one visit, which
+    is not a controlled comparison of anything. `holdout_percent` is read from
+    the merchant's current policy on the first call only; a merchant who
+    changes the percentage mid-session does not retroactively reassign
+    shoppers already in the middle of one.
+
+    A session id collision across merchants cannot happen (session ids are
+    per-connection-scoped upstream), but the primary key here is the session id
+    alone, so a caller for the wrong connection_id gets a KeyError-shaped bug
+    rather than a silent cross-merchant read - deliberately, so it fails loud.
+    """
+    async with session_scope() as db:
+        row = await db.get(SessionHoldout, session_id)
+        if row is not None:
+            if row.connection_id != connection_id:
+                raise ValueError(
+                    f"session {session_id} belongs to a different connection"
+                )
+            return row.is_holdout
+
+        assigned = holdout_percent > 0 and random.randint(1, 100) <= holdout_percent
+        db.add(
+            SessionHoldout(
+                session_id=session_id,
+                connection_id=connection_id,
+                is_holdout=assigned,
+            )
+        )
+        return assigned
 
 
 async def list_cases(connection_id: str, *, limit: int = 50) -> list[Case]:
@@ -354,6 +395,7 @@ async def save_policy(
     auto_allowed: list[str],
     blocked: list[str],
     approval_timeout_minutes: int = 15,
+    holdout_percent: int = 0,
 ) -> None:
     """Persist a connection's risk settings.
 
@@ -369,6 +411,7 @@ async def save_policy(
         row.auto_allowed = auto_allowed
         row.blocked = blocked
         row.approval_timeout_minutes = approval_timeout_minutes
+        row.holdout_percent = holdout_percent
 
 
 async def load_policies() -> list[dict]:
@@ -382,6 +425,7 @@ async def load_policies() -> list[dict]:
                 "auto_allowed": r.auto_allowed or [],
                 "blocked": r.blocked or [],
                 "approval_timeout_minutes": r.approval_timeout_minutes,
+                "holdout_percent": r.holdout_percent or 0,
             }
             for r in rows.scalars()
         ]
@@ -461,6 +505,36 @@ async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
     shoppers_helped = len({c.session_id for c in case_rows}) if case_rows else 0
     resolution_rate = (len(resolved) / len(case_rows) * 100) if case_rows else None
 
+    # The holdout comparison. Only meaningful once at least one holdout case
+    # exists - a merchant who has never turned this on should see nothing here
+    # rather than a confusing "0% vs 0%" panel with nothing behind it.
+    #
+    # Outcome rows do not carry is_holdout themselves, so the split is done
+    # from the case each outcome belongs to - both sides are read from the
+    # same window of time, which is what makes the comparison fair.
+    is_holdout_case = {c.case_id: c.is_holdout for c in case_rows}
+    holdout_cases = [c for c in case_rows if c.is_holdout]
+    assisted_cases = [c for c in case_rows if not c.is_holdout]
+    holdout_resolved = [o for o in resolved if is_holdout_case.get(o.case_id)]
+    assisted_resolved = [o for o in resolved if not is_holdout_case.get(o.case_id)]
+
+    holdout_comparison = None
+    if holdout_cases:
+        holdout_comparison = {
+            "holdout_cases": len(holdout_cases),
+            "holdout_resolved": len(holdout_resolved),
+            "holdout_resolution_rate": round(
+                len(holdout_resolved) / len(holdout_cases) * 100, 1
+            ),
+            "assisted_cases": len(assisted_cases),
+            "assisted_resolved": len(assisted_resolved),
+            "assisted_resolution_rate": (
+                round(len(assisted_resolved) / len(assisted_cases) * 100, 1)
+                if assisted_cases
+                else None
+            ),
+        }
+
     return {
         "days": days,
         "shoppers_helped": shoppers_helped,
@@ -471,6 +545,7 @@ async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
         "revenue_recovered": f"{recovered:.2f}",
         "currency": currency,
         "median_resolution_ms": median_ms,
+        "holdout": holdout_comparison,
         "friction": [
             {"type": k, "count": v}
             for k, v in sorted(friction.items(), key=lambda kv: -kv[1])

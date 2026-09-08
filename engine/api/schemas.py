@@ -31,6 +31,7 @@ class PolicyUpdate(BaseModel):
     mode: AutomationMode
     auto_allowed: list[ActionType] = Field(default_factory=list)
     blocked: list[ActionType] = Field(default_factory=list)
+    holdout_percent: int = Field(default=0, ge=0, le=100)
 
 
 class RejectionView(BaseModel):

@@ -86,6 +86,7 @@ async def _startup() -> None:
                 auto_allowed={ActionType(a) for a in row["auto_allowed"]},
                 blocked={ActionType(a) for a in row["blocked"]},
                 approval_timeout_minutes=row["approval_timeout_minutes"],
+                holdout_percent=row.get("holdout_percent", 0),
             )
             for row in stored
         ]
@@ -228,6 +229,7 @@ def get_policy(
         "auto_allowed": sorted(str(a) for a in policy.auto_allowed),
         "blocked": sorted(str(a) for a in policy.blocked),
         "approval_timeout_minutes": policy.approval_timeout_minutes,
+        "holdout_percent": policy.holdout_percent,
     }
 
 
@@ -252,6 +254,7 @@ async def set_policy(
         mode=update.mode,
         auto_allowed=set(update.auto_allowed),
         blocked=set(update.blocked),
+        holdout_percent=update.holdout_percent,
     )
     engine.policies.set(policy)
 
@@ -262,6 +265,7 @@ async def set_policy(
             auto_allowed=sorted(str(a) for a in policy.auto_allowed),
             blocked=sorted(str(a) for a in policy.blocked),
             approval_timeout_minutes=policy.approval_timeout_minutes,
+            holdout_percent=policy.holdout_percent,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("could not persist policy for %s", connection_id)

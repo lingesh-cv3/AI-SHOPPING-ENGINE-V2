@@ -70,7 +70,9 @@ export function MerchantConsole() {
 
   async function setMode(mode: string) {
     if (!policy) return;
-    setPolicy(await console_api.savePolicy(mode, [], policy.blocked));
+    setPolicy(
+      await console_api.savePolicy(mode, [], policy.blocked, policy.holdout_percent),
+    );
     setTest(null);
   }
 
@@ -81,9 +83,18 @@ export function MerchantConsole() {
       : policy.blocked.filter((a) => a !== actionType);
     // auto_allowed is left empty deliberately. It is now an optional restriction
     // rather than a permission list, and most merchants want every safe action.
-    setPolicy(await console_api.savePolicy(policy.mode, [], next));
+    setPolicy(
+      await console_api.savePolicy(policy.mode, [], next, policy.holdout_percent),
+    );
     setTested(actionType);
     setTest(await console_api.testAction(actionType));
+  }
+
+  async function onHoldout(percent: number) {
+    if (!policy) return;
+    setPolicy(
+      await console_api.savePolicy(policy.mode, [], policy.blocked, percent),
+    );
   }
   if (!signedIn) {
     return (
@@ -167,6 +178,7 @@ export function MerchantConsole() {
           actions={actions}
           onMode={setMode}
           onBlock={onBlock}
+          onHoldout={onHoldout}
         />
 
         {test && (
@@ -212,12 +224,31 @@ function PolicyEditor({
   actions,
   onMode,
   onBlock,
+  onHoldout,
 }: {
   policy: Policy;
   actions: ActionInfo[];
   onMode: (mode: string) => void;
   onBlock: (actionType: string, blocked: boolean) => void;
+  onHoldout: (percent: number) => void;
 }) {
+  const [holdoutDraft, setHoldoutDraft] = useState(
+    String(policy.holdout_percent),
+  );
+  const [savingHoldout, setSavingHoldout] = useState(false);
+
+  // Keep the draft in step with a policy change from outside this input
+  // (mode switch, blocking an action, or the initial load) without an
+  // effect - adjusted here, during render, rather than after it, the same
+  // pattern React's own docs use for state derived from a prop.
+  const [seenHoldoutPercent, setSeenHoldoutPercent] = useState(
+    policy.holdout_percent,
+  );
+  if (policy.holdout_percent !== seenHoldoutPercent) {
+    setSeenHoldoutPercent(policy.holdout_percent);
+    setHoldoutDraft(String(policy.holdout_percent));
+  }
+
   const modes: Array<[string, string, string]> = [
     ["CAUTIOUS", "Cautious", "Every action waits for you"],
     ["STANDARD", "Standard", "Safe actions run on their own"],
@@ -287,6 +318,54 @@ function PolicyEditor({
           Switching something off means the engine will never do it here &mdash; it
           won&rsquo;t even ask.
         </p>
+
+        <div className="gate-label" style={{ marginTop: 18, marginBottom: 6 }}>
+          Holdout
+        </div>
+        <p className="note" style={{ marginTop: 0 }}>
+          Hold back a percentage of new sessions from getting any help at all,
+          so their outcome can be compared against the ones the engine did
+          assist. This is how you tell a recovered sale from one that would
+          have happened anyway.
+        </p>
+        <div className="field">
+          <input
+            type="number"
+            min={0}
+            max={100}
+            value={holdoutDraft}
+            onChange={(e) => setHoldoutDraft(e.target.value)}
+            aria-label="Holdout percentage"
+            style={{ maxWidth: 90 }}
+          />
+          <button
+            disabled={
+              savingHoldout ||
+              holdoutDraft === String(policy.holdout_percent) ||
+              Number.isNaN(Number(holdoutDraft))
+            }
+            onClick={async () => {
+              setSavingHoldout(true);
+              try {
+                const clamped = Math.max(
+                  0,
+                  Math.min(100, Math.round(Number(holdoutDraft) || 0)),
+                );
+                onHoldout(clamped);
+              } finally {
+                setSavingHoldout(false);
+              }
+            }}
+          >
+            {savingHoldout ? "Saving…" : "Save"}
+          </button>
+        </div>
+        {policy.holdout_percent > 0 && (
+          <p className="note">
+            {policy.holdout_percent}% of new sessions get no assistance right
+            now.
+          </p>
+        )}
       </div>
     </section>
   );

@@ -722,6 +722,9 @@ export interface Policy {
   auto_allowed: string[];
   blocked: string[];
   approval_timeout_minutes: number;
+  /** What fraction of new sessions get no assistance, so their outcome can be
+   *  compared against the assisted group's. Zero unless deliberately turned on. */
+  holdout_percent: number;
 }
 
 export interface Rule {
@@ -798,10 +801,20 @@ export const console_api = {
 
   policy: () => merchantCall<Policy>(`/api/policy/${getConnection()}`),
 
-  savePolicy: (mode: string, autoAllowed: string[], blocked: string[]) =>
+  savePolicy: (
+    mode: string,
+    autoAllowed: string[],
+    blocked: string[],
+    holdoutPercent: number,
+  ) =>
     merchantCall<Policy>(`/api/policy/${getConnection()}`, {
       method: "PUT",
-      body: JSON.stringify({ mode, auto_allowed: autoAllowed, blocked }),
+      body: JSON.stringify({
+        mode,
+        auto_allowed: autoAllowed,
+        blocked,
+        holdout_percent: holdoutPercent,
+      }),
     }),
 
   rules: () => call<Rule[]>("/api/policy/rules"),
@@ -845,6 +858,17 @@ export interface MerchantReport {
   revenue_recovered: string;
   currency: string;
   median_resolution_ms: number | null;
+  /** Null until at least one session has landed in the holdout group - a
+   *  merchant who has never turned this on should see nothing here rather
+   *  than a confusing "0% vs 0%" comparison with nothing behind it. */
+  holdout: {
+    holdout_cases: number;
+    holdout_resolved: number;
+    holdout_resolution_rate: number;
+    assisted_cases: number;
+    assisted_resolved: number;
+    assisted_resolution_rate: number | null;
+  } | null;
   friction: { type: string; count: number }[];
   recent: {
     case_id: string;

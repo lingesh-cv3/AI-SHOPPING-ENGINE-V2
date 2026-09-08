@@ -109,6 +109,33 @@ async def create_schema() -> None:
                     text("ALTER TABLE session_turns ADD COLUMN choices_json TEXT")
                 )
 
+        if database_url().startswith("sqlite"):
+            # The holdout arrived after the first databases existed, same
+            # reasoning as the migrations above. Default 0 on both new
+            # columns matters here specifically: an existing merchant's
+            # policy row gaining holdout_percent=0 must mean "off", not an
+            # experiment nobody asked for turning on by accident.
+            case_rows = await conn.execute(text("PRAGMA table_info(cases)"))
+            case_columns = {row[1] for row in case_rows}
+            if "is_holdout" not in case_columns:
+                await conn.execute(
+                    text(
+                        "ALTER TABLE cases ADD COLUMN is_holdout BOOLEAN DEFAULT 0"
+                    )
+                )
+
+            policy_rows = await conn.execute(
+                text("PRAGMA table_info(merchant_policies)")
+            )
+            policy_columns = {row[1] for row in policy_rows}
+            if "holdout_percent" not in policy_columns:
+                await conn.execute(
+                    text(
+                        "ALTER TABLE merchant_policies "
+                        "ADD COLUMN holdout_percent INTEGER DEFAULT 0"
+                    )
+                )
+
     logger.info("database ready at %s", database_url().split("://")[0])
 
 

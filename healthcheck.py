@@ -1647,6 +1647,97 @@ check(
 
 # ---------------------------------------------------------------------------
 
+section("The holdout")
+
+# Set to 100% so the very next friction turn is guaranteed to land in the
+# no-assistance group - anything less would make this check flaky by design.
+# Kettle, not Northfield, so the policy this test flips is fully isolated
+# from the merchant-policy save/restore test just above.
+before_holdout_policy = call("GET", f"/api/policy/{KETTLE}")
+call(
+    "PUT",
+    f"/api/policy/{KETTLE}",
+    {
+        "mode": before_holdout_policy.get("mode", "STANDARD"),
+        "auto_allowed": before_holdout_policy.get("auto_allowed", []),
+        "blocked": before_holdout_policy.get("blocked", []),
+        "holdout_percent": 100,
+    },
+)
+
+holdout_session = f"hc_holdout_{uuid.uuid4().hex[:6]}"
+holdout_reply = call(
+    "POST",
+    "/api/chat",
+    {
+        "connection_id": KETTLE,
+        "session_id": holdout_session,
+        "message": "my payment failed",
+        "friction": "PAYMENT_DECLINED",
+        "skip_model": True,
+    },
+)
+check(
+    "a holdout session gets no reasoning and no proposal",
+    holdout_reply.get("risk_rule") == "HOLDOUT_NO_ASSISTANCE"
+    and holdout_reply.get("used_model") is False
+    and holdout_reply.get("selected_action") is None,
+    f"risk_rule={holdout_reply.get('risk_rule')} "
+    f"used_model={holdout_reply.get('used_model')} "
+    f"selected_action={holdout_reply.get('selected_action')}",
+    "engine/api/chat.py _holdout_reply",
+)
+
+# Same session, a second friction turn - must land in the same group as the
+# first. A holdout that could flip mid-visit would not be a controlled
+# comparison of anything.
+holdout_reply_2 = call(
+    "POST",
+    "/api/chat",
+    {
+        "connection_id": KETTLE,
+        "session_id": holdout_session,
+        "message": "still declined",
+        "friction": "PAYMENT_DECLINED",
+        "skip_model": True,
+    },
+)
+check(
+    "the same session stays in the holdout group on its next friction turn",
+    holdout_reply_2.get("risk_rule") == "HOLDOUT_NO_ASSISTANCE",
+    str(holdout_reply_2.get("risk_rule")),
+    "engine/db/repository.py holdout_status",
+)
+
+holdout_report = call("GET", f"/api/report/{KETTLE}")
+holdout_stats = holdout_report.get("holdout") or {}
+check(
+    "the merchant report counts this session in the holdout group",
+    holdout_stats.get("holdout_cases", 0) >= 1,
+    str(holdout_stats),
+    "engine/db/repository.py merchant_report",
+)
+
+# Put the policy back before anything else runs against this merchant.
+call(
+    "PUT",
+    f"/api/policy/{KETTLE}",
+    {
+        "mode": before_holdout_policy.get("mode", "STANDARD"),
+        "auto_allowed": before_holdout_policy.get("auto_allowed", []),
+        "blocked": before_holdout_policy.get("blocked", []),
+        "holdout_percent": 0,
+    },
+)
+restored_holdout_policy = call("GET", f"/api/policy/{KETTLE}")
+check(
+    "the holdout is switched back off",
+    restored_holdout_policy.get("holdout_percent") == 0,
+    str(restored_holdout_policy.get("holdout_percent")),
+)
+
+# ---------------------------------------------------------------------------
+
 section("Expiry")
 
 exp_session = f"hc_exp_{uuid.uuid4().hex[:6]}"
