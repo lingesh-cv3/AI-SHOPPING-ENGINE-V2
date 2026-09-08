@@ -210,7 +210,7 @@ export default function App() {
         setBusy(false);
       }
     },
-       [sessionId, cart?.cart_id, openedForDeadSearch, chatOpen],
+    [sessionId, cart, openedForDeadSearch, chatOpen],
   );
   // Set on the root rather than passed as props. Every token in the stylesheet keys
   // off this, so one attribute changes the whole shop and no component needs to know

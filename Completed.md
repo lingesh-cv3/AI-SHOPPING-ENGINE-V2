@@ -98,7 +98,7 @@ conversation or order at the same merchant - see Completed Work.
 
 ### Tests
 
-`healthcheck.py` - 96 checks, one path end to end. Reports SKIP rather than FAIL
+`healthcheck.py` - 101 checks, one path end to end. Reports SKIP rather than FAIL
 when the provider is busy, and says how many checks never executed.
 
 `fuzz.py` - random shopper sequences, asserting after every step that the cart
@@ -816,6 +816,16 @@ below; `npm run build` now exits 0.)
     the three recovery phrasings as the ranked-lower explanation, since
     which two-or-three the model chooses to propose is not something this
     project controls.
+
+    **Correction, found by a later audit:** `get_capabilities` for Kettle
+    kept declaring `supports_webhooks: False` after this feature shipped -
+    left over from before webhook support existed on that adapter, never
+    updated when it was built. Anyone asking (via the console or the
+    Merchant Copilot, #32) whether Kettle supported webhooks between this
+    entry and the fix got a wrong, capability-grounded "no" on an already-
+    working feature. Fixed in `7c525d4` ("Kettle: fix stale
+    supports_webhooks=False capability flag"); Northfield's own `False` was
+    always correct, since it deliberately does not implement `SupportsWebhooks`.
 
 32. **Built the Merchant Copilot** - Merchant Roadmap Phase 1, item #1 - a
     free-text "ask about your store" question box in `/merchant`. Read-only
