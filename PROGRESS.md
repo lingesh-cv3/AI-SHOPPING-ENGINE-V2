@@ -598,9 +598,24 @@ Reported after a walkthrough. **Not a complete list** - walk the product before
 trusting anything.
 
 **Occasional near-duplicate assistant messages** from the poll's deduplication -
-the last real behaviour bug, browser-only, and the likeliest by design (see Next
-Steps #2). Worth reproducing in the browser before writing its regression test,
-rather than fixing from a guess at the trigger.
+the last real behaviour bug, browser-only. Attempted a targeted reproduction this
+session before touching the fix, per the standing rule: delayed the transcript
+poll's GET by 4s with Playwright network interception, then fired several rapid
+model-free chat taps while that poll was still in flight - the exact shape the
+`useEffect`'s stale-closure structure (it depends on `turns`, which changes on
+every tap, tearing down and rebuilding the interval and its `seen` snapshot each
+time) suggested could cause it. It did not reproduce: three taps, three correct
+distinct replies, no duplicates or drops. The one shape already known to cause a
+near-duplicate - the pay endpoint prepending a sentence, making the stored turn a
+suffix of what's shown - is already handled by the existing suffix check, so
+whatever is still causing the reported duplicates is a narrower or different
+timing window than the one tried. Worth retrying with a different trigger
+(two consecutive poll cycles overlapping, or a race specifically with an
+operator's approval writing into the session mid-poll) rather than more of the
+same race shape. Reproducing this costs real model calls under the Groq throttle,
+which slows down each attempt but is not why it remains unfixed - the bug itself
+is a frontend timing issue independent of which model, or whether one, is
+behind the chat.
 
 Fixed: the `handovers_across` window (see #23 below) - the oldest-50 cap that hid
 the newest handovers from the operations console is now a paged list with a total.
@@ -640,10 +655,10 @@ Playwright suite to them rather than reach for `healthcheck.py` again.
 2. The browser-level test layer now exists (`storefront/tests/checkout.spec.ts`,
    `npm test` from `storefront/`) - extend it rather than starting a second one.
    Best next addition: the near-duplicate-message poll bug, now the only real
-   behaviour Known Issue still open. Reproduce it in the browser first (the
-   project's standing rule against fixing a bug from a guess at its output
-   applies here too - the poll dedup is exact-match plus suffix-match, and the
-   near-duplicate survivor is precisely the case the check does not catch). The
+   behaviour Known Issue still open. One reproduction attempt this session (delayed
+   poll + rapid model-free taps) did not trigger it - see Known Issues for what to
+   try next (overlapping poll cycles, or a race with an operator's approval write)
+   rather than repeating the same race shape. The
    sign-in screen's merchant-name display was a stale finding - it already shows
    `merchant.name`.
 3. The remaining Known Issues are not architectural; the `DIAGNOSED`-stuck item
