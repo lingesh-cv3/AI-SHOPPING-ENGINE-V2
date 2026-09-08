@@ -20,6 +20,10 @@ because they cannot touch money safely.
 - **Tappable everything.** Product cards and size buttons bypass the model entirely,
   so they are instant, cost no tokens, and keep working while rate limited.
 - **It asks rather than guessing a size.** The returns argument above.
+- **A comparison action.** Ask to compare two named products and get both, fetched
+  fresh, side by side - price, description, stock. The most-wanted capability in
+  the research (74%), and the thing a seller's assistant is assumed not to do.
+  See Fixed This Session, #27.
 - **"Why this?"** on decisions, including what was declined - *"I did not offer
   trying your card again, offering another way to pay"*. The declined half is what a
   seller's assistant cannot write. Now covers a successful recovery too, not only a
@@ -67,7 +71,7 @@ conversation or order at the same merchant - see Fixed This Session.
 
 ### Tests
 
-`healthcheck.py` - 84 checks, one path end to end. Reports SKIP rather than FAIL
+`healthcheck.py` - 86 checks, one path end to end. Reports SKIP rather than FAIL
 when the provider is busy, and says how many checks never executed.
 
 `fuzz.py` - random shopper sequences, asserting after every step that the cart
@@ -120,9 +124,6 @@ yet caught automatically.
 the difference and know the engine caused it. Answers the objection that loses
 deals, nobody in the market does it, and it costs a flag on the session. **Highest
 commercial value of anything unbuilt.**
-
-**A comparison action.** The most wanted capability at 74%, and the thing a seller's
-assistant is assumed not to do - which is exactly why doing it earns trust.
 
 **A published reliability number.** `eval.py` exists and is unfinished. Nobody in
 this market publishes one.
@@ -589,6 +590,40 @@ below; `npm run build` now exits 0.)
     checks (82 passed, 2 model-bound SKIPs this run) and `auditroutes.py` still
     holds; the new table needed no changes to either since neither previously
     touched checkout's success path in a way this could regress.
+
+27. **Built the comparison action** - the most-wanted capability in the research
+    (74%) and the thing a seller's assistant is assumed not to do. New
+    `ActionType.COMPARE_PRODUCTS` through all six steps of the standard process
+    (`Readme.MD`'s "Adding an action"): non-financial and reversible (read-only,
+    same risk shape as `ANSWER_PRODUCT_QUESTION`/`CHECK_AVAILABILITY`), mapped to
+    `Operation.GET_PRODUCT`, placed above `ANSWER_PRODUCT_QUESTION` in
+    `ASSISTANCE_PREFERENCE` for the chain's own "doing beats describing" reason,
+    added to `PROPOSABLE` with a new `compare_with_id` tool-schema parameter and a
+    prompt rule for when to propose it, and dispatched in `execution/service.py`
+    by fetching both products fresh via `adapter.get_product()` - never from
+    anything cached earlier in the conversation, so a comparison can't go stale
+    between a shopper mentioning something and asking to compare it.
+
+    `ChatReply` gained a `comparison` field, kept separate from `products` (a
+    list to browse) because the storefront renders it differently - always
+    exactly two things read against each other, never more. `ChatWidget` renders
+    two cards side by side (stacking on a narrow panel), each showing price,
+    description and stock, and each tappable via the same `tapProduct()` the rest
+    of the app already uses for recommended products, so comparing does not
+    dead-end a shopper who decides on the spot.
+
+    Verified end to end, not just in isolation: a direct chat call ("Compare the
+    Trailblazer Running Shoe and the Marathon Pro Racing Shoe") correctly
+    proposed `COMPARE_PRODUCTS`, auto-cleared through the risk gate, fetched both
+    products, and returned a real comparison - confirmed again in the actual
+    browser, rendering as two cards with correct prices, descriptions and stock,
+    each one tappable. Two new `healthcheck.py` checks pin the contract: the
+    model proposes `COMPARE_PRODUCTS` rather than `ANSWER_PRODUCT_QUESTION` for a
+    real compare request, and the comparison returned is exactly the two products
+    named, not a subset or a substitution. 86 checks total. `fuzz.py` holds every
+    invariant across 20 sequences (run because this touches
+    `execution/service.py` directly), and `auditroutes.py` holds. `npm run build`
+    and `npm run lint` both clean (same 7 pre-existing lint errors, untouched).
 
 ---
 
