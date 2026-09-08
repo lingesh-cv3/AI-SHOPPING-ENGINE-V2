@@ -298,6 +298,24 @@ reported 31 FAILED (one per field of the reply). Renamed the local. The same cla
 of bug cost a day on the payment route once (`key` shadowing `key`), so names in
 this codebase shadowing their module-scope cousins deserve a second look on sight.
 
+**A "recorded once, never revisited" outcome bug is a shape, not a one-off - fix
+the shape, not the instance.** The holdout comparison recorded a declined
+payment's outcome as unresolved the instant it happened and never checked
+whether the shopper went on to fix it themselves - so `holdout_resolved` read
+as a permanent zero regardless of what actually happened next. The first fix
+patched only the holdout's own call site. Asked to check for the same mistake
+elsewhere rather than trust that one fix, a grep for every caller of
+`record_outcome` found the identical gap at two more sites that had copied the
+same "record unresolved, never look again" pattern: an operator's rejection
+and an expired approval. All three got one shared fix
+(`resolve_unresolved_payment_cases_for_cart`) instead of three separate
+patches, specifically so a fourth friction type landing in this shape later has
+nowhere left to reopen it. When a bug is "X records a fact once and something
+later could make that fact stale," grep every other place that records the
+same kind of fact before calling the class of bug closed - fixing the one
+instance you were shown and stopping there is how the same mistake gets made
+again at the next call site.
+
 ---
 
 ## Agents

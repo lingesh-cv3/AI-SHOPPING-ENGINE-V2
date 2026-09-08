@@ -42,9 +42,13 @@ because they cannot touch money safely.
   file. Enforced twice: the route itself refuses (`require_checkout_identity`: 401
   SIGN_IN_REQUIRED for a guest, 428 EMAIL_REQUIRED for a signed-in account with no
   email) and the storefront hides the card buttons and Pay button behind the gate.
-- **The confirmation actually gets sent.** `engine/notify/` - the gate above existed
-  for this and, until this session, nothing used the address it collected. See
-  Fixed This Session, #26.
+- **The confirmation actually gets sent, and now actually arrives.** `engine/notify/`
+  - the gate above existed for this and, until session #26, nothing used the
+  address it collected. As of this session, real Gmail SMTP credentials are
+  configured in the local `.env` (gitignored) and a real order-confirmation
+  email was received end to end - no code changed, `mailer.py` already read
+  `MAILER_SMTP_HOST`/`PORT`/`USER`/`PASSWORD`/`FROM` correctly; it just had
+  nothing to connect to before. See Fixed This Session, #26 and #29.
 - **A cart, a conversation and an order each belong to somebody.** A signed-in
   shopper's things follow their account; a guest's follow an httpOnly cookie
   neither they nor a script on the page can read or choose. See Fixed This Session.
@@ -76,7 +80,7 @@ conversation or order at the same merchant - see Fixed This Session.
 
 ### Tests
 
-`healthcheck.py` - 91 checks, one path end to end. Reports SKIP rather than FAIL
+`healthcheck.py` - 94 checks, one path end to end. Reports SKIP rather than FAIL
 when the provider is busy, and says how many checks never executed.
 
 `fuzz.py` - random shopper sequences, asserting after every step that the cart
@@ -683,7 +687,8 @@ below; `npm run build` now exits 0.)
     A holdout shopper who is declined and simply retries the same card, or a
     different one, on their own - with no recovery ever offered - has resolved
     their own problem, and the comparison's entire point is answering how
-    often that happens without help. `db.resolve_holdout_case_for_cart` is
+    often that happens without help. `db.resolve_unresolved_payment_cases_for_cart`
+    (renamed and generalized in #30 below) is
     called from both places a payment can succeed (`shop.py`'s checkout route
     and `chat.py`'s pay route, the same two routes `confirm_order` already
     hooks into) and marks the most recent unresolved holdout case for that
@@ -696,6 +701,59 @@ below; `npm run build` now exits 0.)
     already hold resolved holdout cases from an earlier run, so ">= 1" alone
     would have passed even if this specific cart were never actually
     resolved. 91 checks total. `auditroutes.py` and `fuzz.py` hold again.
+
+29. **Order-confirmation mail is now actually delivered, not just recorded.**
+    No code changed - `mailer.py` (built in #26) already sent over real SMTP if
+    `MAILER_SMTP_HOST` was set and otherwise recorded without delivering. This
+    session, real Gmail SMTP credentials (an app password, not the account
+    password) went into the repo root's `.env` (gitignored, not committed):
+    `MAILER_SMTP_HOST=smtp.gmail.com`, `MAILER_SMTP_PORT=587`,
+    `MAILER_SMTP_USER`/`MAILER_FROM=lingesh@commercev3.com`,
+    `MAILER_SMTP_PASSWORD=<app password>`. The engine was restarted to pick up
+    the new environment, and a real order-confirmation email was received.
+    Anyone else running this locally needs their own credentials in their own
+    `.env` - there is nothing to inherit from git.
+
+30. **The holdout-resolution fix in #28 was only half the bug.** Asked to check
+    for the same mistake elsewhere rather than trust the one fix, a grep for
+    every `record_outcome` call site found two more with the identical shape:
+    `engine/api/routes.py`'s rejection branch (an operator turns down a
+    proposed recovery) and `engine/expiry.py`'s sweep (an approval nobody
+    actioned in time). Both record `resolved=False` the instant they run and
+    never look at the case again - so a shopper who was rejected, or whose
+    approval expired, and who then simply retried the same cart on their own
+    stayed counted as an unresolved problem forever, the exact gap #28 fixed
+    for the holdout alone.
+
+    `db.resolve_holdout_case_for_cart` is now
+    `db.resolve_unresolved_payment_cases_for_cart` - scoped to
+    `friction_type == PAYMENT_DECLINED` (a cart being paid is only an
+    unambiguous resolution signal for a payment that was previously declined
+    against it, not for an unrelated dead search or failed coupon sharing the
+    same cart), and marks every matching unresolved case for that cart, not
+    just the most recent - a cart declined twice before it finally paid
+    represents two real friction events, both resolved by the eventual
+    success. Fixed once, in the repository function both payment routes
+    already called, rather than separately in `routes.py` and `expiry.py`
+    too - the point of generalizing it is that a fourth friction type
+    landing in this same shape later has nowhere left to reopen the bug.
+
+    Verified for all three call sites, not just holdout: declined a cart,
+    rejected the resulting approval, then paid the same cart with a working
+    card, and confirmed `problems_solved` moved; separately, declined a cart,
+    let its approval expire via the sweeper, then paid the same cart, and
+    confirmed the same. Two new healthcheck checks (in "Rejection" and
+    "Expiry" respectively, alongside the existing holdout ones), both using a
+    before/after delta on `problems_solved` for the same reason the holdout
+    check does - an absolute count would pass even if this specific cart's
+    case were never actually touched. 94 checks total. `auditroutes.py` and
+    `fuzz.py` hold again.
+
+    The standing lesson - see CLAUDE.md's "Working practices" - a "recorded
+    once, never revisited" outcome bug is a shape, not a one-off. Fixing it
+    at a single call site invites finding it again at the next one someone
+    copied the pattern into; grep every caller of the same recording function
+    before considering the class of bug closed.
 
 ---
 
@@ -754,8 +812,10 @@ Playwright suite to them rather than reach for `healthcheck.py` again.
 
 1. The guest-checkout question is decided and implemented - checkout now requires
    a signed-in account with an email, and as of #26 the confirmation is actually
-   sent (recorded, not delivered, until `MAILER_SMTP_HOST` is set to a real
-   merchant's credentials). Still open after the decision: a handover message
+   sent, and as of #29 it is actually delivered (real Gmail SMTP credentials are
+   in the local, gitignored `.env` - this is a personal/dev setup, not a real
+   merchant's credentials, so anyone else running this locally needs their own).
+   Still open after the decision: a handover message
    written for a guest's dying session (guests no longer pay, but can still chat and
    still get escalated), and the shop now prompts for an email where it used to
    finish a sale - whether that nudges a merchant's conversion is worth watching.
