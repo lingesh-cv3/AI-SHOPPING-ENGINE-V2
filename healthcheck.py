@@ -452,6 +452,39 @@ if model_on:
             str(reasoned.get("diagnosis"))[:70],
             "engine/reasoning/prompts.py",
         )
+    # COMPARE_PRODUCTS: two real products, named by title, both present in
+    # Northfield's catalog. Asserts the model actually proposed the new action
+    # (not ANSWER_PRODUCT_QUESTION, which would also "answer" a compare
+    # request) and that execution returned both products fresh rather than
+    # nothing or one.
+    compared = call(
+        "POST",
+        "/api/chat",
+        {
+            "connection_id": NORTHFIELD,
+            "session_id": f"hc_compare_{uuid.uuid4().hex[:6]}",
+            "message": (
+                "Compare the Trailblazer Running Shoe (P1001) and the "
+                "Marathon Pro Racing Shoe (P1002) for me."
+            ),
+        },
+    )
+    comparison = compared.get("comparison") or []
+    check(
+        "the model proposes a comparison when asked to compare two products",
+        compared.get("action_taken") == "COMPARE_PRODUCTS" and len(comparison) == 2,
+        f"action_taken={compared.get('action_taken')} "
+        f"comparison_len={len(comparison)} reply={compared.get('reply', '')[:80]!r}",
+        "engine/execution/service.py COMPARE_PRODUCTS, engine/reasoning/prompts.py",
+    )
+    if len(comparison) == 2:
+        ids = {p.get("product_id") for p in comparison}
+        check(
+            "the comparison is the two products actually named",
+            ids == {"P1001", "P1002"},
+            str(ids),
+            "engine/execution/service.py COMPARE_PRODUCTS",
+        )
 else:
     print("  SKIP  model checks (no key configured)")
 
