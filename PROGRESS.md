@@ -52,6 +52,21 @@ operator key must be typed rather than built in.
 Reported after a walkthrough. **Not a complete list** - walk the product before
 trusting anything.
 
+**`healthcheck.py`'s "a successful recovery still explains what it did not do"
+is flaky**, and not from any code change - reproduced directly against the
+running engine. The check asserts Kettle's model-proposed recovery mentions
+`RETRY_PAYMENT` ("trying your card again") as outranked in `why.declined`,
+on the documented assumption that the model always proposes all three
+recovery actions (`OFFER_ALTERNATE_PAYMENT`, `SPLIT_PAYMENT`,
+`RETRY_PAYMENT`) so ranking always has something to explain away. Confirmed by
+direct repro: the model sometimes proposes only two of the three
+(`OFFER_ALTERNATE_PAYMENT` + `SPLIT_PAYMENT`), and when `RETRY_PAYMENT` is
+never proposed, there is nothing for ranking to outrank and nothing for `why`
+to explain - the check fails on a true negative, not a bug. Worth loosening
+to accept any of the three actions being explained as outranked, not
+`RETRY_PAYMENT` specifically, since the model's choice of which two (or
+three) to propose is not itself something this project controls or should.
+
 **Occasional near-duplicate assistant messages** from the poll's deduplication -
 the last real behaviour bug, browser-only. One reproduction attempt so far
 (see `Completed.md`'s standing-lesson entries for the general practice this

@@ -290,9 +290,30 @@ async def chat(
     key=Depends(any_key),
     who: Visitor = Depends(visitor),
 ) -> ChatReply:
-    """Handle one shopper message."""
+    """Handle one shopper message.
+
+    Auth and ownership only. The pipeline itself lives in `_process_turn`,
+    shared with the webhook route (`engine/api/webhooks.py`) - a merchant's
+    own platform reporting a decline is the same friction the storefront
+    reports, run through the identical reasoning/decision/risk/execution
+    chain, and duplicating that chain anywhere risk-gate-adjacent is exactly
+    the kind of copy this project's invariants exist to prevent. What differs
+    for a webhook is not the pipeline, only how the caller is authenticated:
+    a shopper's key and cookie here, a platform's signature there.
+    """
     belongs_to(key, req.connection_id)
     await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
+    return await _process_turn(req)
+
+
+async def _process_turn(req: ChatRequest) -> ChatReply:
+    """The pipeline: reasoning, decision, risk, execution, reply.
+
+    No auth or ownership check here - callers are responsible for that
+    before this runs. `chat()` checks a shopper's key and cookie; the
+    webhook route checks the merchant platform's signature instead. Neither
+    belongs in the pipeline itself.
+    """
     adapter = engine.registry.adapter_for(req.connection_id)
     if adapter is None:
         raise HTTPException(404, f"unknown connection '{req.connection_id}'")
