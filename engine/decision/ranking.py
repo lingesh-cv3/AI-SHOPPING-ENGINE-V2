@@ -123,6 +123,10 @@ ASSISTANCE_PREFERENCE: tuple[ActionType, ...] = (
     ActionType.RECOMMEND_PRODUCTS,
     ActionType.SUGGEST_ALTERNATIVE,
     ActionType.CHECK_AVAILABILITY,
+    # Above ANSWER_PRODUCT_QUESTION for the same "doing beats describing"
+    # reason as the rest of this chain: a shopper who asked to compare two
+    # things wants the comparison, not a restated description of one of them.
+    ActionType.COMPARE_PRODUCTS,
     ActionType.ANSWER_PRODUCT_QUESTION,
 )
 

@@ -33,6 +33,7 @@ PROPOSABLE: tuple[ActionType, ...] = (
     ActionType.RECOMMEND_PRODUCTS,
     ActionType.ANSWER_PRODUCT_QUESTION,
     ActionType.CHECK_AVAILABILITY,
+    ActionType.COMPARE_PRODUCTS,
     ActionType.SUGGEST_ALTERNATIVE,
     ActionType.ADD_TO_CART,
     ActionType.UPDATE_CART_QUANTITY,
@@ -129,9 +130,21 @@ def propose_tool() -> dict[str, Any]:
                                 "product_id": {
                                     "type": "string",
                                     "description": (
-                                        "For ADD_TO_CART or CHECK_AVAILABILITY: "
-                                        "which product. Only use an id present "
-                                        "in the context."
+                                        "For ADD_TO_CART, CHECK_AVAILABILITY, or "
+                                        "COMPARE_PRODUCTS: which product (the "
+                                        "first one, for a comparison). Only use "
+                                        "an id present in the context."
+                                    ),
+                                },
+                                "compare_with_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "For COMPARE_PRODUCTS only: the second "
+                                        "product's id. Both product_id and "
+                                        "compare_with_id must be ids present in "
+                                        "the context - never invent one, and "
+                                        "never propose this action for a "
+                                        "product you cannot see."
                                     ),
                                 },
                                 "variant_id": {
@@ -231,6 +244,11 @@ Rules that matter:
   the action runs, so you cannot know whether it will succeed - and the
   answer appears in the same message as your promise, which reads as a
   system talking to itself. One short line and stop: "Let me check that."
+- Propose COMPARE_PRODUCTS when the shopper asks to compare, or asks which of
+  two named products is better/cheaper/right for them, and both are present
+  in your context. Fill product_id and compare_with_id with both ids exactly
+  as they appear there. Never propose it for a product you cannot see, and
+  never propose it for only one product - that is ANSWER_PRODUCT_QUESTION.
 - Propose CHECK_ORDER_STATUS when the shopper asks about an order and gives
   you a number, and put that number in the order_id field exactly as they
   wrote it. If they ask about an order without naming one, ask for the

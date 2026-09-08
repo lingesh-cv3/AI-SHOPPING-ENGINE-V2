@@ -156,6 +156,7 @@ properties from a static table in `shared/models/action.py`:
 | `ADD_TO_CART` | no | yes |
 | `REMOVE_CART_LINE` | no | yes |
 | `CHECK_AVAILABILITY` | no | yes |
+| `COMPARE_PRODUCTS` | no | yes |
 | `NOTIFY_BACK_IN_STOCK` | no | **no** |
 | `APPLY_PROMOTION` | **yes** | yes |
 | `RETRY_PAYMENT` | **yes** | no |

@@ -198,6 +198,7 @@ export function ChatWidget({
           speaker: "assistant",
           text: r.reply,
           products: r.products,
+          comparison: r.comparison,
           awaitingPerson: r.awaiting_person,
           usedModel: r.used_model,
           choices: r.choices,
@@ -377,6 +378,41 @@ export function ChatWidget({
                     {p.description && (
                       <span className="cpdesc">{p.description}</span>
                     )}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Exactly two products, fetched fresh - never the model's memory
+                of them. Each card taps the same way a recommended product
+                does, so comparing does not dead-end a shopper who decides. */}
+            {turn.comparison && turn.comparison.length === 2 && (
+              <div className="chatcomparison">
+                {turn.comparison.map((p) => (
+                  <button
+                    key={p.product_id}
+                    className="comparecard tappable"
+                    disabled={busy !== null || p.availability === "OUT_OF_STOCK"}
+                    onClick={() => tapProduct(p)}
+                  >
+                    <span className="cptitle">
+                      <span>{p.title}</span>
+                      <span className="num">{p.price}</span>
+                    </span>
+                    {p.description && (
+                      <span className="cpdesc">{p.description}</span>
+                    )}
+                    <span
+                      className={
+                        p.availability === "OUT_OF_STOCK"
+                          ? "comparestock out"
+                          : "comparestock"
+                      }
+                    >
+                      {p.availability === "OUT_OF_STOCK"
+                        ? "Out of stock"
+                        : "In stock"}
+                    </span>
                   </button>
                 ))}
               </div>

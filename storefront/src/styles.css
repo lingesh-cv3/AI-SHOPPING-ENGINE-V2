@@ -1820,6 +1820,63 @@ select.card-picker {
 }
 
 
+/* Two products, side by side - the shape a comparison actually is, not a list
+ * to scroll through. Stacks on a narrow chat panel rather than squeezing two
+ * columns into a width neither can read in. */
+.chatcomparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 9px;
+  border-top: 1px solid var(--line);
+  padding-top: 7px;
+}
+
+@media (max-width: 420px) {
+  .chatcomparison {
+    grid-template-columns: 1fr;
+  }
+}
+
+.comparecard {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--body);
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.13s var(--ease), background 0.13s var(--ease);
+}
+
+.comparecard:hover:not(:disabled) {
+  border-color: var(--ink);
+  background: var(--paper);
+}
+
+.comparecard:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.comparestock {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.comparestock.out {
+  color: var(--friction);
+}
+
+
 /* A suggested product needs enough for a shopper to judge it. Name and price alone
  * means they tap blindly or ignore the card. */
 .cptitle {

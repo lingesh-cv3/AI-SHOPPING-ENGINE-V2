@@ -228,6 +228,15 @@ export interface ChatTurn {
     price: string | null;
     categories: string[];
   }[];
+  /** Exactly two products, fetched fresh, when the shopper asked to compare
+   *  them - never more, never recalled from earlier in the conversation. */
+  comparison?: {
+    product_id: string;
+    title: string;
+    description: string | null;
+    price: string | null;
+    availability: string;
+  }[];
   awaitingPerson?: boolean;
   usedModel?: boolean;
 }
@@ -270,6 +279,13 @@ export interface ChatReply {
     description: string | null;
     price: string | null;
     categories: string[];
+  }[];
+  comparison: {
+    product_id: string;
+    title: string;
+    description: string | null;
+    price: string | null;
+    availability: string;
   }[];
   awaiting_person: boolean;
   payment: PaymentOffer;

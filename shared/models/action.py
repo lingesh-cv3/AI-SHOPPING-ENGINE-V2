@@ -41,6 +41,13 @@ class ActionType(StrEnum):
     ANSWER_PRODUCT_QUESTION = "ANSWER_PRODUCT_QUESTION"
     CHECK_AVAILABILITY = "CHECK_AVAILABILITY"
 
+    #: Two products, side by side - price, description, availability, both
+    #: fetched fresh rather than recalled from earlier in the conversation, so
+    #: a comparison can never go stale between a shopper mentioning something
+    #: and asking to compare it. Read-only, the same shape as
+    #: ANSWER_PRODUCT_QUESTION and CHECK_AVAILABILITY.
+    COMPARE_PRODUCTS = "COMPARE_PRODUCTS"
+
     # Recovery — non-financial
     SUGGEST_ALTERNATIVE = "SUGGEST_ALTERNATIVE"
     ADD_TO_CART = "ADD_TO_CART"
@@ -110,6 +117,7 @@ ACTION_RISK_PROPERTIES: dict[ActionType, RiskProperties] = {
     ActionType.RECOMMEND_PRODUCTS: RiskProperties(financial=False, reversible=True),
     ActionType.ANSWER_PRODUCT_QUESTION: RiskProperties(financial=False, reversible=True),
     ActionType.CHECK_AVAILABILITY: RiskProperties(financial=False, reversible=True),
+    ActionType.COMPARE_PRODUCTS: RiskProperties(financial=False, reversible=True),
     ActionType.SUGGEST_ALTERNATIVE: RiskProperties(financial=False, reversible=True),
     ActionType.ADD_TO_CART: RiskProperties(financial=False, reversible=True),
     ActionType.UPDATE_CART_QUANTITY: RiskProperties(financial=False, reversible=True),

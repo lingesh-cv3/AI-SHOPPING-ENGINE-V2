@@ -254,6 +254,8 @@ class ReasoningService:
                 parameters["product_id"] = str(pid)
             if vid := raw.get("variant_id"):
                 parameters["variant_id"] = str(vid)
+            if cwid := raw.get("compare_with_id"):
+                parameters["compare_with_id"] = str(cwid)
             if oid := raw.get("order_id"):
                 parameters["order_id"] = str(oid).strip()
             if code := raw.get("code"):

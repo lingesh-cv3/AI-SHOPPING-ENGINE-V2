@@ -22,6 +22,7 @@ A recovery system that only records its successes cannot tell you whether it wor
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -460,6 +461,43 @@ class ExecutionService:
                         "product_id": product_id,
                         "availability": str(stock.availability),
                         "quantity_available": stock.quantity_available,
+                    },
+                )
+            case ActionType.COMPARE_PRODUCTS:
+                first_id = params.get("product_id")
+                second_id = params.get("compare_with_id")
+                if not (first_id and second_id):
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=(
+                            "Two products are needed to compare, and only one "
+                            "was named."
+                        ),
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+                # Fetched fresh rather than read from anything cached earlier in
+                # the conversation - a comparison built from a stale price or
+                # stock state is worse than not offering one.
+                first, second = await asyncio.gather(
+                    adapter.get_product(first_id), adapter.get_product(second_id)
+                )
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=f"Compared {first.title} with {second.title}.",
+                    payload={
+                        "comparison": [
+                            {
+                                "product_id": p.product_id,
+                                "title": p.title,
+                                "description": p.description,
+                                "price": str(p.price) if p.price else None,
+                                "availability": str(p.availability),
+                            }
+                            for p in (first, second)
+                        ],
                     },
                 )
             case ActionType.ADD_TO_CART:

@@ -111,6 +111,12 @@ class ChatReply(BaseModel):
     action_summary: str | None = None
     products: list[dict] = Field(default_factory=list)
 
+    #: Two products, side by side, when the shopper asked to compare them.
+    #: Separate from `products` (a list to browse) because the storefront
+    #: renders them differently - a comparison is always exactly two things
+    #: read against each other, not a set to pick from.
+    comparison: list[dict] = Field(default_factory=list)
+
     #: Options the shopper must pick between before the action can run. Rendered
     #: as buttons rather than asked in prose - "which size?" followed by a list
     #: they have to type back is worse than three things they can tap.
@@ -426,6 +432,7 @@ async def chat(
     action_taken = None
     action_summary = None
     products: list[dict] = []
+    comparison: list[dict] = []
     choices: list[dict] = []
     payment: dict = {}
     choices: list[dict] = []
@@ -450,6 +457,9 @@ async def chat(
         found = executed.payload.get("products")
         if isinstance(found, list):
             products = found
+        found_comparison = executed.payload.get("comparison")
+        if isinstance(found_comparison, list):
+            comparison = found_comparison
         if executed.needs_choice:
             # Not a failure. The shopper has not said enough yet, and asking is the
             # right answer - a guessed size is a return waiting to happen.
@@ -578,6 +588,7 @@ async def chat(
         action_taken=action_taken,
         action_summary=action_summary,
         products=products,
+        comparison=comparison,
         choices=choices,
         payment=payment,
         rate_limited=rate_limited,
