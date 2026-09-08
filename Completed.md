@@ -72,6 +72,11 @@ console can show the resolution rate with the assistant against without it,
 proving the engine caused the difference rather than reporting a number that
 would have happened anyway. Off (0%) unless a merchant deliberately turns it on.
 See Completed Work, #28 and #30.
+**Webhooks** - a merchant's own platform can report friction directly (a
+declined payment, an abandoned cart) without our storefront ever being open,
+verified by the platform's own signature and run through the identical
+pipeline a shopper's own message uses. Built for Kettle; Northfield does not
+implement it, deliberately. See Completed Work, #31.
 
 ### For CV3
 
@@ -89,7 +94,7 @@ conversation or order at the same merchant - see Completed Work.
 
 ### Tests
 
-`healthcheck.py` - 94 checks, one path end to end. Reports SKIP rather than FAIL
+`healthcheck.py` - 96 checks, one path end to end. Reports SKIP rather than FAIL
 when the provider is busy, and says how many checks never executed.
 
 `fuzz.py` - random shopper sequences, asserting after every step that the cart
@@ -737,3 +742,73 @@ below; `npm run build` now exits 0.)
     at a single call site invites finding it again at the next one someone
     copied the pattern into; grep every caller of the same recording function
     before considering the class of bug closed.
+
+31. **Built webhook intake - the feature PROGRESS.md itself named as the one
+    blocking a real client from connecting at all.** A merchant's own
+    platform can now report friction directly, not only through our
+    storefront watching a shopper. `shared/models/events.py` already named
+    this as the second of three ways a `Signal` can enter the engine
+    (`WIDGET`, `MERCHANT_WEBHOOK`, `ENGINE`); this is what makes it real for
+    the second source.
+
+    First, a prerequisite refactor: `engine/api/chat.py`'s `chat()` route was
+    split into `chat()` (auth and ownership only) and a new `_process_turn()`
+    holding the entire reasoning/decision/risk/execution/reply chain - a pure
+    mechanical extraction, confirmed by diff to change no logic. This exists
+    so the webhook route could reuse the identical pipeline rather than
+    duplicating anything risk-gate-adjacent, which is exactly the kind of
+    copy this project's invariants exist to prevent.
+
+    New `engine/api/webhooks.py`: `POST /api/webhooks/{connection}`. No
+    bearer key - the caller is a merchant's own backend, not a browser
+    holding a credential we issued, so it authenticates via
+    `SupportsWebhooks.verify_webhook` instead. An unverified signature is
+    401, discarded before the body is ever parsed. Every verified signal
+    builds a synthetic `ChatRequest` (`synthetic=True`, so nobody's words are
+    misattributed to a shopper who never typed them) and runs through
+    `_process_turn` - the exact chain a shopper's own message uses.
+
+    Kettle is the reference implementation
+    (`adapters/kettle/adapter.py`): HMAC-SHA256 over the raw body,
+    hex-encoded, in an `X-Kettle-Signature` header - the same family of
+    scheme Stripe and Shopify actually use, verified with
+    `hmac.compare_digest` for the constant-time comparison a signature check
+    needs. Northfield does not implement `SupportsWebhooks`; that is
+    deliberate - a real integration adds it when that platform's own events
+    are worth wiring, not before. `KETTLE_WEBHOOK_SECRET`
+    (`engine/api/deps.py`) defaults to a demo value for local convenience,
+    the same pattern `MAILER_SMTP_*` already uses.
+
+    Verified end to end against the running engine, not unit-tested in
+    isolation: an unsigned webhook refused (401), a wrongly-signed one
+    refused (401), an unknown connection refused (404), Northfield (no
+    webhook support) refused (404), a correctly signed payment-declined
+    event accepted and run through the real pipeline - proposed a real
+    recovery action, gated `HUMAN` by `FINANCIAL_ALWAYS_HUMAN`, landed in the
+    operations queue with its `MERCHANT_WEBHOOK` provenance visible in the
+    query field. Approved it against a real order and watched the platform
+    genuinely recover the payment - a first attempt against fabricated
+    order/cart ids correctly failed against the real backend instead of
+    faking success, proving the whole chain is live, not mocked. Confirmed
+    on all three surfaces: the operations queue, the merchant console's
+    activity feed, and (had the event carried a real session id) a
+    shopper's own chat transcript via the existing poll mechanism.
+
+    Seven new healthcheck checks cover the whole chain (96 total: unsigned,
+    wrong signature, unknown connection, unsupported platform, valid
+    webhook, real-pipeline verification, unrecognised event type).
+    `auditroutes.py` and `fuzz.py` (every invariant, 20 sequences) both
+    hold.
+
+    Also fixed in passing, found while running the full suite for this
+    change rather than caused by it: `healthcheck.py`'s "a successful
+    recovery still explains what it did not do" was genuinely flaky.
+    Reproduced directly against the running engine - the check assumed the
+    model always proposes all three Kettle recovery actions, so
+    `RETRY_PAYMENT` (documented as always ranked last) is reliably the one
+    outranked. The model sometimes proposes only two, and when
+    `RETRY_PAYMENT` is not among them there is nothing for ranking to
+    outrank and nothing for `why()` to explain. Loosened to accept any of
+    the three recovery phrasings as the ranked-lower explanation, since
+    which two-or-three the model chooses to propose is not something this
+    project controls.

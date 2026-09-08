@@ -25,10 +25,6 @@
 
 ## Features Not Yet Built
 
-**Webhooks.** Friction reaches the engine only because our own storefront reports
-it. `SupportsWebhooks` is defined and empty. **This is what stands between the engine
-and a real client** - no merchant can connect without it.
-
 **The assistant is not installable.** A React component in our storefront, not a
 script tag a merchant adds to their site.
 
@@ -110,7 +106,8 @@ should extend the Playwright suite to them rather than reach for
    is a lifecycle-semantics decision that wants a deliberate call, and the
    blank-note handover is a deliberate behaviour worth revisiting rather than
    an obvious bug.
-4. Of the unbuilt features, webhooks is the one blocking a real client from
-   connecting at all - everything else (the installable widget, a CI gate for
-   the browser tests, `eval.py`'s reliability number, Postgres/hosting) is
-   valuable but not load-bearing for onboarding a first real merchant.
+4. Webhooks are built (Kettle only - see `Completed.md`, #31). Of what remains
+   unbuilt, the installable widget is the next thing standing between the
+   engine and a merchant actually adding it to their own site; a CI gate for
+   the browser tests, `eval.py`'s reliability number, and Postgres/hosting are
+   all valuable but not load-bearing for onboarding a first real merchant.
