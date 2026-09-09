@@ -1240,8 +1240,8 @@ below; `npm run build` now exits 0.)
       Shoe 3.7); Kettle's own catalog independently confirmed with its own
       distinct ratings (Colombia Huila Washed 4.9 topping Kettle's list).
 
-    **Verification common to all four:** `invariant-guard` reviewed the full
-    diff (`engine/api/chat.py`, `engine/execution/service.py`,
+    **Verification common to the four above:** `invariant-guard` reviewed the
+    full diff (`engine/api/chat.py`, `engine/execution/service.py`,
     `engine/reasoning/service.py`, `engine/reasoning/prompts.py`,
     `shared/models/commerce.py`, both adapters' `mapping.py`, both catalogs'
     seed files) against all six hard invariants and the idempotency rule
@@ -1249,12 +1249,180 @@ below; `npm run build` now exits 0.)
     violations: none of the four fixes touch payment/cart/idempotency logic,
     none give the model any new way to assert risk, and the one real gap
     found (the NaN crash) was fixed and reverified in the same pass.
-    `test-runner` ran the full three-suite pass at the end: `healthcheck.py`
-    99 PASS / 0 FAIL / 2 SKIP (Groq throttle, unrelated - the session's
-    `.env` was switched from a temporary OpenAI key back to a real Groq key
-    partway through, restoring the documented free-tier throttle), `fuzz.py`
-    20/20 sequences held (1200 assertions), `auditroutes.py` all checks
-    held. Zero regressions from any of the four fixes.
+
+    **Continuing the same reported list, same session (still uncommitted):**
+    the same user report had seven items; three more of them plus one more
+    bug the user found on re-test are covered here too.
+
+    - **Button-recovery gap fixed (the user's own re-test finding).** A page
+      reload already restored size-choice buttons (`choices`) across a
+      refresh, but silently dropped `products` (recommended/searched product
+      cards), `comparison` (two-item compare cards), and `payment` (the card
+      picker at checkout) - a reload mid-browse, mid-compare or mid-pay lost
+      the buttons entirely, leaving only text. Root cause: `SessionTurn` only
+      ever had a `choices_json` column; the other three were computed and
+      returned live but never persisted. Fixed by adding three new columns
+      (`products_json`, `comparison_json`, `payment_json`) via an idempotent
+      SQLite migration (same pattern as the existing `choices_json`
+      migration in `engine/db/session.py`), threading
+      `products`/`comparison`/`payment` through `engine/session/store.py`'s
+      `add_turn()`/`turns()`, and updating the ONE `add_turn()` call site (of
+      nine total) where these values are actually computed -
+      `engine/api/chat.py`'s `_process_turn`. The other eight call sites were
+      individually checked and confirmed to have none of these three values
+      available in scope, so were correctly left unchanged. Frontend:
+      `StoredTurn` (`storefront/src/api.ts`) and `ChatWidget.tsx`'s
+      restore-on-mount effect updated to carry all three over the same way
+      `choices` already was.
+
+      Verified live with real proof, not just presence: triggered a live
+      product search, confirmed the transcript endpoint returns the products
+      in the stored turn; triggered a live checkout (PREPARE_CHECKOUT),
+      confirmed the restored `payment` object carries the real `cart_id`
+      (not a placeholder) - meaning a restored Pay button would actually
+      charge the right cart, not just render. `invariant-guard` confirmed
+      this is read/replay-only (no new write path to cart/payment/
+      execution) and that the restored `payment.cart_id` still flows through
+      the same `_mine()` ownership check and the same cart-id-only
+      idempotency key as before - restoring data does not create a way to
+      bypass or confuse payment idempotency.
+
+    - **Comparison UI redesigned (user-reported: cramped buttons, overflow,
+      no explicit buy action).** The old `.comparecard` rendering made each
+      entire product card one giant clickable `<button>` (info and action
+      conflated, and per the user's report, visually overflowing its
+      container). Replaced in `storefront/src/ChatWidget.tsx` with a proper
+      fact-by-fact comparison table (`.comparetable` in
+      `storefront/src/styles.css`) - one row per fact (price, stock,
+      details), one column per product, scrolling inside its own
+      `overflow-x: auto` container so the page/bubble never scrolls
+      sideways - and an explicit "Buy now" button (`.cpbuy`) at the bottom of
+      each column, calling the same `tapProduct()` add-to-cart path the old
+      whole-card click used, just now a clearly separate action from reading
+      the comparison. Verified via `npm run build`/`npm run lint` (clean, no
+      new errors beyond the same 6 pre-existing ones).
+
+    - **Category-first browsing built (user-reported: a generic "what's
+      available" ask only ever showed 6 arbitrary products, which happened
+      to all be shoes because Northfield's catalog lists footwear first).**
+      Investigation found both merchant platforms already carry real
+      category data (Northfield's `dept` field, Kettle's `collection`
+      field) that the engine never surfaced. Added a new `category: string`
+      field to the RECOMMEND_PRODUCTS/SUGGEST_ALTERNATIVE tool schema
+      (`engine/reasoning/prompts.py`, with a new prompt rule: leave both
+      `search_query` and `category` out for a genuinely general "what do you
+      have", let the system offer real categories instead of guessing which
+      slice to show; fill `category` with the exact name once the shopper
+      names or taps one), parsed in `engine/reasoning/service.py`'s
+      `_parse()`. `engine/execution/service.py`'s RECOMMEND_PRODUCTS
+      dispatch gained: a new early-return branch that fires only for a
+      genuinely unconstrained browse (no query, no category, no price
+      bound, no top_rated) - it does one
+      `adapter.search_products("", limit=100)` read, derives the distinct
+      category set across the results, and returns `category_choices`
+      instead of a product list (falling through to the ordinary browse if
+      the platform has no category data at all, rather than offering an
+      empty list); and a new `_within_category()` filter applied alongside
+      the existing `_within_price` filter whenever `category` is set, in
+      both the keyword-search path and the empty-query fallback.
+      `engine/api/chat.py` threads a new `category_choices` list through
+      `_process_turn`, a new `ChatReply.category_choices` field, and a new
+      reply-replacement branch ("We carry a few different things - X, Y and
+      Z. Which would you like to see?") using the same replace-not-append
+      pattern as the pre-existing `needs_choice`/CLEAR_CART/
+      CHECK_ORDER_STATUS branches. A fourth new `category_choices_json`
+      column was added to `SessionTurn` (same migration/persistence pattern
+      as the button-recovery fix above) so category buttons also survive a
+      reload. Frontend: `ChatWidget.tsx` renders category buttons the same
+      way `choices` buttons already render; tapping one sends "Show me
+      {category}" as a normal chat message (consistent with how tapping a
+      recommended product already works - not a deterministic tap, since
+      RECOMMEND_PRODUCTS was never in the trusted-tap category to begin
+      with).
+
+      Verified live end to end, waiting out the Groq throttle between calls
+      to get real model responses: "what are the product available in the
+      store now" correctly returned 6 real categories (Accessories,
+      Apparel, Footwear, Nutrition, Recovery, Tech) with no products shown;
+      "Show me Accessories" (same session) correctly narrowed to exactly
+      the six real accessories products (Insulated Water Bottle,
+      Performance Socks, Foam Roller, Hydration Vest, Running Cap, Race
+      Belt) - none of them shoes. `invariant-guard` confirmed the new
+      execution branch is a pure read (no cart/payment/adapter write),
+      category matching is scoped to the single connection's own catalog
+      only, and the model's freely-supplied `category` string can only ever
+      narrow to real products that platform actually carries (never invent
+      one), with no path to the risk gate.
+
+    - **Multi-item add - honest partial mitigation, not the full fix
+      (deliberate scope decision, not a gap left unexplained).** The user's
+      original report: "add trailblazer running shoe of size 8 and marathon
+      pro racing shoe of size 8" only ever added the first item, with the
+      second silently dropped - no acknowledgment it was ever asked for.
+      Investigated whether a full fix (both items added in one turn) was
+      safely achievable this session: it is not, without a real
+      architecture change - `engine/decision/engine.py`'s Decision Engine
+      selects exactly one candidate per turn by design (its own docstring:
+      "answers exactly one question: which of these candidate actions
+      should we take?"), and this project's existing variant-trust rule
+      (only an exact tap or exact-whole-message match is ever trusted for
+      ADD_TO_CART, never a parsed free-text guess - the fix for a
+      documented prior double-add bug, Completed.md #15) means even a
+      single ambiguous item always needs a clarifying tap, so two ambiguous
+      items in one message would need a pending-item queue that survives
+      the tap round-trip across turns - real, separate engineering,
+      deliberately not attempted this session rather than risking a
+      half-built state machine that could reopen the double-add bug class.
+
+      What WAS fixed: (a) a new prompt rule (`engine/reasoning/prompts.py`)
+      telling the model to propose a separate ADD_TO_CART for each product a
+      shopper names in one message, up to the four-action schema limit,
+      rather than silently picking only the first - so the second item at
+      least reaches `reasoning.actions` where the system can see it was
+      asked for; (b) a new `_second_item_note()` helper in
+      `engine/api/chat.py`, called from both the needs_choice reply and the
+      ADD_TO_CART success reply, that detects when `reasoning.actions`
+      contains more than one ADD_TO_CART proposal for different products and
+      appends an honest sentence - "I can only take one item at a time right
+      now - ask me for the other one next and I'll add that too" - rather
+      than saying nothing about the second item, which is what happened
+      before. This directly fixes the "it is not adding two products, and
+      doesn't say so" half of the complaint; it does not fix the "both
+      should add in one message" half, which remains open in `PROGRESS.md`
+      with the architecture reasoning above, not silently closed.
+
+    **Process-hygiene incident during verification, not an application
+    bug:** a test-runner agent reported an apparent server crash under
+    `fuzz.py` load correlated with the new turn-persistence code.
+    Investigated and disproved: the actual cause was four duplicate
+    `fuzz.py` client processes and two duplicate engine processes left
+    running simultaneously from repeated manual restarts during iterative
+    testing, all contending for the same SQLite file. After killing every
+    stray process and restarting cleanly with exactly one instance of each
+    service, a full clean run held: `fuzz.py` 20/20 sequences, 1200
+    assertions, "every invariant held", zero crashes. Confirmed
+    `engine/reasoning/service.py`'s `_FALLBACK_ASSISTANCE` table (used only
+    when the model is unreachable) is completely untouched by any diff this
+    session via `git diff` - ruling it out as a cause of anything. No code
+    fix was needed; this was purely session/process hygiene, not a bug.
+
+    `test-runner` ran the full three-suite pass at the end, after the
+    process-hygiene cleanup, against the running engine covering all eight
+    fixes in this entry: `healthcheck.py` 99 PASS / 2 FAIL / 0 SKIP - the two
+    FAILs ("the model proposes a comparison when asked to compare two
+    products", "asks which size instead of guessing") were investigated and
+    conclusively attributed to the documented Groq free-tier throttle
+    (CLAUDE.md's "The constraint") rather than a regression: both failures
+    show the reasoning fallback table selecting `RECOMMEND_PRODUCTS` with
+    empty parameters (the only option that table has ever had for an
+    unclassified request when the model can't be reached - confirmed via
+    `git diff` that `_FALLBACK_ASSISTANCE` was not touched this session), so
+    these two specific checks were already fragile under throttle before any
+    of this session's changes; the only thing that changed is what an
+    empty-param RECOMMEND_PRODUCTS now replies with when hit that way.
+    `fuzz.py`: 20/20 sequences, 1200 assertions, every invariant held.
+    `auditroutes.py`: all 23 checks held. `npm run build`/`npm run lint`
+    clean throughout (same 6 pre-existing lint errors).
 
     These are bug fixes to already-shipped shopper-chat functionality, not
     new roadmap features, so the value-bar/feature-spec process does not

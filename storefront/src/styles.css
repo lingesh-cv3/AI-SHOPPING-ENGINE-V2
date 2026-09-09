@@ -1820,51 +1820,64 @@ select.card-picker {
 }
 
 
-/* Two products, side by side - the shape a comparison actually is, not a list
- * to scroll through. Stacks on a narrow chat panel rather than squeezing two
- * columns into a width neither can read in. */
-.chatcomparison {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+/* Two products, one fact per row - the shape a comparison answers a
+ * question in ("which is cheaper", "which is in stock"), not two card
+ * paragraphs a shopper has to re-read against each other. Scrolls inside
+ * its own container on a narrow chat panel rather than ever widening the
+ * message bubble itself. */
+.comparetable-wrap {
   margin-top: 9px;
   border-top: 1px solid var(--line);
   padding-top: 7px;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
-@media (max-width: 420px) {
-  .chatcomparison {
-    grid-template-columns: 1fr;
-  }
-}
-
-.comparecard {
-  display: flex;
-  flex-direction: column;
+.comparetable {
+  border-collapse: collapse;
   width: 100%;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  color: var(--ink);
-  font-family: var(--body);
+  min-width: 280px;
+  font-size: 12px;
+}
+
+.comparetable th,
+.comparetable td {
+  padding: 6px 8px;
   text-align: left;
-  padding: 8px 10px;
-  border-radius: 2px;
-  cursor: pointer;
-  transition: border-color 0.13s var(--ease), background 0.13s var(--ease);
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
 }
 
-.comparecard:hover:not(:disabled) {
-  border-color: var(--ink);
-  background: var(--paper);
+.comparetable thead th {
+  font-family: var(--body);
+  font-weight: 700;
+  font-size: 12.5px;
+  color: var(--ink);
+  border-bottom: 1px solid var(--ink);
 }
 
-.comparecard:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
+.comparetable-rowlabel {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.comparetable tbody th {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  white-space: nowrap;
+  width: 1%;
+}
+
+.comparetable tbody tr:last-child th,
+.comparetable tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .comparestock {
-  margin-top: 6px;
   font-family: var(--mono);
   font-size: 9px;
   letter-spacing: 0.08em;
@@ -1876,22 +1889,39 @@ select.card-picker {
   color: var(--friction);
 }
 
-
-/* A suggested product needs enough for a shopper to judge it. Name and price alone
- * means they tap blindly or ignore the card. */
-.cptitle {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 12.5px;
-}
-
 .cpdesc {
-  display: block;
   font-size: 11.5px;
   color: var(--ink-3);
-  margin-top: 2px;
-  line-height: 1.35;
+  line-height: 1.4;
+  max-width: 220px;
+}
+
+/* One per column, so comparing never dead-ends a shopper who has already
+ * decided - the whole point of the table is to reach this. */
+.cpbuy {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--surface);
+  padding: 7px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.13s var(--ease), opacity 0.13s var(--ease);
+}
+
+.cpbuy:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.cpbuy:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 

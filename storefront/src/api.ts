@@ -135,6 +135,25 @@ export interface StoredTurn {
     product_title: string;
     left: number | null;
   }[];
+  /** The other three things a turn can carry, restored the same way choices
+   *  are - a reload mid-browse, mid-compare or mid-pay used to lose these and
+   *  leave only the sentence, the same gap choices had before it was fixed. */
+  products: {
+    product_id: string;
+    title: string;
+    description: string | null;
+    price: string | null;
+    categories: string[];
+  }[];
+  comparison: {
+    product_id: string;
+    title: string;
+    description: string | null;
+    price: string | null;
+    availability: string;
+  }[];
+  payment: PaymentOffer | null;
+  category_choices: string[];
 }
 
 export interface Product {
@@ -239,6 +258,9 @@ export interface ChatTurn {
   }[];
   awaitingPerson?: boolean;
   usedModel?: boolean;
+  /** The shop's real categories, offered when a browse had nothing to narrow
+   *  it. Rendered as tappable buttons, same reasoning as `choices`. */
+  categoryChoices?: string[];
 }
 
 export interface PaymentOffer {
@@ -303,6 +325,9 @@ export interface ChatReply {
     product_title: string;
     left: number | null;
   }[];
+  /** The shop's real categories, offered for a browse with nothing to
+   *  narrow it - the same tap-not-type reasoning as `choices`. */
+  category_choices: string[];
   remembered_turns: number;
   remembered_friction: number;
   cart_changed: boolean;

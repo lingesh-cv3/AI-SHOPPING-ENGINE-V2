@@ -88,27 +88,31 @@ using `DIAGNOSED` as a terminal state for "needs a choice" is semantically odd.
 Closing a handover with a blank note tells the shopper nothing by design,
 which is worth revisiting rather than an obvious bug.
 
-**Three real user-reported chat bugs, still open** (the original list had
-seven; four were fixed this session - see `Completed.md` #34):
+**One real user-reported chat bug, still open** (the original list had
+seven; seven were addressed this session - see `Completed.md` #34, both its
+original four and its later continuation covering the button-recovery
+re-test finding, the comparison UI, and category-first browsing, all now
+fixed and verified. This one item is a deliberate partial mitigation, not a
+full fix):
 
-- **Multi-item add in one message.** "Add the X size 8 and the Y size 8" only
-  ever adds the first item. A real architecture gap, not a quick fix: the
-  Decision Engine selects exactly one action per turn by design, and the
-  existing anti-double-add rule only trusts an exact tap or an exact
-  whole-message match, never a parsed multi-item free-text guess - loosening
-  that matching is the same fuzzy-matching trap `Completed.md` #15 already
-  documents as tried and removed for causing double-adds.
-- **Category-first browsing in the chat UI.** No way to show category
-  choices before jumping straight to specific product suggestions.
-  Investigation this session found a real head start for whoever picks this
-  up: both merchant platforms already have working department/collection
-  data and filtering that the engine/model never surfaces - Northfield's
-  `dept` param on `/items`, Kettle's `collection` param on `search`. The gap
-  is in the reasoning/prompt layer choosing to use it, not in either
-  adapter.
-- **Product-comparison UI.** Cramped buttons instead of a table, no
-  per-item Buy Now action. Frontend work in `storefront/src/ChatWidget.tsx`,
-  not yet touched.
+- **Multi-item add in one message.** "Add the X size 8 and the Y size 8"
+  still only ever adds the first item in one turn - `Completed.md` #34's
+  continuation added an honest note telling the shopper the second item
+  wasn't dropped silently ("ask me for the other one next and I'll add that
+  too"), but both items are still not added simultaneously. A real
+  architecture gap, not a quick fix: `engine/decision/engine.py`'s Decision
+  Engine selects exactly one action per turn by design (its own docstring
+  says as much), and the existing anti-double-add rule only trusts an exact
+  tap or an exact whole-message match, never a parsed multi-item free-text
+  guess - loosening that matching is the same fuzzy-matching trap
+  `Completed.md` #15 already documents as tried and removed for causing
+  double-adds. A real fix needs a pending-item queue that survives the tap
+  round-trip across turns (propose item one, wait for the shopper's size tap,
+  then automatically re-offer item two rather than requiring the shopper to
+  ask again) - deliberately not attempted this session to avoid risking a
+  half-built state machine that could reopen the double-add bug class.
+  Whoever picks this up next should design that queue explicitly, not patch
+  around the single-action-per-turn constraint.
 
 ### Why the tests did not used to catch these
 

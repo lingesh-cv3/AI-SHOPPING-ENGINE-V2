@@ -260,6 +260,17 @@ class SessionTurn(Base):
     #: to tap after it: the buttons were never wrong, they were never saved.
     choices_json: Mapped[str | None] = mapped_column(Text)
 
+    #: The same gap `choices_json` closed, for the other three things a turn can
+    #: carry that a shopper taps: recommended/searched products, a two-item
+    #: comparison, and the card picker offered at checkout. Without these a
+    #: reload mid-browse, mid-compare or mid-pay restored the sentence but not
+    #: what it was talking about - the offer was still live, only the way to
+    #: act on it was gone, the exact shape `choices_json` exists to prevent.
+    products_json: Mapped[str | None] = mapped_column(Text)
+    comparison_json: Mapped[str | None] = mapped_column(Text)
+    payment_json: Mapped[str | None] = mapped_column(Text)
+    category_choices_json: Mapped[str | None] = mapped_column(Text)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     __table_args__ = (Index("ix_turns_session_created", "session_id", "created_at"),)

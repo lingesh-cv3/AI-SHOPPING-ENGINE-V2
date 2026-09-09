@@ -399,6 +399,38 @@ class ExecutionService:
                 min_price = raw_min if isinstance(raw_min, (int, float)) and math.isfinite(raw_min) else None
                 price_bounded = max_price is not None or min_price is not None
                 top_rated = params.get("top_rated") is True
+                category = str(params.get("category") or "").strip()
+
+                # A general "what do you have" - no keyword, no category, no
+                # price or rating narrowing - used to mean six products picked
+                # by catalog order, which read as "we mostly sell shoes" on a
+                # shop that also sells apparel, accessories, nutrition and
+                # tech. Offering the shop's own real categories instead of a
+                # slice of them is the same "let the shopper narrow it,
+                # don't guess for them" reasoning behind needs_choice for a
+                # variant - so it is returned the same shape, as choices to
+                # pick from rather than a paragraph of products.
+                if (
+                    action_type is ActionType.RECOMMEND_PRODUCTS
+                    and not query
+                    and not category
+                    and not price_bounded
+                    and not top_rated
+                ):
+                    browse = await adapter.search_products("", limit=100)
+                    categories = sorted(
+                        {c for p in browse.products for c in p.categories}
+                    )
+                    if categories:
+                        return Executed(
+                            succeeded=True,
+                            action_type=str(action_type),
+                            summary=f"Offered {len(categories)} categories to choose from.",
+                            payload={"category_choices": categories},
+                        )
+                    # No department data at all on this platform - fall through
+                    # to the ordinary unfiltered browse below rather than
+                    # offering an empty choice list.
 
                 def _within_price(p: Product) -> bool:
                     if not price_bounded:
@@ -411,13 +443,20 @@ class ExecutionService:
                         return False
                     return True
 
+                def _within_category(p: Product) -> bool:
+                    if not category:
+                        return True
+                    return any(c.lower() == category.lower() for c in p.categories)
+
                 # Fetch a wider candidate set when narrowing further - a keyword
                 # search's first 6 results, filtered or re-sorted down, can
                 # easily land on zero (or the wrong ones) even when a better
                 # match exists further in.
-                narrowed = price_bounded or top_rated
+                narrowed = price_bounded or top_rated or bool(category)
                 found = await adapter.search_products(query, limit=30 if narrowed else 6)
-                candidates = [p for p in found.products if _within_price(p)]
+                candidates = [
+                    p for p in found.products if _within_price(p) and _within_category(p)
+                ]
                 if top_rated:
                     # Never invented: a product with no rating on this platform
                     # is excluded from "top rated" rather than treated as a
@@ -441,7 +480,9 @@ class ExecutionService:
                 # whose title happens to contain their exact word.
                 if not titles and action_type is ActionType.RECOMMEND_PRODUCTS:
                     found = await adapter.search_products("", limit=30 if narrowed else 6)
-                    candidates = [p for p in found.products if _within_price(p)]
+                    candidates = [
+                        p for p in found.products if _within_price(p) and _within_category(p)
+                    ]
                     if top_rated:
                         candidates = [p for p in candidates if p.rating is not None]
                         candidates.sort(key=lambda p: p.rating, reverse=True)

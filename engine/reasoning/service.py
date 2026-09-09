@@ -281,6 +281,8 @@ class ReasoningService:
                 parameters["min_price"] = mn
             if raw.get("top_rated") is True:
                 parameters["top_rated"] = True
+            if cat := raw.get("category"):
+                parameters["category"] = str(cat)
             confidence = raw.get("confidence")
             out.append(
                 ProposedAction(

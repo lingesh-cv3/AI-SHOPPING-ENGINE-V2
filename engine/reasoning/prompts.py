@@ -152,6 +152,21 @@ def propose_tool() -> dict[str, Any]:
                                         "actually said one."
                                     ),
                                 },
+                                "category": {
+                                    "type": "string",
+                                    "description": (
+                                        "For RECOMMEND_PRODUCTS: fill this when "
+                                        "the shopper named or tapped a category "
+                                        "(e.g. 'Footwear', 'Apparel') to narrow "
+                                        "the browse to it. Use the exact category "
+                                        "name from the context, never one you "
+                                        "invented. Leave both this and "
+                                        "search_query out for a first, general "
+                                        "'what do you have' - the system offers "
+                                        "categories to choose from rather than "
+                                        "guessing which ones to show."
+                                    ),
+                                },
                                 "top_rated": {
                                     "type": "boolean",
                                     "description": (
@@ -271,6 +286,13 @@ Rules that matter:
   named a category ("top rated shoes"), also fill search_query with a word
   from that category. The system sorts by the platform's real rating - do
   not guess at which products are "best" yourself.
+- A general "what do you have" / "what's available" - nothing named, no
+  category, no keyword - is not a request for six arbitrary products. Propose
+  RECOMMEND_PRODUCTS with search_query and category both left out; the system
+  offers the shop's real categories to pick from instead of guessing which
+  slice of the catalog to show. Once the shopper names or taps a category,
+  fill it in on the next RECOMMEND_PRODUCTS with the exact category name from
+  the context.
 - Prefer what costs the shop nothing. Suggesting a product the shopper would
   actually want is better than offering a discount.
 - When you propose APPLY_PROMOTION you must fill in the code field with the exact
@@ -315,6 +337,13 @@ Rules that matter:
   payment is saying hello - offering to retry their card is answering a
   question they did not ask, and it reads as though nothing else has
   registered. If they want to come back to it they will say so.
+- When a shopper names more than one product to add in the same message
+  ("the Trailblazer and the Marathon Pro"), propose a separate ADD_TO_CART
+  for each one named, not just the first - up to the four-action limit. The
+  system can currently only act on one per turn and will tell the shopper
+  so honestly, but it can only do that if every product they actually asked
+  for is proposed - silently dropping the second means nobody, not even the
+  system, knows it was ever asked for.
 - CLEAR_CART empties the whole cart; REMOVE_CART_LINE takes out one thing.
   "Remove all", "clear my cart" and "start again" mean the first. Never say
   you have cleared a cart when you proposed removing one line - a shopper

@@ -106,14 +106,20 @@ export function ChatWidget({
         // nothing is on screen, and reusing that filter made the conversation read
         // as the assistant talking to itself.
         //
-        // Choices are carried over too. Without them a reload mid-choice restored
-        // the question but not the buttons to answer it - the offer was still
-        // live, only the way to tap it was gone.
+        // Choices, products, comparison and payment are all carried over too.
+        // Without them a reload mid-choice, mid-browse, mid-compare or
+        // mid-pay restored the sentence but not what it was offering - the
+        // offer was still live, only the way to act on it was gone.
         onTurns(
           stored.map((t) => ({
             speaker: t.speaker,
             text: t.text,
             choices: t.choices.length > 0 ? t.choices : undefined,
+            products: t.products.length > 0 ? t.products : undefined,
+            comparison: t.comparison.length > 0 ? t.comparison : undefined,
+            payment: t.payment ?? undefined,
+            categoryChoices:
+              t.category_choices.length > 0 ? t.category_choices : undefined,
           })),
         );
       })
@@ -204,6 +210,7 @@ export function ChatWidget({
           choices: r.choices,
           payment: r.payment,
           why: r.why,
+          categoryChoices: r.category_choices,
         },
       ]);
     } catch (e) {
@@ -384,37 +391,80 @@ export function ChatWidget({
             )}
 
             {/* Exactly two products, fetched fresh - never the model's memory
-                of them. Each card taps the same way a recommended product
-                does, so comparing does not dead-end a shopper who decides. */}
+                of them. A table row per fact, so a shopper reads what
+                differs at a glance instead of re-reading two card
+                paragraphs to find it, and each column ends in its own
+                Buy Now - the point of comparing is to end able to act on
+                it, not to leave with a decision and no next step. */}
             {turn.comparison && turn.comparison.length === 2 && (
-              <div className="chatcomparison">
-                {turn.comparison.map((p) => (
-                  <button
-                    key={p.product_id}
-                    className="comparecard tappable"
-                    disabled={busy !== null || p.availability === "OUT_OF_STOCK"}
-                    onClick={() => tapProduct(p)}
-                  >
-                    <span className="cptitle">
-                      <span>{p.title}</span>
-                      <span className="num">{p.price}</span>
-                    </span>
-                    {p.description && (
-                      <span className="cpdesc">{p.description}</span>
+              <div className="comparetable-wrap">
+                <table className="comparetable">
+                  <thead>
+                    <tr>
+                      <th scope="col" className="comparetable-rowlabel" />
+                      {turn.comparison.map((p) => (
+                        <th scope="col" key={p.product_id}>
+                          {p.title}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <th scope="row">Price</th>
+                      {turn.comparison.map((p) => (
+                        <td key={p.product_id} className="num">
+                          {p.price}
+                        </td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <th scope="row">Stock</th>
+                      {turn.comparison.map((p) => (
+                        <td key={p.product_id}>
+                          <span
+                            className={
+                              p.availability === "OUT_OF_STOCK"
+                                ? "comparestock out"
+                                : "comparestock"
+                            }
+                          >
+                            {p.availability === "OUT_OF_STOCK"
+                              ? "Out of stock"
+                              : "In stock"}
+                          </span>
+                        </td>
+                      ))}
+                    </tr>
+                    {(turn.comparison[0].description ||
+                      turn.comparison[1].description) && (
+                      <tr>
+                        <th scope="row">Details</th>
+                        {turn.comparison.map((p) => (
+                          <td key={p.product_id} className="cpdesc">
+                            {p.description}
+                          </td>
+                        ))}
+                      </tr>
                     )}
-                    <span
-                      className={
-                        p.availability === "OUT_OF_STOCK"
-                          ? "comparestock out"
-                          : "comparestock"
-                      }
-                    >
-                      {p.availability === "OUT_OF_STOCK"
-                        ? "Out of stock"
-                        : "In stock"}
-                    </span>
-                  </button>
-                ))}
+                    <tr>
+                      <th scope="row" />
+                      {turn.comparison.map((p) => (
+                        <td key={p.product_id}>
+                          <button
+                            className="cpbuy"
+                            disabled={
+                              busy !== null || p.availability === "OUT_OF_STOCK"
+                            }
+                            onClick={() => tapProduct(p)}
+                          >
+                            Buy now
+                          </button>
+                        </td>
+                      ))}
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             )}
 
@@ -441,6 +491,23 @@ export function ChatWidget({
               </div>
             )}
 
+            {/* A general "what's available" is answered with the shop's real
+                categories rather than an arbitrary six products - tapping one
+                asks the same question again, narrowed. */}
+            {turn.categoryChoices && turn.categoryChoices.length > 0 && (
+              <div className="optionrow">
+                {turn.categoryChoices.map((cat) => (
+                  <button
+                    key={cat}
+                    className="optionbtn"
+                    disabled={busy !== null || i !== turns.length - 1}
+                    onClick={() => act(`Show me ${cat}`)}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {turn.payment?.cards && turn.payment.cards.length > 0 && (
               <div className="payblock">

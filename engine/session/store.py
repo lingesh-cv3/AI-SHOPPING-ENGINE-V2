@@ -65,13 +65,22 @@ async def add_turn(
     text: str,
     case_id: str | None = None,
     choices: list[dict] | None = None,
+    products: list[dict] | None = None,
+    comparison: list[dict] | None = None,
+    payment: dict | None = None,
+    category_choices: list[str] | None = None,
 ) -> None:
     """Record one thing that was said.
 
     `choices` carries the options offered with this turn, when there were any -
-    a size or variant a shopper must tap before the action can run. Persisted
-    rather than left to render-only state, so a reload mid-choice restores the
-    same buttons instead of a question with nothing left to answer.
+    a size or variant a shopper must tap before the action can run. `products`,
+    `comparison`, `payment` and `category_choices` are the same idea for the
+    other things a turn can carry: recommended/searched products, a two-item
+    comparison, the card picker offered at checkout, and the shop's real
+    categories offered for an unnarrowed browse. All are persisted rather than
+    left to render-only state, so a reload mid-choice, mid-browse, mid-compare
+    or mid-pay restores the same buttons instead of a message with nothing
+    left to act on.
     """
     async with session_scope() as db:
         db.add(
@@ -83,6 +92,12 @@ async def add_turn(
                 text=text,
                 case_id=case_id,
                 choices_json=json.dumps(choices) if choices else None,
+                products_json=json.dumps(products) if products else None,
+                comparison_json=json.dumps(comparison) if comparison else None,
+                payment_json=json.dumps(payment) if payment else None,
+                category_choices_json=(
+                    json.dumps(category_choices) if category_choices else None
+                ),
             )
         )
 
@@ -207,6 +222,12 @@ async def turns(
             "case_id": t.case_id,
             "at": (t.created_at.isoformat() if t.created_at else None),
             "choices": json.loads(t.choices_json) if t.choices_json else [],
+            "products": json.loads(t.products_json) if t.products_json else [],
+            "comparison": json.loads(t.comparison_json) if t.comparison_json else [],
+            "payment": json.loads(t.payment_json) if t.payment_json else None,
+            "category_choices": (
+                json.loads(t.category_choices_json) if t.category_choices_json else []
+            ),
         }
         for t in rows
     ]

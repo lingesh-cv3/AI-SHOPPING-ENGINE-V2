@@ -108,6 +108,19 @@ async def create_schema() -> None:
                 await conn.execute(
                     text("ALTER TABLE session_turns ADD COLUMN choices_json TEXT")
                 )
+            # products_json/comparison_json/payment_json arrived later still, same
+            # idempotent-migration pattern - each closes the identical gap
+            # choices_json did, for the other three things a turn can carry.
+            for column in (
+                "products_json",
+                "comparison_json",
+                "payment_json",
+                "category_choices_json",
+            ):
+                if column not in turn_columns:
+                    await conn.execute(
+                        text(f"ALTER TABLE session_turns ADD COLUMN {column} TEXT")
+                    )
 
         if database_url().startswith("sqlite"):
             # The holdout arrived after the first databases existed, same

@@ -80,6 +80,41 @@ def _decline_fact(reason: DeclineReason | None) -> str:
     return "That card was declined, so nothing has been charged."
 
 
+def _second_item_note(reasoning, trace) -> str:
+    """Say so, honestly, rather than silently dropping the rest.
+
+    The engine only ever executes one action per turn - the Decision Engine
+    picks exactly one candidate, by design (see `engine/decision/engine.py`'s
+    own docstring: "answers exactly one question"). A shopper who names two
+    products to add in one message ("the Trailblazer size 8 and the Marathon
+    Pro size 8") gets only the first one handled, and used to hear nothing
+    about the second at all - it simply vanished, which is a worse outcome
+    than being told plainly that a second ask is needed.
+
+    Genuinely adding both in one turn needs a pending-item queue that
+    survives the tap round-trip - real, separate engineering, not a
+    same-session patch, and one this codebase deliberately has not built
+    yet given the double-add bug a looser variant-matching rule already
+    caused once (Completed.md #15). This is the honest interim: name the
+    other product by id count only (never inventing a title this function
+    was not given) and ask the shopper to come back for it.
+    """
+    selected_id = trace.selected.action.action_type
+    other_products = {
+        c.parameters.get("product_id")
+        for c in reasoning.actions
+        if c.action_type == selected_id
+        and c.parameters.get("product_id")
+        and c.parameters.get("product_id") != trace.selected.action.parameters.get("product_id")
+    }
+    if not other_products:
+        return ""
+    return (
+        "\n\nI can only take one item at a time right now - ask me for the "
+        "other one next and I'll add that too."
+    )
+
+
 class ChatRequest(BaseModel):
     connection_id: str
     session_id: str
@@ -152,6 +187,13 @@ class ChatReply(BaseModel):
     #: A total and the ways to pay it, when the shopper asked to check out.
     #: Rendered as buttons. Tapping one is what charges - nothing here does.
     payment: dict = Field(default_factory=dict)
+
+    #: The shop's real departments/collections, offered when a shopper asked
+    #: what's available with nothing to narrow it - "here's everything" used
+    #: to mean six products picked by catalog order, which read as "we mostly
+    #: sell shoes" on a shop that sells much more. Rendered as tappable
+    #: category buttons, the same reasoning as `choices` above.
+    category_choices: list[str] = Field(default_factory=list)
 
     #: A shopper-safe account of how this was decided, including what was
     #: ruled out. Shown behind a toggle rather than in the reply, because a
@@ -570,6 +612,7 @@ async def _process_turn(
     products: list[dict] = []
     comparison: list[dict] = []
     choices: list[dict] = []
+    category_choices: list[str] = []
     payment: dict = {}
     choices: list[dict] = []
     cart_changed = False
@@ -596,7 +639,24 @@ async def _process_turn(
         found_comparison = executed.payload.get("comparison")
         if isinstance(found_comparison, list):
             comparison = found_comparison
-        if executed.needs_choice:
+        found_categories = executed.payload.get("category_choices")
+        if isinstance(found_categories, list):
+            category_choices = found_categories
+
+        if category_choices:
+            # Same reasoning as needs_choice below: the model's reply was
+            # written before this ran, so it cannot know whether the answer
+            # was six products or a category list - replacing it rather than
+            # appending keeps the shopper from reading a sentence about
+            # products that are not there.
+            reply = (
+                "We carry a few different things - "
+                + ", ".join(category_choices[:-1])
+                + (" and " if len(category_choices) > 1 else "")
+                + category_choices[-1]
+                + ". Which would you like to see?"
+            )
+        elif executed.needs_choice:
             # Not a failure. The shopper has not said enough yet, and asking is the
             # right answer - a guessed size is a return waiting to happen.
             #
@@ -616,6 +676,7 @@ async def _process_turn(
                 + str(first.get("product_title", "that"))
                 + ". Which would you like?"
             )
+            reply += _second_item_note(reasoning, trace)
         elif executed.action_type == "CLEAR_CART":
             # Written by the engine, not the model.
             #
@@ -699,6 +760,8 @@ async def _process_turn(
                     f"{reply}\n\n{done}"
                     + (f". Your cart is now {count} item(s), {total}." if count is not None else ".")
                 )
+                if executed.action_type == "ADD_TO_CART":
+                    reply += _second_item_note(reasoning, trace)
             elif products:
                 pass  # the cards say what was found; a label announcing them is noise
             elif executed.action_type == "CHECK_AVAILABILITY":
@@ -728,6 +791,10 @@ async def _process_turn(
         text=reply,
         case_id=case_id,
         choices=choices,
+        products=products,
+        comparison=comparison,
+        payment=payment,
+        category_choices=category_choices,
     )
 
     return ChatReply(
@@ -742,6 +809,7 @@ async def _process_turn(
         comparison=comparison,
         choices=choices,
         payment=payment,
+        category_choices=category_choices,
         rate_limited=rate_limited,
         retry_after_seconds=getattr(reasoning, "retry_after_seconds", None),
         why=explain(
