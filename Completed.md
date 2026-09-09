@@ -15,7 +15,10 @@
 > factual error or to note that a later fix generalized or superseded them.
 > This is the durable record of what shipped and how it was proven to work -
 > PROGRESS.md is the opposite list, what is still open.
-
+> An entry here also carries its value-bar answers and its real-client
+> conditions, per CLAUDE.md. An entry that cannot answer "what can somebody do
+> now that they could not before" does not belong in this file, however well
+> tested it is.
 ---
 
 ## Features Built
@@ -1108,3 +1111,152 @@ below; `npm run build` now exits 0.)
     regressions attributable to the copilot/refactor changes themselves.
     `npm run build` and `npm run lint` both clean (same pre-existing lint
     errors in unrelated files, none new).
+
+34. **Four real user-reported bugs fixed in shopper chat, not roadmap
+    features.** Reported directly as a list of seven; these four are the
+    ones addressed this session.
+
+    - **Honest payment-decline reasons, both merchants.** A decline always
+      got the same generic "That card was declined, so nothing has been
+      charged" regardless of why, even though both adapters already
+      correctly mapped the platform's real refusal code to a
+      `DeclineReason` enum (`INSUFFICIENT_FUNDS`, `CARD_EXPIRED`,
+      `ISSUER_DECLINED`, etc - card 0002 maps to `INSUFFICIENT_FUNDS`, 0003
+      to `CARD_EXPIRED` on both platforms) - the value existed and was
+      discarded. `engine/api/chat.py` gained a `_DECLINE_SENTENCE` mapping
+      and a `_decline_fact()` helper that turns the real
+      `CheckoutResult.decline_reason` into a specific sentence ("That card
+      has insufficient funds, so nothing has been charged. Try a different
+      card."), used in `/api/chat/pay`'s decline branch in place of the old
+      generic one. The existing escalation/recovery pipeline is completely
+      unchanged (still `skip_model=True`, still creates a case, still
+      reaches the ops queue/handover) - only the leading fact sentence
+      changed. A redundant "I'm sorry that didn't work" is stripped from the
+      continuation via `str.removeprefix` when it would follow the new
+      specific sentence, since apologizing after already stating the
+      specific problem read as repetitive.
+
+      Verified live on both shops: Northfield 0002 → "has insufficient
+      funds"; Northfield 0003 → "has expired"; Kettle 0002 → same specific
+      reason followed by Kettle's own recovery-offered continuation,
+      unchanged. Confirmed via direct API calls that a handover (Northfield)
+      and a pending approval (Kettle) still get created exactly as before -
+      the escalation mechanic was not broken by this change.
+
+    - **Order lookup names what was ordered, to the actual owner only.** A
+      shopper asking about a past order only ever got the number/status/
+      total, never what they'd bought - deliberately thin by original
+      design, because execution had no way to check whether the asker was
+      the person who placed the order (an order id is guessable). Since
+      checkout now requires a signed-in, ownership-tracked account
+      (`db.owners`), this was fixable properly. `CHECK_ORDER_STATUS`'s
+      dispatch in `engine/execution/service.py` now includes `order.lines`
+      (title, quantity) in its `payload` - `payload` is never sent to the
+      browser (`ChatReply` has no `payload` field), so this alone changes
+      nothing externally. `_process_turn` (`engine/api/chat.py`) gained
+      `owner_keys: list[str] | None = None`; `chat()` passes
+      `await who.keys_for(req.connection_id)`; the webhook route (untouched)
+      implicitly passes `None` via the default. Line items are appended to
+      the shopper-facing reply only when
+      `db.owners.owner_of(connection_id, ORDER, order_id)` matches one of
+      `owner_keys` - otherwise the reply stays exactly as thin as it always
+      was.
+
+      Verified live proving both sides of the boundary: paid a real order as
+      one shopper, had that shopper ask about it in the same session → got
+      the product name appended; a different shopper (different cookie jar,
+      same publishable key) asking about the identical order number → got
+      only the old thin summary, no leak. `invariant-guard` confirmed the
+      ownership check cannot be bypassed by an empty `owner_keys`, an order
+      with no owner record, or a stranger's own valid key.
+
+    - **Product recommendations respect a stated price limit.** "I want
+      shoes under 2000" previously ignored the price constraint entirely -
+      there was no price-filtering mechanism anywhere, and this shop's
+      search does literal title matching with no notion of price. Fixed
+      with a new `max_price`/`min_price` number field on the
+      `RECOMMEND_PRODUCTS`/`SUGGEST_ALTERNATIVE` tool schema
+      (`engine/reasoning/prompts.py`, plus a prompt rule to fill it from an
+      explicit price statement and never propose something visibly outside
+      the limit), parsed into `ProposedAction.parameters` in `_parse()`
+      (`engine/reasoning/service.py`), and applied as a post-fetch filter
+      (`_within_price`) in `engine/execution/service.py` before both the
+      keyword-search path and the empty-catalog-browse fallback. A real bug
+      was found and fixed in the same pass: the browse fallback was
+      originally disabled entirely when a price limit was set, on the
+      mistaken assumption that browsing would show unfiltered results - it
+      actually still filters, so disabling it meant "shoes under 2000"
+      returned nothing when the literal word "shoes" matched no title, even
+      though a cheaper matching product existed under a different word
+      ("Sneaker").
+
+      A security-relevant gap was found by `invariant-guard` in this same
+      feature and fixed immediately: a NaN or infinite `max_price`/
+      `min_price` from the model would reach `Decimal(str(max_price))` and
+      raise `decimal.InvalidOperation` on the first comparison - an
+      unhandled exception with no try/except anywhere in the call path,
+      breaking the turn with a raw error rather than a safe reply (invariant
+      5, raw errors never reaching shoppers). Fixed at both layers:
+      `math.isfinite()` guards in `_parse()` (the primary defense) and again
+      in `execution/service.py`'s own parameter read (defense-in-depth, in
+      case a future caller bypasses the parser) - confirmed by direct
+      reproduction that a NaN value is now neutralized to "no limit given"
+      rather than raising.
+
+      Verified live: "I want shoes under 2000" now returns only products at
+      or under 2000 (Everyday Canvas Sneaker 1899, Recovery Slide 1499,
+      etc.), correctly falling back to a price-filtered whole-catalog browse
+      when the keyword search alone finds nothing under the limit.
+
+    - **Real product ratings, "top rated" queries actually sort by them.**
+      There was no rating data anywhere in either merchant's catalog, so
+      "top rated products" could only ever be a random-looking suggestion.
+      Added `Product.rating: float | None` and
+      `Product.rating_count: int | None` (`shared/models/commerce.py`,
+      `None` meaning "this platform genuinely has no rating for this one" -
+      never a fabricated 0 or 5). Both demo catalogs
+      (`sample_merchant/seed/catalog.py`, `sample_merchant_two/seed/catalog.py`)
+      gained a `_rating_for(product_id)` computing a fixed, deterministic
+      rating and review count from `hashlib.md5(product_id.encode())`
+      (deliberately not Python's own salted `hash()`, which varies per
+      process and would change every rating on a restart) - assigned once
+      per product id, stable forever, which is what lets "top rated" mean
+      the same thing twice in a row. Both adapters
+      (`adapters/sample/mapping.py`, `adapters/kettle/mapping.py`) map the
+      raw rating fields straight through. A new `top_rated: bool` field on
+      the same tool schema, with a prompt rule telling the model to set it
+      for a top/best/highest-rated request rather than guessing which
+      products are "best" itself. `engine/execution/service.py` excludes any
+      product with `rating is None` before sorting the rest descending
+      (never treating a missing rating as a tied-last 0), applied in both
+      the keyword-search path and the empty-query browse fallback -
+      confirmed by `invariant-guard` that the None-filter runs before the
+      sort in both places so the sort itself cannot raise.
+
+      Verified live: "what are the top rated products" (Northfield) returned
+      Race Belt 4.8 → Long Run Tights 4.6 → ... in genuine descending order;
+      "what are the top rated shoes" correctly narrowed to footwear only,
+      still descending (Marathon Pro Racing Shoe 4.3 → ... → Winter Road
+      Shoe 3.7); Kettle's own catalog independently confirmed with its own
+      distinct ratings (Colombia Huila Washed 4.9 topping Kettle's list).
+
+    **Verification common to all four:** `invariant-guard` reviewed the full
+    diff (`engine/api/chat.py`, `engine/execution/service.py`,
+    `engine/reasoning/service.py`, `engine/reasoning/prompts.py`,
+    `shared/models/commerce.py`, both adapters' `mapping.py`, both catalogs'
+    seed files) against all six hard invariants and the idempotency rule
+    twice (once before the NaN fix, once after) - final verdict SAFE, no
+    violations: none of the four fixes touch payment/cart/idempotency logic,
+    none give the model any new way to assert risk, and the one real gap
+    found (the NaN crash) was fixed and reverified in the same pass.
+    `test-runner` ran the full three-suite pass at the end: `healthcheck.py`
+    99 PASS / 0 FAIL / 2 SKIP (Groq throttle, unrelated - the session's
+    `.env` was switched from a temporary OpenAI key back to a real Groq key
+    partway through, restoring the documented free-tier throttle), `fuzz.py`
+    20/20 sequences held (1200 assertions), `auditroutes.py` all checks
+    held. Zero regressions from any of the four fixes.
+
+    These are bug fixes to already-shipped shopper-chat functionality, not
+    new roadmap features, so the value-bar/feature-spec process does not
+    apply - each fix restores or corrects behaviour a shopper already relies
+    on rather than adding a new capability line to the roadmap.

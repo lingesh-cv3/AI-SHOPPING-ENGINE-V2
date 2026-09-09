@@ -137,6 +137,8 @@ def to_product(raw: dict[str, Any], *, storefront_url: str | None = None) -> Pro
         variants=[
             to_variant(o, price=raw.get("price")) for o in raw.get("options", [])
         ],
+        rating=raw.get("rating"),
+        rating_count=raw.get("ratingCount"),
     )
 
 

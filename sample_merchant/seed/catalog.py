@@ -21,6 +21,8 @@ The catalog is built to exercise specific cases rather than to look full:
   match "running", "Sneaker" does not match "shoe", nothing matches "trainers"
 """
 
+import hashlib
+
 # (id, title, dept, price, was, stock_state, qty, sizes, blurb)
 # sizes: None, or a list of (label, qty). price/was in rupees.
 _ROWS = [
@@ -127,8 +129,24 @@ _ROWS = [
 ]
 
 
+def _rating_for(product_id: str) -> tuple[float, int]:
+    """A fixed rating and review count for one product, assigned once and
+    stable for as long as the product id is, rather than re-rolled on every
+    request - "top rated" has to mean the same thing on two consecutive
+    asks, which a request-time random number cannot give it. Derived from
+    the id itself (`hashlib.md5`, not Python's salted `hash()` - the built-in
+    varies per process, which would make a restart change every rating) so
+    a new catalog row needs no separate rating table to keep in sync.
+    """
+    digest = hashlib.md5(product_id.encode()).digest()
+    rating = round(3.5 + (digest[0] % 151) / 100, 1)  # 3.5 - 5.0
+    count = 12 + (digest[1] % 240)  # 12 - 251, so a rating never reads as untested
+    return rating, count
+
+
 def _build(row):
     pid, title, dept, price, was, state, qty, sizes, blurb = row
+    rating, rating_count = _rating_for(pid)
     return {
         "product_id": pid,
         "item_title": title,
@@ -138,6 +156,8 @@ def _build(row):
         "dept": dept,
         "stock_state": state,
         "qty_available": qty,
+        "rating": rating,
+        "rating_count": rating_count,
         "variants": [
             {"variant_ref": f"{pid}-{label}", "opt_size": label, "qty_available": n}
             for label, n in (sizes or [])

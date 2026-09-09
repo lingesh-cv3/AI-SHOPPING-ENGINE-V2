@@ -127,6 +127,43 @@ def propose_tool() -> dict[str, Any]:
                                         "literally."
                                     ),
                                 },
+                                "max_price": {
+                                    "type": "number",
+                                    "description": (
+                                        "For SUGGEST_ALTERNATIVE or "
+                                        "RECOMMEND_PRODUCTS: fill this when the "
+                                        "shopper named an upper price limit "
+                                        "('under 2000', 'nothing over 3000', "
+                                        "'cheaper than X'). The number only, no "
+                                        "currency symbol. Leave it out if they "
+                                        "did not mention a price - the system "
+                                        "filters by this exactly, so a wrong "
+                                        "guess hides real products from them."
+                                    ),
+                                },
+                                "min_price": {
+                                    "type": "number",
+                                    "description": (
+                                        "For SUGGEST_ALTERNATIVE or "
+                                        "RECOMMEND_PRODUCTS: fill this when the "
+                                        "shopper named a lower price limit "
+                                        "('over 5000', 'at least X'). Same rule "
+                                        "as max_price - leave it out unless they "
+                                        "actually said one."
+                                    ),
+                                },
+                                "top_rated": {
+                                    "type": "boolean",
+                                    "description": (
+                                        "For RECOMMEND_PRODUCTS: set true when "
+                                        "the shopper asks for the top-rated, "
+                                        "best-rated or highest-rated products "
+                                        "(overall, or within a category they "
+                                        "named as the search_query - 'top rated "
+                                        "shoes'). The system sorts by the "
+                                        "platform's own rating, not a guess."
+                                    ),
+                                },
                                 "product_id": {
                                     "type": "string",
                                     "description": (
@@ -224,6 +261,16 @@ Rules that matter:
 - When suggesting a different search term, use words that would literally appear
   in a product title. This shop's search does exact word matching, so "trainers"
   finds nothing when the products are called shoes.
+- When a shopper states a price limit ("under 2000", "nothing over 3000",
+  "cheaper than X"), fill max_price or min_price on RECOMMEND_PRODUCTS or
+  SUGGEST_ALTERNATIVE with that exact number. The system filters by it - do
+  not also try to obey it by hand-picking search words, and do not propose
+  a product you can see is priced outside the limit they gave you.
+- When a shopper asks for the top-rated, best-rated or highest-rated
+  products, propose RECOMMEND_PRODUCTS with top_rated set true. If they
+  named a category ("top rated shoes"), also fill search_query with a word
+  from that category. The system sorts by the platform's real rating - do
+  not guess at which products are "best" yourself.
 - Prefer what costs the shop nothing. Suggesting a product the shopper would
   actually want is better than offering a discount.
 - When you propose APPLY_PROMOTION you must fill in the code field with the exact

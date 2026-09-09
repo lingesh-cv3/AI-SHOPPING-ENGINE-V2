@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from engine import db
@@ -46,6 +48,7 @@ from shared.models import (
     CommerceError,
     Operation,
     PaymentRecoveryMethod,
+    Product,
 )
 
 #: Which recovery mechanism each action asks for.
@@ -380,16 +383,69 @@ class ExecutionService:
                     query = str(params.get("query") or "")
                 else:
                     query = str(params.get("query") or case.query or "")
-                found = await adapter.search_products(query, limit=6)
-                titles = [p.title for p in found.products]
+
+                # A price limit is filtered here, not left to the search term -
+                # this shop's search matches titles literally and has no notion
+                # of price at all, so "under 2000" can only ever be honoured by
+                # filtering what comes back, never by searching for it.
+                # math.isfinite defends this comparison too, not just the parser
+                # upstream (reasoning/service.py) that is meant to keep NaN/inf
+                # out - a value reaching this far unfinite must not raise
+                # decimal.InvalidOperation and break the turn, so it is treated
+                # as "no limit given" rather than trusted.
+                raw_max = params.get("max_price")
+                raw_min = params.get("min_price")
+                max_price = raw_max if isinstance(raw_max, (int, float)) and math.isfinite(raw_max) else None
+                min_price = raw_min if isinstance(raw_min, (int, float)) and math.isfinite(raw_min) else None
+                price_bounded = max_price is not None or min_price is not None
+                top_rated = params.get("top_rated") is True
+
+                def _within_price(p: Product) -> bool:
+                    if not price_bounded:
+                        return True
+                    if p.price is None:
+                        return False
+                    if max_price is not None and p.price.amount > Decimal(str(max_price)):
+                        return False
+                    if min_price is not None and p.price.amount < Decimal(str(min_price)):
+                        return False
+                    return True
+
+                # Fetch a wider candidate set when narrowing further - a keyword
+                # search's first 6 results, filtered or re-sorted down, can
+                # easily land on zero (or the wrong ones) even when a better
+                # match exists further in.
+                narrowed = price_bounded or top_rated
+                found = await adapter.search_products(query, limit=30 if narrowed else 6)
+                candidates = [p for p in found.products if _within_price(p)]
+                if top_rated:
+                    # Never invented: a product with no rating on this platform
+                    # is excluded from "top rated" rather than treated as a
+                    # tied-last 0 - that would be asserting a rating nobody
+                    # gave it.
+                    candidates = [p for p in candidates if p.rating is not None]
+                    candidates.sort(key=lambda p: p.rating, reverse=True)
+                titles = [p.title for p in candidates[:6]]
                 # Recommending is not searching. If the model's invented term
                 # finds nothing, there is still a catalogue to show - and telling
                 # somebody who said hello that we could not turn anything up is
                 # absurd. A genuinely failed search is SUGGEST_ALTERNATIVE, which
                 # keeps its honest empty case below.
+                #
+                # A price limit does not disable this fallback - it still filters
+                # afterward, the same as the keyword search above. "Shoes under
+                # 2000" against a shop whose products are titled "Sneaker" and
+                # "Shoe" never matches the word "shoes" literally, so refusing to
+                # browse the wider catalog here would tell a shopper nothing
+                # exists under 2000 when a cheaper product does, just not one
+                # whose title happens to contain their exact word.
                 if not titles and action_type is ActionType.RECOMMEND_PRODUCTS:
-                    found = await adapter.search_products("", limit=6)
-                    titles = [p.title for p in found.products]
+                    found = await adapter.search_products("", limit=30 if narrowed else 6)
+                    candidates = [p for p in found.products if _within_price(p)]
+                    if top_rated:
+                        candidates = [p for p in candidates if p.rating is not None]
+                        candidates.sort(key=lambda p: p.rating, reverse=True)
+                    titles = [p.title for p in candidates[:6]]
 
                 if not titles:
                     return Executed(
@@ -429,8 +485,10 @@ class ExecutionService:
                                 "description": p.description,
                                 "price": str(p.price) if p.price else None,
                                 "availability": str(p.availability),
+                                "rating": p.rating,
+                                "rating_count": p.rating_count,
                             }
-                            for p in found.products
+                            for p in candidates[:6]
                         ],
                     },
                 )
@@ -773,10 +831,15 @@ class ExecutionService:
 
                 paid = str(order.payment_status) == "CAPTURED"
 
-                # Deliberately thin. Status, payment state and total - no address,
-                # no card, no line items. An order id is guessable and there is no
-                # shopper identity to check it against, so what a stranger bought
-                # is not something to hand out on the strength of a number.
+                # shopper_summary here is deliberately thin - status, payment state,
+                # total, no line items - because this layer has no shopper identity
+                # to check an order id against, and an order id is guessable. Line
+                # items go in payload instead, which is never sent to a browser
+                # (ChatReply has no payload field) - only chat.py reads it, and only
+                # after it has verified, via db.owners, that the session asking is
+                # the one that placed this order. That is what lets a shopper who
+                # really does own this order hear what they bought, without handing
+                # the same detail to a stranger who guessed or was told a number.
                 return Executed(
                     succeeded=True,
                     action_type=str(action_type),
@@ -805,6 +868,10 @@ class ExecutionService:
                         if order.amount_paid
                         else None,
                         "paid": paid,
+                        "lines": [
+                            {"title": line.title, "quantity": line.quantity}
+                            for line in order.lines
+                        ],
                     },
                 )
 

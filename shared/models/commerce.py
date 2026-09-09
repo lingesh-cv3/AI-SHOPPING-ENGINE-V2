@@ -93,6 +93,12 @@ class Product(_Base):
     image_url: str | None = None
     categories: list[str] = Field(default_factory=list)
     variants: list[ProductVariant] = Field(default_factory=list)
+    #: None where a platform genuinely has no rating for this product - never
+    #: a made-up default. A shopper asking "what's top rated" about a product
+    #: nobody has rated yet deserves "no rating on this one" rather than a
+    #: silent 0 or 5, either of which would be invented.
+    rating: float | None = None
+    rating_count: int | None = None
 
 
 class InventoryStatus(_Base):

@@ -22,6 +22,7 @@ was busy.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -262,6 +263,24 @@ class ReasoningService:
                 parameters["code"] = str(code).upper()
             if (qty := raw.get("quantity")) and isinstance(qty, int) and qty > 0:
                 parameters["quantity"] = qty
+            # math.isfinite rejects NaN and +/-inf - a model is free to emit either
+            # in a "number" field, and Decimal(str(nan)) raises InvalidOperation on
+            # the first comparison downstream rather than filtering anything, which
+            # would break the turn with a raw exception instead of a safe reply.
+            if (
+                (mx := raw.get("max_price")) is not None
+                and isinstance(mx, (int, float))
+                and math.isfinite(mx)
+            ):
+                parameters["max_price"] = mx
+            if (
+                (mn := raw.get("min_price")) is not None
+                and isinstance(mn, (int, float))
+                and math.isfinite(mn)
+            ):
+                parameters["min_price"] = mn
+            if raw.get("top_rated") is True:
+                parameters["top_rated"] = True
             confidence = raw.get("confidence")
             out.append(
                 ProposedAction(

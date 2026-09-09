@@ -14,6 +14,8 @@ is deliberately distinct from 0. Northfield never exercises that path because it
 always gives a count. This merchant never gives one.
 """
 
+import hashlib
+
 _ROWS = [
     ("KB-ETH-01", "Ethiopia Guji Natural", "Single origin", "1450.00", True,
      [("250g whole bean", True), ("250g ground", True), ("1kg whole bean", False)],
@@ -60,8 +62,23 @@ _ROWS = [
 ]
 
 
+def _rating_for(product_id: str) -> tuple[float, int]:
+    """A fixed rating and review count, same reasoning and same formula as
+    Northfield's `sample_merchant/seed/catalog.py::_rating_for` - assigned
+    once per id rather than re-rolled per request, so "top rated" answers
+    the same thing twice in a row. Kept as a byte-identical twin rather than
+    a shared import: these two catalogs are deliberately unconnected code so
+    neither platform's adapter work depends on the other's module existing.
+    """
+    digest = hashlib.md5(product_id.encode()).digest()
+    rating = round(3.5 + (digest[0] % 151) / 100, 1)
+    count = 12 + (digest[1] % 240)
+    return rating, count
+
+
 def _build(row):
     pid, name, collection, price, in_stock, options, story = row
+    rating, rating_count = _rating_for(pid)
     return {
         "id": pid,
         "name": name,
@@ -70,6 +87,8 @@ def _build(row):
         "collection": collection,
         # A boolean and nothing else. There is no count to give.
         "inStock": in_stock,
+        "rating": rating,
+        "ratingCount": rating_count,
         "options": [
             {"id": f"{pid}::{label}", "label": label, "inStock": ok}
             for label, ok in options

@@ -17,6 +17,17 @@
 > surface verified, another still assumed) stays here until every piece of it
 > is actually verified.
 >
+> **And the value bar.** Passing tests is necessary and not sufficient. Before
+> an item moves to `Completed.md` it must also carry written answers to
+> CLAUDE.md's six value-bar questions, and a statement of which of the four
+> real-client conditions (zero data, real volume, a platform that cannot, a
+> platform that is down) were actually exercised and how. A feature that is
+> correct, tested, verified in a browser, and changes nothing for anybody
+> stays here - correctness is not the same as value, and this file has
+> already let two features through on correctness alone. See CLAUDE.md's
+> Feature Implementation Rules for the full bar, and use the `value-auditor`
+> agent before moving anything out of this section.
+>
 > Reviewed and updated at the end of every session, same as before - what
 > changed is which file a finished item goes in, not whether it gets written
 > down.
@@ -77,6 +88,28 @@ using `DIAGNOSED` as a terminal state for "needs a choice" is semantically odd.
 Closing a handover with a blank note tells the shopper nothing by design,
 which is worth revisiting rather than an obvious bug.
 
+**Three real user-reported chat bugs, still open** (the original list had
+seven; four were fixed this session - see `Completed.md` #34):
+
+- **Multi-item add in one message.** "Add the X size 8 and the Y size 8" only
+  ever adds the first item. A real architecture gap, not a quick fix: the
+  Decision Engine selects exactly one action per turn by design, and the
+  existing anti-double-add rule only trusts an exact tap or an exact
+  whole-message match, never a parsed multi-item free-text guess - loosening
+  that matching is the same fuzzy-matching trap `Completed.md` #15 already
+  documents as tried and removed for causing double-adds.
+- **Category-first browsing in the chat UI.** No way to show category
+  choices before jumping straight to specific product suggestions.
+  Investigation this session found a real head start for whoever picks this
+  up: both merchant platforms already have working department/collection
+  data and filtering that the engine/model never surfaces - Northfield's
+  `dept` param on `/items`, Kettle's `collection` param on `search`. The gap
+  is in the reasoning/prompt layer choosing to use it, not in either
+  adapter.
+- **Product-comparison UI.** Cramped buttons instead of a table, no
+  per-item Buy Now action. Frontend work in `storefront/src/ChatWidget.tsx`,
+  not yet touched.
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived
@@ -93,6 +126,18 @@ should extend the Playwright suite to them rather than reach for
 ## Next Steps
 
 ### Existing Engineering Work
+
+0. **The reply-before-data constraint.** `engine.reasoning.reason()` writes
+   the shopper-facing reply before `execute_case()` runs (`chat.py:374` vs
+   `:552`), so any reply describing data fetched during the turn is generic by
+   construction — it is written before that data exists. Previously noted only
+   inside the Smart Product Comparison checkbox below; promoted here because
+   it blocks four Phase 1 shopper roadmap items, not one — see CLAUDE.md's
+   Shopper Roadmap, items 1 through 4. Needs a second reasoning pass over the
+   executed result, or a different pipeline shape. **Highest-priority
+   architecture work.** Building any of the four blocked shopper items before
+   this is fixed will produce exactly the generic output the value bar exists
+   to prevent — do not start them first.
 
 1. **Guest handover / session behaviour:** still open. Guests no longer pay,
    but can still chat and get escalated, and the shop now prompts for an email
@@ -133,8 +178,14 @@ should extend the Playwright suite to them rather than reach for
 The research roadmap is maintained in `CLAUDE.md`.
 
 These features are planned product directions, not implemented functionality.
+Before starting any item below, write its six value-bar answers and real-client
+plan with the `feature-spec` agent — see CLAUDE.md's Feature Implementation
+Rules. Do not build from the checkbox label alone.
 
 ### Shopper — Initial Priorities
+
+**Blocked on item 0 above (the reply-before-data constraint) — do not start
+these first:**
 
 - [ ] Advanced Product Discovery
 - [ ] Smart Product Comparison - **partially covered by `Completed.md` #27.**
@@ -159,14 +210,35 @@ These features are planned product directions, not implemented functionality.
       Closing this gap needs a second reasoning pass *over* the fetched
       comparison (or a different pipeline shape entirely), not a UI or
       prompt change - it is a real, unimplemented capability, kept here
-      rather than marked done.
+      rather than marked done. **See item 0 above - this is the same
+      constraint, and fixing it here fixes it for all four blocked shopper
+      items at once, not just this one.**
 - [ ] Personalized Recommendations
 - [ ] Mission-Based Shopping
+
+**Not blocked:**
+
 - [ ] Smart Cart & Checkout Recovery
 
 ### Merchant — Initial Priorities
 
-- [x] CV3 Merchant Copilot - built and verified end to end, see `Completed.md` #32
+- [~] **CV3 Merchant Copilot** — answering half built and verified
+      (`Completed.md` #32). **Reopened against the value bar**, not complete.
+      It answers from report, capabilities, policy, rules, actions, unmet
+      demand and catalogue alerts, and is read-only by design: it proposes
+      nothing, decides nothing, writes nothing. So a merchant who asks "what's
+      out of stock" is told, and then has to go and do something about it
+      elsewhere - the value-bar question "what can they do now that they
+      could not do before" has no good answer as it stands.
+
+      Remaining work: every answer that identifies a problem offers the
+      action that fixes it, executable from that panel through the existing
+      risk gate. Also owed: `_catalog_alerts` reads
+      `search_products("", limit=100)` on every call, which is correct for
+      Northfield and wrong for a real catalogue - the real-volume condition
+      was never exercised. Do not move this back to `Completed.md` until both
+      are addressed and `value-auditor` returns VALUABLE, not THIN.
+
 - [ ] AI Store Diagnosis
 - [ ] Recovery Opportunity Radar
 - [ ] Catalog Intelligence
@@ -174,23 +246,44 @@ These features are planned product directions, not implemented functionality.
 
 ### CV3 Operations — Initial Priorities
 
-- [x] CV3 Operations Copilot - built and verified end to end, see `Completed.md` #33
+- [~] **CV3 Operations Copilot** — answering half built and verified
+      (`Completed.md` #33). **Reopened against the value bar**, same shape as
+      the Merchant Copilot above: it reads the same four repository functions
+      the console already renders (`ops_stats`, `pending_across`,
+      `handovers_across`, `decided_across`) and cannot act on any of it. An
+      operator who asks "what's waiting on me" still has to go to the queue
+      and do it by hand.
+
+      Remaining work: approve, close and escalate reachable directly from the
+      answer itself, through the existing routes and risk gate. Do not move
+      this back to `Completed.md` until that is built and `value-auditor`
+      returns VALUABLE, not THIN.
+
 - [ ] Cross-Merchant Command Center
 - [ ] Integration Health Monitoring
 - [ ] Automatic Incident Detection
 
 These should not be treated as completed until each feature is implemented
-end-to-end, all relevant tests pass, and the real user-facing behaviour has
-been verified.
+end-to-end, all relevant tests pass, the real user-facing behaviour has been
+verified, **and it clears the value bar in CLAUDE.md** - correctness alone is
+not sufficient, per the maintenance note above.
 
 ### Implementation Priority
 
 Existing correctness, security, testing, and merchant-onboarding work takes
-priority over new product features.
+priority over new product features. Within that, item 0 above (the
+reply-before-data constraint) takes priority over any of the four shopper
+items it blocks.
 
-When a research-backed feature is selected for active implementation, keep it
-in this file until it is fully implemented and verified. Then remove it from
-`PROGRESS.md` and add the completed work to `Completed.md`.
+When a research-backed feature is selected for active implementation:
+
+1. Write its spec first (`feature-spec` agent) - six value-bar answers, which
+   real-client conditions apply and how they'll be exercised, which figure
+   moves.
+2. Keep it in this file while implementation is in progress.
+3. Run `value-auditor` before considering it finished.
+4. Only then remove it from `PROGRESS.md` and add the completed, value-cleared
+   work to `Completed.md`.
 
 Do not add the entire future roadmap to `PROGRESS.md`; the complete roadmap
 belongs in `CLAUDE.md`. This file tracks only the features currently queued

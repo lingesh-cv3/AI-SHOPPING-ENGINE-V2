@@ -178,6 +178,8 @@ def to_product(
             to_variant(v, parent_price=price_paise, currency=currency)
             for v in raw.get("variants", [])
         ],
+        rating=raw.get("rating"),
+        rating_count=raw.get("rating_count"),
     )
 
 

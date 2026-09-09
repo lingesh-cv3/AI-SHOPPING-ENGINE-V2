@@ -23,6 +23,7 @@ from engine.decision import operation_for
 from shared.models import (
     ActionType,
     CommerceError,
+    DeclineReason,
     ErrorCode,
     FrictionType,
     ProposedAction,
@@ -51,6 +52,32 @@ from .deps import MERCHANT_NAMES, engine
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+#: What to actually tell a shopper about *why* a card failed, keyed by the
+#: normalized reason every adapter already maps a platform's own refusal code
+#: to (`shared.models.commerce.DeclineReason`). A shopper who hears "your card
+#: was declined" and nothing else has no way to tell "try a different card"
+#: apart from "wait and try the same one again" - the two situations need
+#: different advice, and the adapter already knows which one this is.
+_DECLINE_SENTENCE: dict[DeclineReason, str] = {
+    DeclineReason.INSUFFICIENT_FUNDS: "That card has insufficient funds",
+    DeclineReason.CARD_EXPIRED: "That card has expired",
+    DeclineReason.INCORRECT_DETAILS: "Those card details don't look right",
+    DeclineReason.LIMIT_EXCEEDED: "That card is over its limit",
+    DeclineReason.ISSUER_DECLINED: "Your bank declined that card",
+    DeclineReason.SUSPECTED_FRAUD: "That card was flagged and declined",
+}
+
+
+def _decline_fact(reason: DeclineReason | None) -> str:
+    """The one honest sentence a shopper needs immediately: what happened, and
+    what to do about it. Never a guess - `UNKNOWN`/`None` (a gateway that
+    genuinely does not say why) gets the same generic sentence this always
+    used to say, rather than inventing a specific reason with nothing behind
+    it."""
+    if reason and reason in _DECLINE_SENTENCE:
+        return f"{_DECLINE_SENTENCE[reason]}, so nothing has been charged. Try a different card."
+    return "That card was declined, so nothing has been charged."
 
 
 class ChatRequest(BaseModel):
@@ -303,16 +330,26 @@ async def chat(
     """
     belongs_to(key, req.connection_id)
     await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
-    return await _process_turn(req)
+    return await _process_turn(req, owner_keys=await who.keys_for(req.connection_id))
 
 
-async def _process_turn(req: ChatRequest) -> ChatReply:
+async def _process_turn(
+    req: ChatRequest, *, owner_keys: list[str] | None = None
+) -> ChatReply:
     """The pipeline: reasoning, decision, risk, execution, reply.
 
     No auth or ownership check here - callers are responsible for that
     before this runs. `chat()` checks a shopper's key and cookie; the
     webhook route checks the merchant platform's signature instead. Neither
     belongs in the pipeline itself.
+
+    `owner_keys` is the one narrow exception: not an auth check (the caller
+    has already run one), but the identity CHECK_ORDER_STATUS needs to decide
+    whether *this* order belongs to whoever is asking, so it can safely name
+    what they bought rather than staying deliberately thin. `chat()` passes
+    the visitor's own keys; the webhook route leaves it `None` - a merchant's
+    own platform reporting an event has no shopper identity to check against,
+    and defaulting to "not verified" is the safe direction.
     """
     adapter = engine.registry.adapter_for(req.connection_id)
     if adapter is None:
@@ -604,6 +641,21 @@ async def _process_turn(req: ChatRequest) -> ChatReply:
             # nothing means something specific.
             if executed.succeeded:
                 reply = executed.shopper_summary or executed.summary
+                payload = executed.payload or {}
+                order_id = payload.get("order_id")
+                lines = payload.get("lines") or []
+                if owner_keys and order_id and lines:
+                    owner = await db.owners.owner_of(
+                        req.connection_id, db.owners.ORDER, order_id
+                    )
+                    if owner in owner_keys:
+                        items = ", ".join(
+                            f"{l['quantity']} x {l['title']}"
+                            if l.get("quantity", 1) != 1
+                            else l["title"]
+                            for l in lines
+                        )
+                        reply = f"{reply} It had {items}."
             else:
                 wanted = str(
                     (executed.payload or {}).get("order_id")
@@ -1249,10 +1301,15 @@ async def pay(
         #
         # So the fact is prepended for the immediate reply only, and the stored
         # turn is left as the pipeline wrote it.
-        reply = (
-            f"That card was declined, so nothing has been charged. "
-            f"{recovered.reply}"
-        )
+        # The escalation-because-nothing-was-available reply opens with its own
+        # apology ("I'm sorry that didn't work") - fine on its own, but redundant
+        # once the sentence above it has already named the specific reason. Strip
+        # it here rather than in that reply's own source, since that text is
+        # shared with every other friction type this same branch handles, not
+        # just a payment decline.
+        continuation = recovered.reply or ""
+        continuation = continuation.removeprefix("I'm sorry that didn't work. ")
+        reply = f"{_decline_fact(result.decline_reason)} {continuation}"
 
         return ChatReply(
             reply=reply,
