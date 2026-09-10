@@ -970,6 +970,84 @@ async def sales_period_comparison(connection_id: str, *, days: int = 7) -> dict:
     }
 
 
+async def daily_revenue_series(connection_id: str, *, days: int = 30) -> dict:
+    """Day-by-day completed revenue for the Overview trend chart, aligned as
+    two equal-length series - the current window and the window immediately
+    before it - by day offset (day 1 of this window against day 1 of the
+    prior one), the same way `sales_period_comparison` compares its two
+    window totals. Reuses that function's identical `ExecutionAttempt`
+    CHECKOUT/DONE/succeeded source in one query, so a day-by-day chart can
+    never disagree with either the report's headline total or the trend
+    figure - it is a breakdown of the same underlying rows, not a second,
+    differently-sourced count.
+
+    Real-volume note: bounded to `2 * days` of one connection's CHECKOUT
+    attempts, the same bound `sales_period_comparison`'s own two `_window`
+    calls already accept - not a full-table scan, and it does not grow with
+    catalogue size the way `_scan_catalog` has to guard against.
+    """
+    # Calendar-date boundaries throughout, deliberately not the exact-time
+    # `now`-minus-`timedelta` window `sales_period_comparison` uses for its
+    # scalar totals. A `days=10` window should mean 10 *whole* calendar days
+    # ending today, today included - a time-based cutoff would drop today's
+    # partial day from a chart, whereas silently missing revenue from a
+    # bare scalar comparison is not something an operator would notice the
+    # same way. The two figures already tolerate this: both describe "the
+    # last N days", not the identical instant-to-instant window.
+    today = datetime.now(UTC).date()
+    current_start = today - timedelta(days=days - 1)
+    prior_start = current_start - timedelta(days=days)
+    query_lower_bound = datetime.combine(prior_start, datetime.min.time(), tzinfo=UTC)
+
+    async with session_scope() as db:
+        rows = await db.execute(
+            select(ExecutionAttempt.completed_at, ExecutionAttempt.result).where(
+                ExecutionAttempt.connection_id == connection_id,
+                ExecutionAttempt.action_type == "CHECKOUT",
+                ExecutionAttempt.state == "DONE",
+                ExecutionAttempt.succeeded.is_(True),
+                ExecutionAttempt.completed_at >= query_lower_bound,
+            )
+        )
+        attempts = list(rows.all())
+
+    current_by_day: dict[str, Decimal] = {}
+    prior_by_day: dict[str, Decimal] = {}
+    for completed_at, result in attempts:
+        if completed_at is None:
+            continue
+        amt = (result or {}).get("amount_paid")
+        if amt is None:
+            continue
+        try:
+            value = Decimal(str(amt))
+        except Exception:  # noqa: BLE001 - a malformed stored value must not crash the chart
+            continue
+        day = completed_at.date()
+        if day >= current_start:
+            bucket = current_by_day
+        elif day >= prior_start:
+            bucket = prior_by_day
+        else:
+            continue
+        day_key = day.isoformat()
+        bucket[day_key] = bucket.get(day_key, Decimal("0.00")) + value
+
+    def _series(window_start, by_day: dict[str, Decimal]) -> list[dict]:
+        out = []
+        for offset in range(days):
+            key = (window_start + timedelta(days=offset)).isoformat()
+            out.append({"date": key, "amount": f"{by_day.get(key, Decimal('0.00')):.2f}"})
+        return out
+
+    return {
+        "days": days,
+        "current": _series(current_start, current_by_day),
+        "prior": _series(prior_start, prior_by_day),
+        "has_data": bool(current_by_day or prior_by_day),
+    }
+
+
 async def friction_summary_across(
     connection_ids: list[str], *, days: int = 30
 ) -> dict:

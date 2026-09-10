@@ -924,6 +924,9 @@ export const console_api = {
   salesTrend: (days = 7) =>
     merchantCall<SalesTrend>(`/api/sales-trend/${getConnection()}?days=${days}`),
 
+  salesSeries: (days = 30) =>
+    merchantCall<SalesSeries>(`/api/sales-series/${getConnection()}?days=${days}`),
+
   conversion: (days = 30) =>
     merchantCall<Conversion>(`/api/conversion/${getConnection()}?days=${days}`),
 
@@ -964,6 +967,13 @@ export interface SalesTrend {
   change_amount: string;
   change_pct: string | null;
   note: string | null;
+}
+
+export interface SalesSeries {
+  days: number;
+  current: { date: string; amount: string }[];
+  prior: { date: string; amount: string }[];
+  has_data: boolean;
 }
 
 export interface Conversion {

@@ -1978,3 +1978,117 @@ below; `npm run build` now exits 0.)
     deliberate decision that "point at the Inventory panel" is itself
     enough of an action, which is a product call CLAUDE.md's own process
     says belongs in a `feature-spec` pass, not a freehand build.
+
+40. **Rebuilt Overview against a real Merchant SaaS dashboard reference,
+    mapped honestly against what this data model can actually support -
+    not a screenshot copy.** Full audit first: a design-vs-data matrix
+    covering every element of the reference (header, KPI row, embedded
+    Copilot, revenue trend chart, business health, top products, product-
+    level attention, store-wide attention, commerce-health summaries,
+    opportunities, platform capabilities), each traced UI → API →
+    repository → source, with three genuine gaps surfaced and resolved by
+    explicit user decision rather than silently:
+
+    - **The reference's per-product "Conversion" column cannot be built.**
+      `product_performance()` has no per-product view/impression data - no
+      per-product funnel exists anywhere in this schema. Dropped, not
+      faked.
+    - **A "Returns rate increased" attention item cannot be built.** No
+      adapter implements returns; showing a returns figure would be
+      invented from nothing. Omitted entirely - Returns stays an honest
+      unsupported state everywhere it appears.
+    - **"Create promotion" / "Compare products" opportunity actions have
+      no real destination.** No promotion-creation capability exists in
+      this engine, and product comparison is a shopper-facing action
+      (`COMPARE_PRODUCTS`), not a merchant tool. Dropped in favour of
+      opportunities that link to real pages this session already verified
+      (Inventory, Payments, Products).
+    - **The reference's Revenue Trend line chart needed genuinely new
+      backend work, confirmed before building anything**: no chart/SVG
+      data-viz library exists anywhere in this codebase, and
+      `sales_period_comparison` only ever returned two scalar window
+      totals, never a daily series. Built rather than deferred, by
+      explicit choice: new `db.daily_revenue_series()`
+      (`engine/db/repository.py`) reuses `sales_period_comparison`'s
+      identical `ExecutionAttempt` CHECKOUT/DONE/succeeded source in one
+      query - a chart can never disagree with the report's own headline
+      total or the trend figure, because it is a day-by-day breakdown of
+      the same rows, not a second, differently-sourced count. Calendar-
+      date bucketing throughout (not a `now`-minus-`timedelta` cutoff) so
+      "last 30 days" includes today's partial day rather than silently
+      dropping it - caught and fixed during this session's own live
+      verification (today's real revenue was missing from the first
+      version until the boundary was rewritten date-first). New
+      `/api/sales-series/{connection_id}` route, `merchant_scoped()` like
+      every other console route, added to `auditroutes.py`'s permanent
+      probe list and confirmed refused without a key and across merchants.
+      Frontend: `RevenueTrendChart.tsx`, a hand-rolled SVG line+area chart
+      (no new npm dependency) - "This period" solid, "Previous period"
+      dashed at the same day-offset, an honest empty state rather than a
+      flat zero line when there's nothing to chart yet.
+
+    **Copilot embedded directly on Overview**, not just linked to: the
+    existing `MerchantCopilot` component (with #39's payments-recovery
+    banner intact) was extracted from `MerchantConsole.tsx` into its own
+    `MerchantCopilotWidget.tsx` - avoiding a circular import between
+    `Overview.tsx` and `MerchantConsole.tsx` - and is now rendered live in
+    the Overview layout, sitting beside the KPI row, while the dedicated
+    "Merchant Copilot" nav section is kept for focused Q&A (a deliberate,
+    smaller-blast-radius choice over removing that nav entry, stated
+    explicitly rather than silently matching the reference's footer-link
+    treatment).
+
+    **Layout restructured to the reference's information hierarchy**
+    (header with a real, functional date-range picker - 7/30/90 days,
+    actually re-fetching every figure on this page, not decorative) → KPI
+    row + Copilot → revenue trend + business-health list → a three-column
+    row (Top performing products as a real revenue/orders table; Products
+    needing attention, built honestly narrow - only out-of-stock/low-stock,
+    the two conditions this schema can actually name per product; What
+    needs attention, the existing store-wide feed) → commerce-health
+    summary strip → Sell Better opportunities → Store/Platform. The
+    now-honest "Cart → checkout rate" KPI replaces the ambiguous unqualified
+    "Conversion Rate" the reference shows - labelled for what it actually
+    measures (`conversion.cart_to_checkout_rate`) rather than implying a
+    visitor-based denominator this engine has never had.
+
+    **Verified live**, not just built: a real Playwright pass against both
+    running merchants confirmed zero JS console errors, a real rendered
+    SVG chart (not an empty-state fallback, since both have real revenue
+    history), 6 business-health rows, a populated top-products table, the
+    date-range picker re-fetching all figures without breaking on a range
+    change, and the embedded Copilot panel present and functional.
+    Screenshotted both merchants directly: Kettle correctly shows its own
+    green theme with `ATTENTION` health items reflecting real declined-
+    payment history and 2 real out-of-stock products; Northfield correctly
+    shows its own blue theme, "recovery not supported on this platform" in
+    the Store/Platform line, no recovery opportunity or attention item
+    anywhere (capability-driven, not a Northfield-specific code branch, per
+    the existing platform-independence pattern), 3 real out-of-stock
+    products and one real 196-times-asked unmet-demand query. One layout
+    bug found and fixed during this same verification pass: the KPI row's
+    `auto-fit` grid tried to fit 4 cards across a column narrowed by the
+    adjacent Copilot panel, wrapping the 4th card onto its own row -
+    forced to a 2x2 grid in that specific layout slot.
+
+    **Verification.** `npm run build` (tsc) clean, `npm run lint` back to
+    the same 7 pre-existing errors as `main` (0 new). `auditroutes.py`
+    clean including the new sales-series route (refused without a key,
+    refused across merchants). `healthcheck.py` 113 passed / 3 model-
+    wording-flaky failures - the same three, unrelated to anything touched
+    here, consistent across this session's repeated runs. `fuzz.py` clean
+    (1200 assertions, every invariant held).
+
+    **What was deliberately not attempted this slice**, stated rather than
+    implied finished: a merchant-account header badge/dropdown (no backing
+    session/profile-switching functionality exists to make one real rather
+    than decorative chrome); a content-completeness catalogue scan for
+    "poor product content" (a real, buildable signal - `Product.description`/
+    `image_url` can be null - but new backend work outside this slice's
+    scope, not one of the three items the user explicitly ruled on); zero-
+    data verification with a freshly seeded empty merchant (verified
+    against both merchants' real, populated history instead - the honest-
+    empty-state code paths for the chart and every other panel are written
+    and match the existing pattern elsewhere in this file, but a live
+    empty-merchant walkthrough was not performed this session). All
+    recorded in `PROGRESS.md`.

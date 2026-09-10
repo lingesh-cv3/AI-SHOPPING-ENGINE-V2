@@ -6,9 +6,12 @@ import {
   type Conversion,
   type MerchantReport as Report,
   type ProductPerformance as Performance,
+  type SalesSeries,
   type SalesTrend,
   type UnmetDemand,
 } from "./api";
+import { MerchantCopilot } from "./MerchantCopilotWidget";
+import { RevenueTrendChart } from "./RevenueTrendChart";
 
 type Status = "healthy" | "attention" | "unavailable" | "unsupported";
 
@@ -32,21 +35,26 @@ interface HealthArea {
   section: string;
 }
 
+const RANGE_OPTIONS = [7, 30, 90] as const;
+
 /**
  * The Merchant tab's primary dashboard.
  *
  * Every figure here is read from the same routes the dedicated sections
  * use (`/api/report`, `/api/catalog`, `/api/conversion`, `/api/products`,
- * `/api/sales-trend`, `/api/unmet-demand`, `/api/approvals`), so this page
- * cannot show a number a section it links to would contradict - the
- * business-health statuses below are computed client-side from those same
- * fetched objects, never from a separate calculation that could disagree.
+ * `/api/sales-trend`, `/api/sales-series`, `/api/unmet-demand`,
+ * `/api/approvals`), so this page cannot show a number a section it links
+ * to would contradict - the business-health statuses below are computed
+ * client-side from those same fetched objects, never from a separate
+ * calculation that could disagree.
  */
 export function Overview({ onNavigate }: { onNavigate: (section: string) => void }) {
+  const [days, setDays] = useState<number>(30);
   const [report, setReport] = useState<Report | null>(null);
   const [catalog, setCatalog] = useState<CatalogAlerts | null>(null);
   const [conversion, setConversion] = useState<Conversion | null>(null);
   const [trend, setTrend] = useState<SalesTrend | null>(null);
+  const [series, setSeries] = useState<SalesSeries | null>(null);
   const [products, setProducts] = useState<Performance | null>(null);
   const [demand, setDemand] = useState<UnmetDemand | null>(null);
   const [pendingRecovery, setPendingRecovery] = useState<number>(0);
@@ -54,21 +62,25 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     Promise.all([
       console_api.report(),
       console_api.catalogAlerts().catch(() => null),
-      console_api.conversion().catch(() => null),
-      console_api.salesTrend(7).catch(() => null),
-      console_api.productPerformance(30, 5).catch(() => null),
-      console_api.unmetDemand(30, 5).catch(() => null),
+      console_api.conversion(days).catch(() => null),
+      console_api.salesTrend(days).catch(() => null),
+      console_api.salesSeries(days).catch(() => null),
+      console_api.productPerformance(days, 5).catch(() => null),
+      console_api.unmetDemand(days, 5).catch(() => null),
       console_api.queue().catch(() => null),
       console_api.capabilities().catch(() => null),
     ])
-      .then(([r, c, conv, t, p, d, q, cp]) => {
+      .then(([r, c, conv, t, s, p, d, q, cp]) => {
+        if (cancelled) return;
         setReport(r);
         setCatalog(c);
         setConversion(conv);
         setTrend(t);
+        setSeries(s);
         setProducts(p);
         setDemand(d);
         setCaps(cp);
@@ -83,8 +95,15 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
           );
         }
       })
-      .catch((e) => setError(e instanceof Error ? e.message : "Could not load your overview."));
-  }, []);
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Could not load your overview.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [days]);
 
   if (error) return <p className="empty">{error}</p>;
   if (!report || !caps) return <p className="empty">Loading...</p>;
@@ -152,6 +171,11 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
     },
   ];
 
+  const overallHealthy = health.every(
+    (h) => h.status === "healthy" || h.status === "unsupported",
+  );
+  const anyAttention = health.some((h) => h.status === "attention");
+
   const attention: { label: string; detail: string; section: string }[] = [];
   if (report.waiting_for_you > 0) {
     attention.push({
@@ -167,15 +191,6 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
       section: "payments",
     });
   }
-  if (catalog?.reachable && catalog.out_of_stock.length > 0) {
-    attention.push({
-      label: `${catalog.out_of_stock.length} product${catalog.out_of_stock.length === 1 ? "" : "s"} out of stock`,
-      detail: catalog.complete
-        ? "Across your full catalog."
-        : `Across the ${catalog.scanned} products scanned so far - the scan did not finish.`,
-      section: "inventory",
-    });
-  }
   if (catalog && !catalog.reachable) {
     attention.push({
       label: "Your platform could not be reached for inventory data",
@@ -189,6 +204,23 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
       detail: `Asked ${demand.queries[0].times_asked} time${demand.queries[0].times_asked === 1 ? "" : "s"} in this window.`,
       section: "customers",
     });
+  }
+
+  // Product-specific attention, deliberately narrower than the reference's
+  // "Products Needing Attention" - only the two conditions this schema can
+  // actually name per product (out of stock, low stock). No per-product
+  // conversion or returns figure exists anywhere in this data model, so
+  // none is invented here; see PROGRESS.md for why.
+  const productsNeedingAttention: { title: string; issue: string; section: string }[] = [];
+  if (catalog?.reachable) {
+    for (const p of catalog.out_of_stock.slice(0, 4)) {
+      productsNeedingAttention.push({ title: p.title, issue: "Out of stock", section: "inventory" });
+    }
+    if (catalog.low_stock_available) {
+      for (const p of catalog.low_stock.slice(0, 4 - productsNeedingAttention.length)) {
+        productsNeedingAttention.push({ title: p.title, issue: "Low stock", section: "inventory" });
+      }
+    }
   }
 
   const opportunities: { title: string; evidence: string; section: string }[] = [];
@@ -213,6 +245,15 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
       });
     }
   }
+  if (catalog?.reachable && catalog.out_of_stock.length > 0) {
+    opportunities.push({
+      title: `${catalog.out_of_stock.length} product${catalog.out_of_stock.length === 1 ? "" : "s"} out of stock right now`,
+      evidence: catalog.complete
+        ? "Restocking these keeps sales you'd otherwise lose to a dead product page."
+        : `Across the ${catalog.scanned} products scanned so far.`,
+      section: "inventory",
+    });
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -221,86 +262,121 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
           <span className="eyebrow">{caps.platform}</span>
           <h2 style={{ margin: "4px 0 0", fontSize: "var(--step-3)" }}>Overview</h2>
         </div>
-        <span className="eyebrow">last {report.days} days</span>
+        <div className="range-picker" role="group" aria-label="Date range">
+          {RANGE_OPTIONS.map((n) => (
+            <button
+              key={n}
+              className={`range-btn ${n === days ? "active" : ""}`}
+              onClick={() => setDays(n)}
+            >
+              Last {n} days
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* KPI row */}
-      <div className="kpi-row">
-        <KpiCard
-          label="Total sales"
-          value={noSalesYet ? `0.00 ${report.total_sales_currency}` : `${report.total_sales_amount} ${report.total_sales_currency}`}
-          compare={
-            trend && trend.prior_order_count > 0 && trend.change_pct !== null
-              ? { pct: trend.change_pct, period: `${trend.days}d` }
-              : null
-          }
-          onClick={() => onNavigate("sales")}
-        />
-        <KpiCard
-          label="Completed orders"
-          value={report.completed_order_count}
-          onClick={() => onNavigate("sales")}
-        />
-        <KpiCard
-          label="Checkout success rate"
-          value={
-            !conversion || conversion.checkout_success_rate === null
-              ? "—"
-              : `${conversion.checkout_success_rate}%`
-          }
-          onClick={() => onNavigate("orders")}
-        />
-        <KpiCard
-          label="Average order value"
-          value={
-            report.average_order_value
-              ? `${report.average_order_value} ${report.total_sales_currency}`
-              : "—"
-          }
-          onClick={() => onNavigate("sales")}
-        />
+      {/* KPI row + embedded Copilot, side by side */}
+      <div className="overview-top-row">
+        <div className="kpi-row">
+          <KpiCard
+            label="Total sales"
+            value={noSalesYet ? `0.00 ${report.total_sales_currency}` : `${report.total_sales_amount} ${report.total_sales_currency}`}
+            compare={
+              trend && trend.prior_order_count > 0 && trend.change_pct !== null
+                ? { pct: trend.change_pct, period: `${trend.days}d` }
+                : null
+            }
+            onClick={() => onNavigate("sales")}
+          />
+          <KpiCard
+            label="Completed orders"
+            value={report.completed_order_count}
+            onClick={() => onNavigate("sales")}
+          />
+          <KpiCard
+            label="Cart → checkout rate"
+            value={
+              !conversion || conversion.cart_to_checkout_rate === null
+                ? "—"
+                : `${conversion.cart_to_checkout_rate}%`
+            }
+            onClick={() => onNavigate("orders")}
+          />
+          <KpiCard
+            label="Average order value"
+            value={
+              report.average_order_value
+                ? `${report.average_order_value} ${report.total_sales_currency}`
+                : "—"
+            }
+            onClick={() => onNavigate("sales")}
+          />
+        </div>
+        <div className="overview-copilot-slot">
+          <MerchantCopilot onNavigate={onNavigate} />
+        </div>
       </div>
 
-      {/* Business health */}
-      <section className="panel">
-        <div className="panel-head">
-          <span className="eyebrow">Business health</span>
-        </div>
-        <div className="panel-body">
-          <div className="health-grid">
-            {health.map((h) => (
-              <button
-                key={h.key}
-                className="health-card"
-                onClick={() => onNavigate(h.section)}
-              >
-                <div className="health-name">{h.label}</div>
-                <Badge status={h.status} />
-                <div className="note" style={{ margin: 0 }}>{h.detail}</div>
-              </button>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Top products + Needs attention, side by side on wide screens */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+      {/* Revenue trend + Business health, side by side */}
+      <div className="overview-trend-row">
         <section className="panel">
           <div className="panel-head">
-            <span className="eyebrow">Top products</span>
+            <span className="eyebrow">Revenue trend</span>
+          </div>
+          <div className="panel-body">
+            <RevenueTrendChart series={series} />
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-head">
+            <span className="eyebrow">Business health</span>
+            <span className={`status-badge ${overallHealthy ? "healthy" : anyAttention ? "attention" : "unavailable"}`}>
+              {overallHealthy ? "Healthy" : anyAttention ? "Attention" : "Mixed"}
+            </span>
+          </div>
+          <div className="panel-body">
+            <div className="health-list">
+              {health.map((h) => (
+                <button key={h.key} className="health-list-row" onClick={() => onNavigate(h.section)}>
+                  <span className={`health-dot ${h.status}`} />
+                  <span className="health-list-name">{h.label}</span>
+                  <Badge status={h.status} />
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+      </div>
+
+      {/* Top products / Products needing attention / What needs attention */}
+      <div className="overview-triple-row">
+        <section className="panel">
+          <div className="panel-head">
+            <span className="eyebrow">Top performing products</span>
           </div>
           <div className="panel-body">
             {!products?.has_data ? (
               <p className="empty">No completed orders with product detail yet.</p>
             ) : (
-              products.top_by_quantity.map((p) => (
-                <div key={p.product_id} className="frictionrow">
-                  <span>{p.product_name}</span>
-                  <span className="num">
-                    {p.quantity} sold · {p.revenue} {report.total_sales_currency}
-                  </span>
-                </div>
-              ))
+              <table className="mini-table">
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th>Revenue</th>
+                    <th>Orders</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {products.top_by_revenue.map((p) => (
+                    <tr key={p.product_id}>
+                      <td>{p.product_name}</td>
+                      <td className="num">{p.revenue} {report.total_sales_currency}</td>
+                      <td className="num">{p.order_count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
             <button className="navlink" style={{ marginTop: 12 }} onClick={() => onNavigate("products")}>
               Full product performance →
@@ -310,7 +386,30 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
 
         <section className="panel">
           <div className="panel-head">
-            <span className="eyebrow">Needs your attention</span>
+            <span className="eyebrow">Products needing attention</span>
+          </div>
+          <div className="panel-body">
+            {!catalog?.reachable ? (
+              <p className="empty">Platform unreachable for inventory data.</p>
+            ) : productsNeedingAttention.length === 0 ? (
+              <p className="empty">No stock issues found in the last scan.</p>
+            ) : (
+              productsNeedingAttention.map((p) => (
+                <div key={`${p.title}-${p.issue}`} className="frictionrow">
+                  <span>{p.title}</span>
+                  <span className={`num ${p.issue === "Out of stock" ? "warn" : ""}`}>{p.issue}</span>
+                </div>
+              ))
+            )}
+            <button className="navlink" style={{ marginTop: 12 }} onClick={() => onNavigate("inventory")}>
+              Full inventory →
+            </button>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-head">
+            <span className="eyebrow">What needs attention?</span>
           </div>
           <div className="panel-body">
             {attention.length === 0 ? (
@@ -334,7 +433,7 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
       {/* Summary cards */}
       <section className="panel">
         <div className="panel-head">
-          <span className="eyebrow">Summary</span>
+          <span className="eyebrow">Commerce health</span>
         </div>
         <div className="panel-body">
           <div className="summary-card-row">
@@ -376,7 +475,7 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
       {opportunities.length > 0 && (
         <section className="panel">
           <div className="panel-head">
-            <span className="eyebrow">Business opportunities</span>
+            <span className="eyebrow">Sell better — opportunities</span>
           </div>
           <div className="panel-body">
             {opportunities.map((o) => (
@@ -394,10 +493,10 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
         </section>
       )}
 
-      {/* Platform + Copilot entry points */}
+      {/* Platform */}
       <section className="panel">
         <div className="panel-head">
-          <span className="eyebrow">Store</span>
+          <span className="eyebrow">Store / Platform</span>
         </div>
         <div className="panel-body">
           <p className="note" style={{ marginTop: 0 }}>
@@ -413,9 +512,6 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
             </button>
             <button className="navlink" onClick={() => onNavigate("insights")}>
               Business insights →
-            </button>
-            <button className="navlink" onClick={() => onNavigate("copilot")}>
-              Ask the Copilot →
             </button>
           </div>
         </div>

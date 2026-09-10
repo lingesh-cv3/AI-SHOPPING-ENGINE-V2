@@ -720,6 +720,18 @@ async def sales_trend_route(
     return await db.sales_period_comparison(connection_id, days=days)
 
 
+@app.get(f"{API}/sales-series/{{connection_id}}")
+async def sales_series_route(
+    connection_id: str, days: int = 30, _=Depends(merchant_scoped())
+) -> dict:
+    """Day-by-day revenue for the Overview trend chart - current window
+    against the equal-length prior window, from the identical source
+    `/sales-trend` and the report's own total already use.
+    """
+    _adapter(connection_id)
+    return await db.daily_revenue_series(connection_id, days=days)
+
+
 @app.get(f"{API}/conversion/{{connection_id}}")
 async def conversion_route(
     connection_id: str, days: int = 30, _=Depends(merchant_scoped())

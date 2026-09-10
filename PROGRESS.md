@@ -372,12 +372,35 @@ these first:**
          Save control, verified in a real browser to survive an unrelated
          settings change.
 
-      **Also still open:** full page-by-page visual polish beyond Overview
-      and Orders & Conversion. Sales & Revenue, Product Performance,
-      Customer Insights, AI Commerce, Recovery, Holdout, Business Insights,
-      Platform and Settings still use the plainer card/list treatment from
-      #36 rather than the KPI-card/status-badge/summary-card system built
-      for Overview in #37 - a real UI-consistency gap, not a functional one.
+      **Overview rebuilt again (#40)** against a real Merchant SaaS
+      dashboard reference - embedded Copilot, a real revenue trend chart
+      (new `daily_revenue_series`/`/api/sales-series`, no charting library
+      existed before this), a functional date-range picker, product-level
+      attention (out-of-stock/low-stock only - no per-product conversion
+      or returns figure exists to show), and opportunities trimmed to ones
+      with a real destination (no fabricated "create promotion"/"compare
+      products" actions). Verified live on both merchants with zero JS
+      errors and real screenshots. Not yet done as part of this pass:
+      - A live zero-data walkthrough (a freshly seeded empty merchant) -
+        the empty-state code paths exist and follow the same pattern as
+        every other panel, but were not exercised against a real empty
+        connection this session.
+      - A content-completeness catalogue scan ("poor product content" as
+        an attention/opportunity source) - a real, buildable signal
+        (`Product.description`/`image_url` can be null) but new backend
+        work outside this slice's scope.
+      - A merchant-account header badge (avatar/name/dropdown) - no
+        backing session/profile-switching capability exists yet to make
+        one real rather than decorative chrome, so it was deliberately not
+        added.
+
+      **Still fully open:** full page-by-page visual polish beyond
+      Overview and Orders & Conversion. Sales & Revenue, Product
+      Performance, Customer Insights, AI Commerce, Recovery, Holdout,
+      Business Insights, Platform and Settings still use the plainer
+      card/list treatment from #36 rather than the KPI-card/status-badge/
+      trend-chart system built for Overview in #37/#40 - a real UI-
+      consistency gap, not a functional one.
 
 - [ ] AI Store Diagnosis
 - [ ] Recovery Opportunity Radar
