@@ -420,7 +420,26 @@ export default function App() {
 
       if (r.succeeded) {
         setPipeline(null);
-        setCart(await api.createCart());
+        // A fresh cart, stored under this merchant's key. Same as
+        // onCartRetired does after a chat-driven checkout - without this,
+        // sessionStorage keeps pointing at the now-paid cart, so the next
+        // reload (or remount from switching tabs) reloads it and the next
+        // add-to-cart is rejected as CART_ALREADY_PAID.
+        const fresh = await api.createCart();
+        sessionStorage.setItem(`cv3_cart_${connection}`, fresh.cart_id);
+        setCart(fresh);
+        if (account) {
+          // A signed-in shopper's account.cart_id still names the cart that
+          // was just paid for - the ordinary claim effect below only claims
+          // a cart once it holds an item, so a reload before adding anything
+          // to this brand-new one would otherwise read account.cart_id first
+          // (mount effect) and reload the paid cart. This is a known-safe,
+          // deliberate replacement, not the race that guard protects against.
+          await claimCart(connection, fresh.cart_id);
+          setAccount((prev) =>
+            prev ? { ...prev, cart_id: fresh.cart_id } : prev,
+          );
+        }
       } else if (r.chat_reply) {
         // The backend already ran this decline through the real pipeline -
         // a case, the honest specific reason, recovery or escalation - and

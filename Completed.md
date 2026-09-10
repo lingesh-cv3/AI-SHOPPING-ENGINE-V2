@@ -1856,3 +1856,50 @@ below; `npm run build` now exits 0.)
     use the plainer card/list treatment from #36 rather than the fuller
     KPI-card/status-badge system built for Overview in this session. All
     recorded in `PROGRESS.md`.
+
+38. **Fixed a real post-checkout cart bug reported by hand: adding a second
+    product after a successful purchase failed with a red error.** Root
+    cause traced end to end, not assumed frontend-only: `checkout()`'s
+    success branch in `App.tsx` created a fresh cart via `api.createCart()`
+    but never persisted it anywhere durable - `sessionStorage`'s
+    `cv3_cart_{connection}` key kept pointing at the cart that had just
+    been paid for, and (for a signed-in shopper) the server's own
+    `account.cart_id` stayed on that same paid cart too, since the
+    existing claim effect only claims a cart once it holds an item. Any
+    remount (switching to the Merchant tab and back, or a reload) read the
+    stale paid cart back in, and the backend correctly rejected the next
+    add-to-cart with `409 CART_ALREADY_PAID` (`shop.py::_not_if_paid`) -
+    which is what showed up as the red error line. The identical, already
+    correct pattern existed a few hundred lines away: `onCartRetired`
+    (the chat-driven checkout path) already wrote the fresh cart id to
+    `sessionStorage`, and its own comment claimed the sidebar checkout did
+    "the same" - it didn't. Fixed by making the sidebar checkout do what
+    its neighbour already did (`sessionStorage.setItem`), plus one thing
+    neither path did: for a signed-in shopper, immediately `claimCart` the
+    new cart and update local account state, rather than waiting for the
+    claim effect's item-count gate.
+
+    Reproduced against the real running system before touching any code
+    (a full guest-and-signed-in Kettle purchase, then a raw `add_line`
+    call against the now-paid cart, returning `409 CART_ALREADY_PAID` -
+    the exact bug), and reproduced identically on Northfield, confirming
+    it was platform-independent frontend state, not an adapter quirk.
+    Fixed, then re-verified the same way: on both merchants, a fresh cart
+    created and claimed after checkout accepted a new line successfully,
+    and a second full checkout on that new cart succeeded end to end (new
+    order, no double charge, a retried checkout on the paid cart correctly
+    returned `already_paid: true` on the same order rather than a new
+    one). `npm run build`/`tsc` typecheck clean; `npm run lint` unchanged
+    (same 7 pre-existing errors). `healthcheck.py` (111-113 passed across
+    two runs, differing failures each time - all in payment-recovery
+    wording and a webhook risk-outcome check, none touching cart/checkout/
+    funnel logic, consistent with the documented Groq-throttle flakiness
+    in CLAUDE.md's "The constraint", not a regression from this change),
+    `fuzz.py` (1200 assertions across 20 sequences, twice, every invariant
+    held both times), `auditroutes.py` (every route's lock and shopper
+    scoping held). The diff is scoped entirely to `storefront/src/App.tsx`
+    - no backend file touched, consistent with the root cause being
+    React/sessionStorage state rather than anything server-side (fuzz.py's
+    own output independently notes it cannot see this class of bug, since
+    it lives in the browser rather than anything a server-side check
+    reaches).
