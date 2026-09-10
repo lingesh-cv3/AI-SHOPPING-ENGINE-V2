@@ -69,7 +69,7 @@ def list_departments() -> list[str]:
 
 
 def search_items(
-    query: str, limit: int = 20, dept: str | None = None
+    query: str, limit: int = 20, dept: str | None = None, offset: int = 0
 ) -> tuple[list[dict], int]:
     """Browse or search.
 
@@ -86,6 +86,12 @@ def search_items(
 
     Results are ranked by how many query words matched, so a two-word match
     outranks a one-word match rather than arriving in catalog order.
+
+    `offset` supports bounded pagination through a catalogue larger than any
+    single page - a real merchant admin/search API genuinely offers this
+    (Magento's searchCriteria pageSize/currentPage, Shopware's limit/page), so
+    a caller that needs the whole catalogue can page through it rather than
+    ever silently truncating at one page.
     """
     items = list(_products.values())
     if dept:
@@ -104,7 +110,59 @@ def search_items(
         scored.sort(key=lambda pair: -pair[0])
         items = [product for _, product in scored]
 
-    return items[:limit], len(items)
+    total = len(items)
+    return items[offset : offset + limit], total
+
+
+# ---------------------------------------------------------------------------
+# Test-only bulk seeding
+# ---------------------------------------------------------------------------
+#
+# Not part of any real platform's API - exists so a >100-product catalogue can
+# be exercised without permanently growing the demo catalogue in seed/catalog.py.
+# Every synthetic product id is prefixed "TESTBULK-" so it can be added and
+# removed cleanly and can never collide with a real seeded product.
+
+_BULK_PREFIX = "TESTBULK-"
+
+
+def seed_bulk(count: int) -> int:
+    """Add `count` synthetic products for pagination/volume testing.
+
+    Deterministic by index so a test can assert exact counts: every 2nd is
+    OUT_OF_STOCK, every 3rd (of the remainder) is LOW_STOCK, the rest IN_STOCK.
+    Returns the number actually added.
+    """
+    added = 0
+    for i in range(count):
+        pid = f"{_BULK_PREFIX}{i:05d}"
+        if i % 2 == 0:
+            state, qty = "N", 0
+        elif i % 3 == 0:
+            state, qty = "LOW", 2
+        else:
+            state, qty = "Y", 40
+        _products[pid] = {
+            "product_id": pid,
+            "item_title": f"Synthetic Bulk Item {i:05d}",
+            "dept": "Bulk-Test",
+            "price_paise": 100000,
+            "was_price_paise": None,
+            "stock_state": state,
+            "qty_available": qty,
+            "variants": [],
+            "blurb": "synthetic test fixture product, not a real catalogue item",
+        }
+        added += 1
+    return added
+
+
+def clear_bulk() -> int:
+    """Remove every synthetic bulk product added by seed_bulk. Idempotent."""
+    ids = [pid for pid in _products if pid.startswith(_BULK_PREFIX)]
+    for pid in ids:
+        del _products[pid]
+    return len(ids)
 
 def get_item(product_id: str) -> dict | None:
     return _products.get(product_id)

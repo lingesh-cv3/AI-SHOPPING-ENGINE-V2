@@ -67,14 +67,20 @@ def list_departments() -> dict:
 
 
 @app.get(f"{API}/items")
-def list_items(q: str = "", limit: int = 20, dept: str | None = None) -> dict:
+def list_items(
+    q: str = "", limit: int = 20, dept: str | None = None, offset: int = 0
+) -> dict:
     """Browse or search. An empty list is a valid result, never an error.
 
     With no q this browses, optionally filtered to one department. With a q it is
     a literal substring match on the title, which is what produces the dead
     searches the engine recovers from.
+
+    `offset` pages through a catalogue larger than one page - genuine bounded
+    pagination, the same shape a real Magento/Shopware admin or search API
+    exposes, not something invented just for this endpoint.
     """
-    hits, total = store.search_items(q, limit, dept)
+    hits, total = store.search_items(q, limit, dept, offset)
     return {"items": hits, "match_count": total}
 
 @app.get(f"{API}/items/{{product_id}}")
@@ -149,6 +155,23 @@ def reset() -> dict:
     """Clear baskets and purchases. For demos and tests, not a real platform API."""
     store.reset()
     return {"ok": True}
+
+
+@app.post(f"{API}/_seed_bulk")
+def seed_bulk(count: int = 150) -> dict:
+    """Add `count` synthetic products (id-prefixed TESTBULK-) for volume/pagination
+    testing. Test-only, like `/_reset` - never called by the adapter or the engine,
+    and never part of any real platform's API surface."""
+    added = store.seed_bulk(count)
+    return {"added": added}
+
+
+@app.post(f"{API}/_clear_bulk")
+def clear_bulk() -> dict:
+    """Remove every synthetic bulk product added by `/_seed_bulk`. Idempotent, and
+    leaves the real seeded catalogue untouched."""
+    removed = store.clear_bulk()
+    return {"removed": removed}
 
 
 # NOTE: no refund endpoint, no payment-recovery endpoint. This platform cannot

@@ -66,12 +66,20 @@ def collections() -> list[str]:
     return list(COLLECTIONS)
 
 
-def search(term: str | None, collection: str | None, limit: int) -> list[dict]:
+def search(
+    term: str | None, collection: str | None, limit: int, offset: int = 0
+) -> tuple[list[dict], int]:
     """Word-based search over name and collection.
 
     Slightly better than Northfield's, because it also searches the collection - so
     "espresso" finds the espresso blend and "gifts" finds the gift boxes. Still no
     synonyms: "beans" finds nothing, because no name contains it.
+
+    `offset` pages through a catalogue larger than one page, mirroring the same
+    bounded-pagination capability Northfield's REST endpoint has - a real
+    GraphQL commerce API (Shopify's, Shopware's) offers this as `first`/`after`
+    or `limit`/`offset`. Returns the page alongside the total match count, so a
+    caller can tell "no more results" from "more results exist beyond this page".
     """
     items = list(_products.values())
     if collection:
@@ -88,7 +96,48 @@ def search(term: str | None, collection: str | None, limit: int) -> list[dict]:
         scored.sort(key=lambda pair: -pair[0])
         items = [p for _, p in scored]
 
-    return items[:limit]
+    total = len(items)
+    return items[offset : offset + limit], total
+
+
+# ---------------------------------------------------------------------------
+# Test-only bulk seeding
+# ---------------------------------------------------------------------------
+#
+# Same reasoning as Northfield's: a >100-product catalogue exercised without
+# permanently growing the real demo catalogue. Prefixed TESTBULK- so it can be
+# added and removed cleanly.
+
+_BULK_PREFIX = "TESTBULK-"
+
+
+def seed_bulk(count: int) -> int:
+    """Add `count` synthetic products. Deterministic by index: every 2nd is
+    out of stock, the rest in stock - this platform has no LOW_STOCK concept
+    at all (see mapping.availability's own docstring), so none are seeded."""
+    added = 0
+    for i in range(count):
+        pid = f"{_BULK_PREFIX}{i:05d}"
+        in_stock = (i % 2) != 0
+        _products[pid] = {
+            "id": pid,
+            "name": f"Synthetic Bulk Item {i:05d}",
+            "collection": "Bulk-Test",
+            "price": {"amount": "1000.00", "currencyCode": "INR"},
+            "inStock": in_stock,
+            "options": [],
+            "story": "synthetic test fixture product, not a real catalogue item",
+        }
+        added += 1
+    return added
+
+
+def clear_bulk() -> int:
+    """Remove every synthetic bulk product added by seed_bulk. Idempotent."""
+    ids = [pid for pid in _products if pid.startswith(_BULK_PREFIX)]
+    for pid in ids:
+        del _products[pid]
+    return len(ids)
 
 
 def product(product_id: str) -> dict | None:

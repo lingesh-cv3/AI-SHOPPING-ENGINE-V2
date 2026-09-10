@@ -237,11 +237,75 @@ these first:**
 
       Remaining work: every answer that identifies a problem offers the
       action that fixes it, executable from that panel through the existing
-      risk gate. Also owed: `_catalog_alerts` reads
-      `search_products("", limit=100)` on every call, which is correct for
-      Northfield and wrong for a real catalogue - the real-volume condition
-      was never exercised. Do not move this back to `Completed.md` until both
-      are addressed and `value-auditor` returns VALUABLE, not THIN.
+      risk gate. Do not move this back to `Completed.md` until that is
+      addressed and `value-auditor` returns VALUABLE, not THIN.
+
+      **Payments-specific slice of this gap is now closed** (separate
+      session, see Completed.md #35): a merchant can now approve or reject a
+      pending payment-recovery case directly from a new Payments &
+      Checkout panel in their own console, through the existing risk gate -
+      previously only CV3's own operations queue could act on one. This
+      does not close the remaining gap for other problem types the Copilot
+      surfaces (catalogue alerts, unmet demand, inventory) - those still
+      have no action attached and the Merchant Copilot item stays reopened
+      here for that reason.
+
+      **`_catalog_alerts`'s real-volume bug is now fixed** (this session):
+      it no longer reads a fixed `search_products("", limit=100)` page and
+      presents it as the whole catalog. `engine/api/routes.py::_scan_catalog`
+      pages the adapter with real `offset`/`limit` pagination (added as an
+      adapter extension on both `adapters/sample/adapter.py` and
+      `adapters/kettle/adapter.py`, and on the two demo backends'
+      `/api/v1/items` and GraphQL `products` operations) until a short page
+      is seen or a 250-page/50,000-product safety cap is hit, and the result
+      always carries `reachable`/`complete`/`truncated_at` so a partial scan
+      is never presented as the whole catalog. Verified against a 150- and
+      120-product synthetic fixture (`sample_merchant.store.seed_bulk`/
+      `clear_bulk`, and the Kettle GraphQL `seedBulk`/`clearBulk` operations -
+      test-only, `TESTBULK-`-prefixed, torn down after use) - exact counts
+      confirmed (188 = 38 + 150 scanned on Northfield, 78 out-of-stock = 3
+      real + 75 synthetic, products past index 100 reachable), tenant
+      isolation held both directions, and the merchant's backend being killed
+      mid-request degrades to `reachable: false` rather than a broken turn or
+      stale data. `low_stock_available` also now distinguishes "checked,
+      nothing low" from "this platform has no low-stock concept at all"
+      (Kettle: boolean stock only), read from the adapter's own declared
+      `CHECK_INVENTORY` capability constraint rather than guessed from an
+      empty list. A merchant-console panel (`storefront/src/InventoryPanel.tsx`)
+      now shows this too, reading the identical `/api/catalog/{connection_id}`
+      function the copilot's "what's out of stock" answers use, so the two
+      surfaces can never disagree.
+
+      **Not moved to Completed.md** - this fixes the real-volume honesty bug
+      CLAUDE.md names as the worked example, but the result is still
+      read-only: a merchant sees the (now honest, now complete) list and has
+      to act on it elsewhere. No existing report/ops figure moves from this
+      fix either - it removes a silent-wrong-data risk rather than adding a
+      new measured outcome. Value-bar items 4 ("where is the action") and 5
+      ("what number moves") are not cleared, so this stays a fix to an
+      existing anti-pattern rather than a newly completed feature, per the
+      same reasoning the Merchant Copilot item above stays reopened.
+
+      Response-quality fix applied this session: "which products are selling
+      best" was returning both a quantity list and a revenue list of the same
+      products back to back - pure repetition. `SYSTEM_PROMPT` in
+      `engine/copilot/service.py` now routes a generic "selling best"
+      question to `top_by_quantity` alone (revenue shown inline per
+      product), a revenue-framed question ("generated the most revenue",
+      "making the most money") to `top_by_revenue` alone, and "by revenue
+      instead" always to `top_by_revenue` regardless of what came before
+      (no conversation memory exists, so the phrase itself is the whole
+      signal). Also fixed: "which products are underperforming" no longer
+      relabels the lowest-quantity list as "underperforming" - there is no
+      trend or benchmark in the data to support that judgment, so the
+      copilot now says so plainly, while "which products sold the least" (a
+      neutral ranking question, not a judgment) still answers directly from
+      `lowest_performers`, labeled "lowest-selling BY QUANTITY". Verified
+      live against both Northfield and Kettle for all seven phrasings; no
+      duplication, correct ranking per phrasing, no false underperformance
+      claim, tenant isolation held. This does not change the "not done"
+      status above - it is a quality fix to the existing read-only
+      answering half, not the still-missing act-from-the-answer capability.
 
 - [ ] AI Store Diagnosis
 - [ ] Recovery Opportunity Radar

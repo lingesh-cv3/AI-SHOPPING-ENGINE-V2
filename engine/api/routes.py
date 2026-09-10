@@ -15,6 +15,7 @@ Two groups of routes:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -29,6 +30,7 @@ from shared.models import (
     ActionType,
     Availability,
     CommerceError,
+    Operation,
     ProposedAction,
     risk_properties_for,
 )
@@ -663,29 +665,175 @@ async def merchant_report(
     report["supports_payment_recovery"] = bool(
         caps and caps.payment_recovery_methods
     )
+    # A short top-products list, from the same OrderLine data the copilot's
+    # product-performance answers use - a small, coherent addition to the
+    # existing report shape, not a second dashboard. Limited to 5 and to
+    # quantity sold, the figure a merchant glances at first; the copilot
+    # answers the fuller breakdown (revenue, lowest performers) on request.
+    performance = await db.product_performance(connection_id, days=days, limit=5)
+    report["top_products"] = performance["top_by_quantity"]
+    report["product_data_has_history"] = performance["has_data"]
     return report
 
 
-async def _catalog_alerts(connection_id: str, *, limit: int = 20) -> list[dict]:
-    """Products currently out of stock or low, straight from the adapter's own
-    catalog - not tracked or cached anywhere, read fresh every call so an
-    answer can never describe stock that has since changed.
+#: Safety cap on how many pages `_scan_catalog` will walk for one request.
+#: 200/page * 250 pages = 50,000 products - comfortably past a 40,000-SKU
+#: real-client catalogue (CLAUDE.md's own real-volume worked example) while
+#: still bounding one HTTP request to a finite amount of adapter work. If a
+#: catalogue is bigger than this, the scan stops and honestly reports
+#: `complete: False` rather than hanging the request forever.
+_CATALOG_SCAN_PAGE_SIZE = 200
+_CATALOG_SCAN_MAX_PAGES = 250
 
-    Best-effort like every other catalog read in this codebase (see
-    `/api/simulate`'s identical `except CommerceError: pass`): a platform
-    outage here should degrade the copilot's answer, not break the whole
-    turn over one adapter call.
+
+async def _scan_catalog(connection_id: str) -> tuple[list, bool, int]:
+    """Walk this connection's entire catalog, honestly.
+
+    Every real client's catalogue can be larger than any one page a platform
+    will return, so a single `search_products("", limit=100)` call silently
+    truncates - correct for Northfield's ~40 demo products, wrong the moment a
+    real Magento or Shopware client's 40,000-SKU catalogue is behind the same
+    adapter. This walks it with `offset`/`limit` paging until a page comes
+    back empty (the catalogue is exhausted) or the safety cap above is hit.
+
+    `offset` is not on `StandardCommerceInterface.search_products` - it is an
+    adapter-specific extension, the same pattern already used for `dept`
+    (category browsing). Not every real platform's connector will have added
+    it yet, so this checks the adapter's own signature before ever passing it;
+    an adapter without the parameter gets exactly one page, and the caller is
+    told the result is incomplete rather than being lied to about completeness.
+
+    Returns `(products, complete, scanned_count)`. `complete` is False when
+    either the adapter cannot page at all (one page only, and more may exist
+    beyond it) or the safety cap was hit before an empty page was reached -
+    both are told to the caller, never silently presented as the whole catalog.
+    """
+    adapter = _adapter(connection_id)
+    supports_offset = "offset" in inspect.signature(adapter.search_products).parameters
+
+    products: list = []
+    offset = 0
+    for page in range(_CATALOG_SCAN_MAX_PAGES):
+        kwargs = {"limit": _CATALOG_SCAN_PAGE_SIZE}
+        if supports_offset:
+            kwargs["offset"] = offset
+        result = await adapter.search_products("", **kwargs)
+        products.extend(result.products)
+
+        if not supports_offset:
+            # One page is all this adapter can give us. Honest about it: complete
+            # only if that one page evidently held the whole catalog.
+            complete = (
+                result.total_available is not None
+                and result.total_available <= len(result.products)
+            ) or len(result.products) < _CATALOG_SCAN_PAGE_SIZE
+            return products, complete, len(products)
+
+        if len(result.products) < _CATALOG_SCAN_PAGE_SIZE:
+            # Short page: the catalog is exhausted, not merely paused.
+            return products, True, len(products)
+
+        offset += _CATALOG_SCAN_PAGE_SIZE
+    else:
+        # Hit the safety cap without ever seeing a short page - a genuinely
+        # huge catalog (or a platform whose paging never terminates). Reported
+        # as incomplete rather than pretending the cap was the whole catalog.
+        return products, False, len(products)
+
+
+async def _catalog_alerts(connection_id: str) -> dict:
+    """Products currently out of stock or low, across the whole catalog - not
+    tracked or cached anywhere, read fresh every call so an answer can never
+    describe stock that has since changed.
+
+    This is the one function both the merchant console's inventory panel and
+    the merchant copilot read from (`/api/catalog/{connection_id}` and the
+    `/api/copilot/{connection_id}` route both call this), so the two surfaces
+    can never disagree about what is out of stock.
+
+    Best-effort at the connectivity level, like every other catalog read in
+    this codebase (see `/api/simulate`'s identical `except CommerceError:
+    pass`): a platform outage degrades the answer to an honest "could not read
+    the catalog right now", not a broken turn.
+
+    Low-stock classification is never invented. It uses only the adapter's own
+    `Availability.LOW_STOCK` value - already a platform-declared fact, not a
+    number this code guesses at. Some real platforms have no such concept at
+    all (Kettle's own `mapping.availability` never returns it - the platform
+    only exposes a boolean); this is reported as `low_stock_available: False`
+    rather than a silent, misleading empty list that reads as "nothing low".
     """
     adapter = _adapter(connection_id)
     try:
-        browse = await adapter.search_products("", limit=100)
+        products, complete, scanned = await _scan_catalog(connection_id)
     except CommerceError:
-        return []
-    return [
-        {"title": p.title, "availability": str(p.availability)}
-        for p in browse.products
-        if p.availability in (Availability.OUT_OF_STOCK, Availability.LOW_STOCK)
-    ][:limit]
+        return {
+            "reachable": False,
+            "complete": False,
+            "scanned": 0,
+            "truncated_at": None,
+            "out_of_stock": [],
+            "low_stock": [],
+            "low_stock_available": None,
+        }
+
+    out_of_stock = [
+        {"product_id": p.product_id, "sku": p.sku, "title": p.title}
+        for p in products
+        if p.availability == Availability.OUT_OF_STOCK
+    ]
+    low_stock_products = [p for p in products if p.availability == Availability.LOW_STOCK]
+    # LOW_STOCK never appearing is ambiguous by itself - either genuinely
+    # nothing is low right now, or this platform never expresses that state at
+    # all (Kettle: boolean in-stock only, no granularity - see
+    # mapping.availability's own docstring). Disambiguated by asking the
+    # adapter's own declared capability constraints for CHECK_INVENTORY,
+    # rather than guessing "nothing low" from an empty list.
+    low_stock_available = True
+    try:
+        caps = await adapter.get_capabilities()
+        inventory_cap = caps.operations.get(Operation.CHECK_INVENTORY)
+        if inventory_cap and inventory_cap.constraints.get("stock_granularity") == "boolean":
+            low_stock_available = False
+    except CommerceError:
+        pass
+    return {
+        "reachable": True,
+        "complete": complete,
+        "scanned": scanned,
+        "truncated_at": None if complete else scanned,
+        "out_of_stock": out_of_stock,
+        "low_stock": [
+            {"product_id": p.product_id, "sku": p.sku, "title": p.title}
+            for p in low_stock_products
+        ],
+        "low_stock_available": low_stock_available,
+    }
+
+
+@app.get(f"{API}/catalog/{{connection_id}}")
+async def catalog_alerts(
+    connection_id: str,
+    _=Depends(merchant_scoped()),
+) -> dict:
+    """Out-of-stock and low-stock products across the whole catalog.
+
+    The Inventory & Catalog console panel's data source, and the exact same
+    function the merchant copilot answers "what's out of stock" from - one
+    fixed calculation, read from two surfaces, so the panel and the copilot's
+    answer can never disagree. Scoped by merchant_scoped the same as every
+    other console route, so one merchant can never read another's catalog.
+
+    Always renders something honest rather than an empty panel or a bare
+    list mistaken for the whole catalog: `reachable` is False if the
+    platform could not be read at all, `complete` is False (with
+    `truncated_at` set) if the scan hit its safety cap before finishing, and
+    `low_stock_available` is False for a platform (like Kettle) that has no
+    low-stock concept at all - never silently presented as "zero low-stock
+    products found".
+    """
+    _adapter(connection_id)
+    return await _catalog_alerts(connection_id)
 
 
 @app.post(f"{API}/copilot/{{connection_id}}", response_model=CopilotAnswer)
@@ -723,6 +871,8 @@ async def merchant_copilot(
         actions=[a.model_dump() for a in _actions_list()],
         catalog_alerts=await _catalog_alerts(connection_id),
         unmet_demand=await db.unmet_demand(connection_id, days=30),
+        product_performance=await db.product_performance(connection_id, days=30),
+        sales_period_comparison=await db.sales_period_comparison(connection_id, days=7),
     )
     return CopilotAnswer(answer=reply.answer, used_model=reply.used_model)
 

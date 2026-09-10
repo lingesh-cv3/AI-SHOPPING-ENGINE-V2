@@ -81,6 +81,25 @@ _FALLBACK_ASSISTANCE: tuple[ActionType, ...] = (
     ActionType.RECOMMEND_PRODUCTS,
 )
 
+#: Words that make "add/remove ... cart" a mutation, not a status question.
+#: Checked first, and narrowly, because "cart" alone is not enough - "add
+#: this to my cart" must never be answered as if it were a read.
+_CART_MUTATION_WORDS = ("add", "remove", "delete", "clear", "empty", "change", "update")
+
+
+def _looks_like_cart_question(message: str) -> bool:
+    """A plain-text heuristic for the rules fallback only - the model gets a
+    real prompt instruction instead. Deliberately narrow: it only has to
+    catch the direct, common phrasings ("show cart", "what's in my cart",
+    "what have I got") without misfiring on a mutation that happens to
+    mention the cart too."""
+    said = message.lower()
+    if "cart" not in said and "basket" not in said and "bag" not in said:
+        return False
+    if any(w in said for w in _CART_MUTATION_WORDS):
+        return False
+    return True
+
 
 @dataclass
 class Reasoning:
@@ -154,10 +173,10 @@ class ReasoningService:
         # from judgement. The model would only have phrased them, and a fixed
         # sentence now beats a nicer one in thirty seconds.
         if skip_model:
-            return self._fallback(friction, "caller asked not to wait")
+            return self._fallback(friction, "caller asked not to wait", message=message)
 
         if self._client is None:
-            return self._fallback(friction, "no model configured")
+            return self._fallback(friction, "no model configured", message=message)
 
         context = build_context(
             friction=friction,
@@ -181,7 +200,10 @@ class ReasoningService:
         except LLMUnavailable as exc:
             logger.warning("reasoning fell back: %s", exc)
             return self._fallback(
-                friction, str(exc), retry_after_seconds=exc.retry_after_seconds
+                friction,
+                str(exc),
+                message=message,
+                retry_after_seconds=exc.retry_after_seconds,
             )
 
         call = next(
@@ -191,11 +213,13 @@ class ReasoningService:
             # The model replied in prose despite being told to call the tool. Open
             # models do this occasionally. Falling back is more honest than trying to
             # parse intent out of free text.
-            return self._fallback(friction, "model did not call the tool")
+            return self._fallback(friction, "model did not call the tool", message=message)
 
         actions = self._parse(call["arguments"])
         if not actions:
-            return self._fallback(friction, "model proposed nothing usable")
+            return self._fallback(
+                friction, "model proposed nothing usable", message=message
+            )
 
         args = call["arguments"]
         return Reasoning(
@@ -307,6 +331,7 @@ class ReasoningService:
         friction: FrictionType | None,
         reason: str,
         *,
+        message: str | None = None,
         retry_after_seconds: float | None = None,
     ) -> Reasoning:
         """Rule-based proposals. Identical shape to the model's output."""
@@ -315,6 +340,17 @@ class ReasoningService:
             if friction
             else _FALLBACK_ASSISTANCE
         )
+        # A cart-status question ("show cart", "what's in my cart") has a
+        # deterministic, correct answer that needs no judgement at all - it
+        # is exactly the kind of thing rules should handle without the
+        # model, not something to leave to whichever of the generic
+        # assistance actions the fallback tuple happens to carry. Checked
+        # here rather than added to _FALLBACK_ASSISTANCE outright, because
+        # that tuple is used whenever friction is None regardless of what
+        # was actually said - this only changes behaviour for a message
+        # that is actually asking about the cart.
+        if friction is None and message and _looks_like_cart_question(message):
+            types = (ActionType.CHECK_CART_STATUS, *types)
         return Reasoning(
             actions=[
                 ProposedAction(

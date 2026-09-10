@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -21,7 +22,16 @@ from sqlalchemy import func, select
 
 from shared.models import CaseState
 
-from .models import Approval, Case, MerchantPolicy, Outcome, SentMail, SessionHoldout
+from .models import (
+    Approval,
+    Case,
+    ExecutionAttempt,
+    MerchantPolicy,
+    Outcome,
+    OrderLine,
+    SentMail,
+    SessionHoldout,
+)
 from .session import session_scope
 
 logger = logging.getLogger(__name__)
@@ -165,7 +175,11 @@ async def holdout_status(
 
 
 async def resolve_unresolved_payment_cases_for_cart(
-    connection_id: str, cart_id: str
+    connection_id: str,
+    cart_id: str,
+    *,
+    amount: str | None = None,
+    currency: str | None = None,
 ) -> None:
     """Mark unresolved payment-decline cases for a cart resolved once it pays.
 
@@ -190,6 +204,19 @@ async def resolve_unresolved_payment_cases_for_cart(
     declined twice before it finally paid represents two real friction events
     the shopper lived through, and the eventual success resolves both of them,
     not only the last.
+
+    A fourth path shares this same gap and was missed the first time this was
+    fixed: a decline whose recovery is still sitting in the approval queue,
+    never yet rejected or expired, when the shopper pays the cart themselves
+    (a different card, or the operator not having gotten to it yet). That
+    case has no Outcome row at all - one is only ever written by a holdout, a
+    rejection, an expiry, or `execute_case` finishing a decision - so the
+    loop below that flips an existing Outcome's `resolved` flag never sees
+    it, and the sale silently never appears as recovered revenue. Handled
+    here by writing the missing Outcome directly for any matching case that
+    has none yet, and by expiring its now-moot PENDING approval so an
+    operator is not asked to decide a recovery for money that already
+    arrived through another door.
     """
     async with session_scope() as db:
         result = await db.execute(
@@ -208,9 +235,92 @@ async def resolve_unresolved_payment_cases_for_cart(
                 Outcome.case_id.in_([c.case_id for c in cases])
             )
         )
-        for outcome in outcome_result.scalars():
+        outcomes_by_case = {o.case_id: o for o in outcome_result.scalars()}
+
+        approval_result = await db.execute(
+            select(Approval).where(
+                Approval.case_id.in_([c.case_id for c in cases]),
+                Approval.state == "PENDING",
+            )
+        )
+        for approval in approval_result.scalars():
+            # Moot: the money this recovery would have chased has already
+            # moved. Expired rather than deleted, so "was this ever decided,
+            # and why not" stays answerable - the same reasoning the sweeper
+            # already uses for a timed-out approval.
+            approval.state = "EXPIRED"
+            approval.decided_at = datetime.now(UTC)
+            approval.decided_by = "system"
+            approval.note = (
+                "Closed automatically: the shopper paid this cart another way "
+                "before this recovery was decided."
+            )
+
+        # Only one sale actually happened, however many prior declines led up
+        # to it - a cart declined twice before it paid is two friction events
+        # (both get marked resolved, below) but one payment, so the paid
+        # amount is attributed to exactly one outcome row. Recording it on
+        # every matching row would sum the same rupee amount two or three
+        # times over in merchant_report's revenue_recovered total the moment
+        # a shopper had declined more than once on the same cart - a real
+        # double-count this function would otherwise introduce by iterating
+        # every unresolved outcome and stamping each with the same amount.
+        amount_attributed = False
+        for case in cases:
+            outcome = outcomes_by_case.get(case.case_id)
+            if outcome is None:
+                # Never reached a terminal outcome (still PENDING, or the
+                # engine never wrote one) - write it now, in this same
+                # session/transaction, rather than leaving this friction
+                # permanently unrecorded, which is the gap this whole
+                # function exists to close for the other three call sites.
+                #
+                # Built inline rather than by calling record_outcome(), which
+                # opens its own session_scope() - nesting a second SQLite
+                # write transaction inside this one while it is still open
+                # is exactly the kind of thing that deadlocks or silently
+                # serializes on SQLite, so this stays on the one session
+                # already open here.
+                use_amount = amount if not amount_attributed else None
+                use_currency = currency if not amount_attributed else None
+                elapsed = int(
+                    (datetime.now(UTC) - _aware(case.created_at)).total_seconds() * 1000
+                )
+                db.add(
+                    Outcome(
+                        outcome_id=_id("out"),
+                        case_id=case.case_id,
+                        connection_id=connection_id,
+                        resolved=True,
+                        final_state="OUTCOME",
+                        friction_type=case.friction_type,
+                        revenue_recovered_amount=use_amount,
+                        revenue_recovered_currency=use_currency,
+                        time_to_resolution_ms=elapsed,
+                        required_human=False,
+                    )
+                )
+                case.state = "OUTCOME"
+                if use_amount:
+                    amount_attributed = True
+                continue
             if not outcome.resolved:
                 outcome.resolved = True
+                # The sale that just completed is the money this decline was
+                # blocking. Recorded here, not only "resolved", so a shopper who
+                # retried on their own (a different card, or the same one a
+                # moment later) shows up as recovered revenue on the merchant
+                # report the same way an operator-approved retry already does
+                # via execute_case's own record_outcome. Only set when this
+                # call actually carries a paid amount, only on the first
+                # matching row, and only when that row does not already have
+                # one - a case whose recovery ran through the approval
+                # pipeline (RETRY_PAYMENT) already recorded its own amount
+                # there, and this must never overwrite or double it.
+                if amount and not amount_attributed and not outcome.revenue_recovered_amount:
+                    outcome.revenue_recovered_amount = amount
+                    outcome.revenue_recovered_currency = currency
+                    amount_attributed = True
 
 
 async def list_cases(connection_id: str, *, limit: int = 50) -> list[Case]:
@@ -479,6 +589,293 @@ async def load_policies() -> list[dict]:
             for r in rows.scalars()
         ]
 
+async def total_sales(connection_id: str, *, days: int = 30) -> dict:
+    """Actual completed sales for this merchant - every basket that was
+    successfully paid for through this engine, regardless of whether it hit
+    any friction on the way.
+
+    Distinct from `revenue_recovered` in merchant_report/Outcome, which is
+    scoped to sales that would otherwise have been lost to a declined
+    payment. This is the ordinary, complete figure a merchant checks against
+    their own books: every completed order.
+
+    Sourced from `engine.db.idempotency`'s own payment ledger
+    (`ExecutionAttempt` rows with `action_type == "CHECKOUT"`), not from any
+    adapter "list orders" call - the Standard Commerce Interface has no such
+    capability (only `get_order(order_id)` for one already-known order), so
+    there is no way to enumerate a platform's orders directly. The ledger is
+    the one place this engine already writes down, once per cart, whether a
+    payment through it actually succeeded - `payment_settled` is called
+    exactly once per cart's successful checkout, from both the chat tap path
+    and the REST checkout route, and the cart-keyed idempotency guard (see
+    idempotency.py's own module docstring) is what stops a retried charge
+    from being counted twice here.
+
+    A cart is claimed by exactly one connection, and `ExecutionAttempt.
+    connection_id` is trusted for tenant scoping the same way every other
+    query in this module is - queries never enumerate rows across tenants.
+
+    Returns zero-valued fields (not missing ones, not a divide-by-zero) for
+    a merchant with no completed sales in the window, which includes a
+    merchant connected today with zero history.
+    """
+    since = datetime.now(UTC) - timedelta(days=days)
+    async with session_scope() as db:
+        rows = await db.execute(
+            select(ExecutionAttempt).where(
+                ExecutionAttempt.connection_id == connection_id,
+                ExecutionAttempt.action_type == "CHECKOUT",
+                ExecutionAttempt.state == "DONE",
+                ExecutionAttempt.succeeded.is_(True),
+                ExecutionAttempt.completed_at >= since,
+            )
+        )
+        attempts = list(rows.scalars())
+
+    amounts = []
+    currency = None
+    for a in attempts:
+        result = a.result or {}
+        amt = result.get("amount_paid")
+        if amt is not None:
+            try:
+                amounts.append(Decimal(str(amt)))
+            except Exception:  # noqa: BLE001 - a malformed stored value must not crash the report
+                continue
+            if currency is None:
+                currency = result.get("currency")
+
+    total = sum(amounts, Decimal("0.00"))
+    order_count = len(attempts)
+    # Orders whose amount could not be recovered (older rows written before
+    # payment_settled started storing it) still count toward the order count
+    # honestly, but are excluded from the money total rather than silently
+    # treated as zero-value sales.
+    priced_count = len(amounts)
+    average = (total / priced_count) if priced_count else None
+
+    return {
+        "days": days,
+        "completed_order_count": order_count,
+        "total_sales_amount": f"{total:.2f}",
+        "total_sales_currency": currency or "INR",
+        "average_order_value": (f"{average:.2f}" if average is not None else None),
+    }
+
+
+async def product_performance(
+    connection_id: str, *, days: int = 30, limit: int = 10
+) -> dict:
+    """Product-level sales performance, sourced from `OrderLine` - one row per
+    product per *completed* (paid) order, written from this schema change
+    forward only (see `OrderLine`'s own docstring).
+
+    Historical limitation, stated rather than hidden: an order paid before
+    this table existed has no `OrderLine` rows and cannot be reconstructed -
+    the raw cart contents from a past checkout are gone. `has_data=False`
+    with zero rows is the honest answer for a merchant with no completed
+    orders in the window, or one connected today, not an error or a
+    fabricated figure.
+
+    `lowest_performers` is deliberately scoped to products that sold at
+    least once in the window, ranked ascending by quantity then revenue.
+    There is no defensible way from this table alone to name a product that
+    sold *zero* times without re-scanning the full catalogue - which is
+    exactly the `search_products("", limit=100)` shape CLAUDE.md already
+    flags as wrong at real catalogue size (a 40,000-SKU client cannot have
+    "the whole catalogue" paged in one call and treated as complete). So a
+    true zero-sales product reads the same here as one that does not exist
+    in the catalogue at all - callers must say so rather than imply this is
+    a full slow-mover report.
+
+    Aggregation happens in SQL (`GROUP BY`/`func.sum`/`func.count`) so this
+    holds up at real order volume - it does not pull every row into Python
+    to sum by hand.
+    """
+    since = datetime.now(UTC) - timedelta(days=days)
+    async with session_scope() as db:
+        grouped = await db.execute(
+            select(
+                OrderLine.product_id,
+                OrderLine.product_name,
+                func.sum(OrderLine.quantity).label("quantity"),
+                func.count(func.distinct(OrderLine.order_id)).label("order_count"),
+            )
+            .where(
+                OrderLine.connection_id == connection_id,
+                OrderLine.created_at >= since,
+            )
+            .group_by(OrderLine.product_id, OrderLine.product_name)
+        )
+        grouped_rows = list(grouped.all())
+
+        revenue_rows = await db.execute(
+            select(OrderLine.product_id, OrderLine.line_total).where(
+                OrderLine.connection_id == connection_id,
+                OrderLine.created_at >= since,
+            )
+        )
+        revenue_pairs = list(revenue_rows.all())
+
+    revenue_by_product: dict[str, Decimal] = {}
+    for pid, line_total in revenue_pairs:
+        if line_total is None:
+            continue
+        try:
+            revenue_by_product[pid] = revenue_by_product.get(
+                pid, Decimal("0.00")
+            ) + Decimal(str(line_total))
+        except Exception:  # noqa: BLE001 - a malformed stored value must not crash the report
+            continue
+
+    products = []
+    for product_id, product_name, quantity, order_count in grouped_rows:
+        products.append(
+            {
+                "product_id": product_id,
+                "product_name": product_name,
+                "quantity": int(quantity or 0),
+                "revenue": f"{revenue_by_product.get(product_id, Decimal('0.00')):.2f}",
+                "order_count": int(order_count or 0),
+            }
+        )
+
+    by_quantity = sorted(products, key=lambda p: -p["quantity"])[:limit]
+    by_revenue = sorted(products, key=lambda p: -Decimal(p["revenue"]))[:limit]
+    lowest_performers = sorted(
+        products, key=lambda p: (p["quantity"], Decimal(p["revenue"]))
+    )[:limit]
+
+    return {
+        "days": days,
+        "since": since.isoformat(),
+        "has_data": bool(products),
+        "distinct_products_sold": len(products),
+        "top_by_quantity": by_quantity,
+        "top_by_revenue": by_revenue,
+        "lowest_performers": lowest_performers,
+        "lowest_performers_note": (
+            "Ranked only among products that sold at least once in this "
+            "window. This cannot identify a product with zero sales without "
+            "re-scanning the full catalogue, which is not attempted here."
+        ),
+        "historical_note": (
+            "Product-level data is only tracked for orders completed from "
+            "this schema change forward - an older order has no product "
+            "breakdown and cannot be reconstructed."
+        ),
+    }
+
+
+async def sales_period_comparison(connection_id: str, *, days: int = 7) -> dict:
+    """Total completed sales in the most recent window versus the window
+    immediately before it, reusing `total_sales`'s own days-window pattern
+    and its `ExecutionAttempt`/CHECKOUT source - not a second, differently
+    sourced figure that could disagree with the report's headline number.
+    """
+    since = datetime.now(UTC) - timedelta(days=days)
+    prior_since = since - timedelta(days=days)
+
+    async def _window(start: datetime, end: datetime | None) -> tuple[Decimal, int]:
+        async with session_scope() as db:
+            conditions = [
+                ExecutionAttempt.connection_id == connection_id,
+                ExecutionAttempt.action_type == "CHECKOUT",
+                ExecutionAttempt.state == "DONE",
+                ExecutionAttempt.succeeded.is_(True),
+                ExecutionAttempt.completed_at >= start,
+            ]
+            if end is not None:
+                conditions.append(ExecutionAttempt.completed_at < end)
+            rows = await db.execute(select(ExecutionAttempt).where(*conditions))
+            attempts = list(rows.scalars())
+        total = Decimal("0.00")
+        for a in attempts:
+            amt = (a.result or {}).get("amount_paid")
+            if amt is not None:
+                try:
+                    total += Decimal(str(amt))
+                except Exception:  # noqa: BLE001
+                    continue
+        return total, len(attempts)
+
+    recent_total, recent_count = await _window(since, None)
+    prior_total, prior_count = await _window(prior_since, since)
+
+    change = recent_total - prior_total
+    change_pct = (
+        f"{(change / prior_total * 100):.1f}" if prior_total > 0 else None
+    )
+
+    return {
+        "days": days,
+        "recent_order_count": recent_count,
+        "recent_total": f"{recent_total:.2f}",
+        "prior_order_count": prior_count,
+        "prior_total": f"{prior_total:.2f}",
+        "change_amount": f"{change:.2f}",
+        "change_pct": change_pct,
+        "note": (
+            None
+            if prior_count or recent_count
+            else "No completed sales in either window - nothing to compare yet."
+        ),
+    }
+
+
+async def friction_summary_across(
+    connection_ids: list[str], *, days: int = 30
+) -> dict:
+    """Real recorded issue categories across the given merchants, grouped by
+    `Case.friction_type` - the same field `merchant_report`'s own "friction"
+    breakdown already aggregates for one merchant, extended to many.
+
+    Exists specifically because the operations copilot, asked "what are the
+    most common issues", had nothing of this shape to answer from: the only
+    per-merchant-workload data it was given was the approval queue and recent
+    decisions, both keyed by `action_type` (what the engine proposed doing
+    about a problem, e.g. OFFER_ALTERNATE_PAYMENT), not by what the problem
+    actually was. A decline that gets offered a recovery and a decline that
+    gets escalated are the same underlying issue (PAYMENT_DECLINED) with two
+    different responses - counting `action_type` instead answers a different
+    question and reads as "the most common issue is offering alternate
+    payment", which is not an issue at all.
+
+    Returns zero rows (not an error) for merchants with no cases in the
+    window - a CV3 operator whose whole book connected this morning sees an
+    honest empty list rather than a crash.
+    """
+    if not connection_ids:
+        return {"days": days, "by_type": [], "by_type_by_merchant": {}}
+
+    since = datetime.now(UTC) - timedelta(days=days)
+    async with session_scope() as db:
+        result = await db.execute(
+            select(Case.connection_id, Case.friction_type).where(
+                Case.connection_id.in_(connection_ids),
+                Case.created_at >= since,
+                Case.friction_type.is_not(None),
+            )
+        )
+        rows = list(result.all())
+
+    by_type: dict[str, int] = {}
+    by_type_by_merchant: dict[str, dict[str, int]] = {}
+    for cid, ftype in rows:
+        by_type[ftype] = by_type.get(ftype, 0) + 1
+        per_merchant = by_type_by_merchant.setdefault(cid, {})
+        per_merchant[ftype] = per_merchant.get(ftype, 0) + 1
+
+    return {
+        "days": days,
+        "by_type": [
+            {"type": k, "count": v}
+            for k, v in sorted(by_type.items(), key=lambda kv: -kv[1])
+        ],
+        "by_type_by_merchant": by_type_by_merchant,
+    }
+
+
 async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
     """What the engine did for one merchant, in their terms.
 
@@ -584,6 +981,22 @@ async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
             ),
         }
 
+    sales = await total_sales(connection_id, days=days)
+
+    # Recovery-specific figures for the merchant-facing Payments & Checkout
+    # panel. Kept separate from `revenue_recovered` above: a merchant asking
+    # "how many times did this work" wants a count, not a currency amount.
+    # `recovery_opportunities` is also deliberately not the same as the
+    # PAYMENT_DECLINED friction count already in `friction` below - not
+    # every decline gets a recovery action proposed (Northfield has no
+    # recovery capability at all, so every decline there escalates instead
+    # of proposing RETRY_PAYMENT/OFFER_ALTERNATE_PAYMENT/SPLIT_PAYMENT).
+    recovery_action_types = {"RETRY_PAYMENT", "OFFER_ALTERNATE_PAYMENT", "SPLIT_PAYMENT"}
+    recovery_opportunities = sum(
+        1 for c in case_rows if c.selected_action in recovery_action_types
+    )
+    recovery_count = sum(1 for o in resolved if o.revenue_recovered_amount)
+
     return {
         "days": days,
         "shoppers_helped": shoppers_helped,
@@ -592,7 +1005,13 @@ async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
         "handled_without_you": handled_alone,
         "waiting_for_you": waiting or 0,
         "revenue_recovered": f"{recovered:.2f}",
+        "recovery_count": recovery_count,
+        "recovery_opportunities": recovery_opportunities,
         "currency": currency,
+        "completed_order_count": sales["completed_order_count"],
+        "total_sales_amount": sales["total_sales_amount"],
+        "total_sales_currency": sales["total_sales_currency"],
+        "average_order_value": sales["average_order_value"],
         "median_resolution_ms": median_ms,
         "holdout": holdout_comparison,
         "friction": [
@@ -618,6 +1037,31 @@ async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
     }
 
 
+#: A run of 10+ consecutive digits inside a search term is, in practice, a
+#: millisecond/second Unix epoch stamp glued onto a placeholder word by test
+#: infrastructure that wants a fresh, always-unique "not in the catalog"
+#: query per run (e.g. `nonexistent-item-1788942396617`) - confirmed present
+#: in the live demo database under exactly that shape. No real shopper types
+#: a bare 10+ digit number as part of a product search, so this is a signal
+#: about the *shape* of the text, not a list of the specific words seen so
+#: far - it generalizes to any future test run's generated queries, not just
+#: today's timestamps, without needing to name "nonexistent" or "trainers"
+#: anywhere. It is a reporting-layer filter only: no row is ever deleted, and
+#: a real query containing a long numeric string (vanishingly unlikely, but
+#: not impossible - a model number, say) is undercounted in this one
+#: aggregate rather than lost from the database.
+#:
+#: This is a heuristic, not a certainty - the durable fix is for test
+#: infrastructure to tag its own synthetic signals (e.g. a `source="test"` or
+#: a recognisable session-id prefix already used elsewhere in this codebase,
+#: see `hc_`/`fuzz_`-style prefixes in healthcheck.py/fuzz.py) so this filter
+#: can key off a real signal instead of guessing from content. Left as a
+#: PROGRESS.md follow-up rather than attempted here, since it would require
+#: changing the untracked scratch script(s) that appear to generate these
+#: queries, which are not part of the tracked test suite.
+_SYNTHETIC_QUERY_PATTERN = re.compile(r"\d{10,}")
+
+
 async def unmet_demand(connection_id: str, *, days: int = 30, limit: int = 10) -> list[dict]:
     """What shoppers keep asking for and not finding - a real, grounded signal
     for "should I stock this" that costs nothing new to compute.
@@ -630,6 +1074,11 @@ async def unmet_demand(connection_id: str, *, days: int = 30, limit: int = 10) -
     request. Query text is optional on a case (`Case.query: str | None`), so
     rows with nothing recorded are skipped rather than counted as a blank
     request.
+
+    Queries whose text matches `_SYNTHETIC_QUERY_PATTERN` (a long embedded
+    digit run - a timestamp signature, not a real shopper search) are
+    excluded from this aggregate only - no `Case` row is touched or deleted,
+    so this is a view over the data, not a destructive cleanup.
     """
     since = datetime.now(UTC) - timedelta(days=days)
     async with session_scope() as db:
@@ -646,6 +1095,8 @@ async def unmet_demand(connection_id: str, *, days: int = 30, limit: int = 10) -
     counts: dict[str, int] = {}
     for q in raw_queries:
         key = q.strip().lower()
+        if _SYNTHETIC_QUERY_PATTERN.search(key):
+            continue
         counts[key] = counts.get(key, 0) + 1
 
     return [

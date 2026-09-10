@@ -216,17 +216,54 @@ class KettleAdapter(StandardCommerceInterface, SupportsWebhooks):
     # ---- Catalog ---------------------------------------------------------
 
     async def search_products(
-        self, query: str, *, limit: int = 20, dept: str | None = None
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        dept: str | None = None,
+        offset: int = 0,
     ) -> ProductSearchResult:
-        found = await self._gql(
-            "products", "products", search=query or None, collection=dept, limit=limit
+        """`offset` is an extension beyond the standard interface, same
+        reasoning as Northfield's: this platform's `products` operation
+        genuinely supports paging past the first page, so a caller needing
+        the whole catalogue can use it rather than being capped at one page.
+        """
+        body = await self._client.request(
+            "POST",
+            "/graphql",
+            json={
+                "query": "{ products }",
+                "operationName": "products",
+                "variables": {
+                    k: v
+                    for k, v in {
+                        "search": query or None,
+                        "collection": dept,
+                        "limit": limit,
+                        "offset": offset or None,
+                    }.items()
+                    if v is not None
+                },
+            },
         )
+        if errors := body.get("errors"):
+            first = errors[0]
+            code = (first.get("extensions") or {}).get("code", "")
+            raise CommerceError(
+                mapping.error_code_for(code),
+                first.get("message") or "the platform reported an error",
+                platform_detail=body,
+                retryable=False,
+            )
+        data = body.get("data") or {}
+        found = data.get("products") or []
+        total = data.get("matchCount")
         return ProductSearchResult(
             query=query,
             products=[
                 mapping.to_product(p, storefront_url=self.storefront_url) for p in found
             ],
-            total_available=len(found),
+            total_available=total if total is not None else len(found),
         )
 
     async def list_departments(self) -> list[str]:

@@ -80,7 +80,11 @@ def _decline_fact(reason: DeclineReason | None) -> str:
     return "That card was declined, so nothing has been charged."
 
 
-def _second_item_note(reasoning, trace) -> str:
+def _second_item_note(
+    message: str,
+    catalog_sample: list | None,
+    handled_product_id: str | None,
+) -> str:
     """Say so, honestly, rather than silently dropping the rest.
 
     The engine only ever executes one action per turn - the Decision Engine
@@ -95,24 +99,74 @@ def _second_item_note(reasoning, trace) -> str:
     survives the tap round-trip - real, separate engineering, not a
     same-session patch, and one this codebase deliberately has not built
     yet given the double-add bug a looser variant-matching rule already
-    caused once (Completed.md #15). This is the honest interim: name the
-    other product by id count only (never inventing a title this function
-    was not given) and ask the shopper to come back for it.
+    caused once (Completed.md #15).
+
+    Detecting the second product is done here, directly against the
+    shopper's own words and the real catalog - NOT by checking whether the
+    model happened to propose a second ADD_TO_CART. Measured directly
+    against this codebase's actual model (gpt-4o-mini): asked to propose one
+    ADD_TO_CART per named product, in 0 of 8 identical trials did it
+    propose more than one, even with an explicit instruction to. Relying on
+    that to detect a dropped second item would mean this note almost never
+    fires - silently, the same failure this function exists to stop. Instead
+    every catalog product's title is checked against the shopper's raw
+    message directly: if a product they clearly named is not the one that
+    just ran, they asked for something this turn did not handle, regardless
+    of what the model's proposal happened to contain.
     """
-    selected_id = trace.selected.action.action_type
-    other_products = {
-        c.parameters.get("product_id")
-        for c in reasoning.actions
-        if c.action_type == selected_id
-        and c.parameters.get("product_id")
-        and c.parameters.get("product_id") != trace.selected.action.parameters.get("product_id")
-    }
-    if not other_products:
+    if not catalog_sample or not message:
         return ""
-    return (
-        "\n\nI can only take one item at a time right now - ask me for the "
-        "other one next and I'll add that too."
-    )
+    said = message.lower()
+    for product in catalog_sample:
+        if product.product_id == handled_product_id:
+            continue
+        title_words = [w for w in product.title.lower().split() if len(w) > 3]
+        if not title_words:
+            continue
+        # A shopper names a product colloquially - "the Marathon Pro", not
+        # "the Marathon Pro Racing Shoe" - so the bar is the title's own
+        # first distinctive word (almost always the actual product name on
+        # this catalog: Trailblazer, Marathon, Everyday), not most of the
+        # full title. A short, generic first word ("GPS Watch Series 4")
+        # falls back to needing two words in common instead, so "shoe" or
+        # "watch" alone still cannot false-positive on half the catalog.
+        first = title_words[0]
+        # >5, not >4 - "Watch" (5) is a generic-enough word to show up in an
+        # unrelated sentence ("what a nice watch"); "Trailblazer"/"Marathon"/
+        # "Everyday" (8-11) are not.
+        matched = first in said if len(first) > 5 else (
+            sum(1 for w in title_words if w in said) >= 2
+        )
+        if matched:
+            return (
+                "\n\nI can only take one item at a time right now - ask me "
+                "for the other one next and I'll add that too."
+            )
+    return ""
+
+
+def _diversify_by_category(products: list, limit: int) -> list:
+    """Round-robin one product per category, in the order categories first
+    appear, rather than truncating a raw catalog-order list.
+
+    A product with no category at all is treated as its own single-item
+    "category" - it still gets a fair turn in the rotation rather than being
+    dropped, since dropping it would be a different, unrelated bias.
+    """
+    buckets: dict[str, list] = {}
+    for p in products:
+        key = p.categories[0] if p.categories else f"__none__{p.product_id}"
+        buckets.setdefault(key, []).append(p)
+
+    out: list = []
+    while len(out) < limit and any(buckets.values()):
+        for key in list(buckets.keys()):
+            if not buckets[key]:
+                continue
+            out.append(buckets[key].pop(0))
+            if len(out) >= limit:
+                break
+    return out
 
 
 class ChatRequest(BaseModel):
@@ -417,8 +471,17 @@ async def _process_turn(
     cart = None
     order = None
     try:
-        browse = await adapter.search_products("", limit=20)
-        catalog_sample = browse.products
+        # Fetched wider than what the model actually sees, then diversified
+        # across categories before truncating - a plain first-20-in-catalog-
+        # order browse handed the model a sample almost entirely from
+        # whichever category happens to be seeded first (Footwear, on both
+        # demo catalogs), which biased "what's available" toward that one
+        # category even with nothing in the message naming it. Round-robining
+        # one product per category before capping means a bare "what do you
+        # have" is shown breadth, not just whichever department was seeded
+        # first.
+        browse = await adapter.search_products("", limit=60)
+        catalog_sample = _diversify_by_category(browse.products, limit=20)
         if req.cart_id:
             cart = await adapter.get_cart(req.cart_id)
         if req.order_id:
@@ -676,7 +739,9 @@ async def _process_turn(
                 + str(first.get("product_title", "that"))
                 + ". Which would you like?"
             )
-            reply += _second_item_note(reasoning, trace)
+            reply += _second_item_note(
+                req.message, catalog_sample, first.get("product_id")
+            )
         elif executed.action_type == "CLEAR_CART":
             # Written by the engine, not the model.
             #
@@ -732,6 +797,20 @@ async def _process_turn(
                     + "Check the number on your confirmation, or someone at the "
                     "shop can look it up for you."
                 )
+        elif executed.action_type == "CHECK_CART_STATUS":
+            # Replaces the model's sentence rather than appending to it, the
+            # same shape as CHECK_ORDER_STATUS just above. Live conversation
+            # exposed why this needed its own branch rather than trusting
+            # whatever the model wrote: "show cart" had no dedicated action
+            # at all before this, so it fell through to a browse/recommend
+            # proposal and the shopper got an unrelated category list
+            # instead of an answer to the question they actually asked.
+            reply = (
+                executed.shopper_summary or executed.summary
+                if executed.succeeded
+                else "I couldn't read your cart just then. The cart panel on "
+                "the right shows what's in it."
+            )
         elif executed.action_type == "PREPARE_CHECKOUT" and executed.succeeded:
             payment = executed.payload
             # Replaces the model's sentence rather than appending to it.
@@ -756,14 +835,57 @@ async def _process_turn(
                 total = executed.payload.get("grand_total")
                 removed = executed.payload.get("removed")
                 done = f"Done - {removed} is out of your cart" if removed else "Done"
-                reply = (
-                    f"{reply}\n\n{done}"
-                    + (f". Your cart is now {count} item(s), {total}." if count is not None else ".")
+                done_sentence = done + (
+                    f". Your cart is now {count} item(s), {total}." if count is not None else "."
                 )
-                if executed.action_type == "ADD_TO_CART":
-                    reply += _second_item_note(reasoning, trace)
+                second_note = (
+                    _second_item_note(
+                        req.message,
+                        catalog_sample,
+                        trace.selected.action.parameters.get("product_id"),
+                    )
+                    if executed.action_type == "ADD_TO_CART"
+                    else ""
+                )
+                if second_note:
+                    # Drop the model's own pre-written sentence rather than
+                    # prefixing it, when a second item was genuinely named.
+                    # Live conversation exposed why: asked to add two
+                    # products in one message, the model sometimes claims
+                    # the second one "isn't in our inventory" - a real
+                    # catalog product it never actually searched for,
+                    # because its reply is written before this action ran
+                    # and it only ever proposes one ADD_TO_CART. Prefixing
+                    # a false "couldn't find X" onto the honest "ask me for
+                    # the other one next" note left the shopper reading a
+                    # contradiction - told a real product does not exist,
+                    # then immediately told to ask for it. The engine has
+                    # already confirmed (by scanning the actual catalog)
+                    # that the item is real, so that fact wins outright.
+                    reply = done_sentence + second_note
+                else:
+                    reply = f"{reply}\n\n{done_sentence}"
             elif products:
-                pass  # the cards say what was found; a label announcing them is noise
+                # Was "pass" - trusting the model's pre-written reply as-is,
+                # on the theory that a label above the cards is just noise.
+                # Live conversation exposed the real failure this missed:
+                # the model's reply is written before this search/browse/
+                # recommend action actually runs, so it can ask a question
+                # the result already contradicts - "would you prefer the
+                # Trailblazer or the Marathon Pro?" while the cards below
+                # show four different shoes, none of them a two-way choice;
+                # "would you prefer sneakers or running shoes?" while the
+                # cards mix in shorts and a singlet that are neither. A
+                # shopper reading that has no idea which of the two named
+                # things to answer, because neither is the actual choice in
+                # front of them. Replacing it with a plain count is the same
+                # "the engine has a fact, the model has a guess" rule this
+                # file already applies to CLEAR_CART, CHECK_ORDER_STATUS and
+                # PREPARE_CHECKOUT - here the fact is simply how many things
+                # are actually shown, and the cards themselves are the
+                # choice, not a question needing a typed answer.
+                count = len(products)
+                reply = f"Here's what's available - {count} option{'s' if count != 1 else ''}:"
             elif executed.action_type == "CHECK_AVAILABILITY":
                 reply = f"{reply}\n\n{executed.summary}"
         else:
@@ -1299,6 +1421,37 @@ async def pay(
         summary=(
             f"paid {order_id}" if result.succeeded else f"declined on {order_id}"
         ),
+        amount=(
+            str(order.amount_paid.amount)
+            if result.succeeded and order and order.amount_paid
+            else None
+        ),
+        currency=(
+            order.amount_paid.currency
+            if result.succeeded and order and order.amount_paid
+            else None
+        ),
+        lines=(
+            [
+                {
+                    "product_id": line.product_id,
+                    "product_name": line.title,
+                    "quantity": line.quantity,
+                    "unit_price": (
+                        str(line.unit_price.amount) if line.unit_price else None
+                    ),
+                    "line_total": (
+                        str(line.line_total.amount) if line.line_total else None
+                    ),
+                    "currency": (
+                        line.unit_price.currency if line.unit_price else None
+                    ),
+                }
+                for line in order.lines
+            ]
+            if result.succeeded and order
+            else None
+        ),
     )
 
     # Theirs, paid or declined. The declined one matters more: it is the order a
@@ -1325,9 +1478,19 @@ async def pay(
         # See shop.py's checkout route for why: a shopper whose card was
         # declined here and who then retried this same cart - however they
         # got there, whether nobody helped, an operator said no, or nobody
-        # got to it in time - just resolved their own problem.
+        # got to it in time - just resolved their own problem. The paid
+        # amount is passed through so the merchant report counts this as
+        # recovered revenue, the same as an operator-approved RETRY_PAYMENT
+        # already does - without this, the case is marked "resolved" (moving
+        # resolution_rate) but the sale itself never shows up in
+        # revenue_recovered, which is exactly the gap that hid Kettle's
+        # decline-then-recovered sales from the merchant view.
+        paid_money = order.amount_paid if order else None
         await db.resolve_unresolved_payment_cases_for_cart(
-            req.connection_id, req.cart_id
+            req.connection_id,
+            req.cart_id,
+            amount=str(paid_money.amount) if paid_money else None,
+            currency=paid_money.currency if paid_money else None,
         )
     else:
         # Runs the decline through the same pipeline a decline anywhere else takes,

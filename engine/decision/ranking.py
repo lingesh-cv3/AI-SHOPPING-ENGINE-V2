@@ -118,6 +118,10 @@ ASSISTANCE_PREFERENCE: tuple[ActionType, ...] = (
     # Above checkout: somebody asking where their order is has not come to
     # buy something else.
     ActionType.CHECK_ORDER_STATUS,
+    # Same reasoning as CHECK_ORDER_STATUS just above: a shopper asking what
+    # is in their cart right now has asked a direct question, not started a
+    # new browse - it should not be outranked by RECOMMEND_PRODUCTS.
+    ActionType.CHECK_CART_STATUS,
     ActionType.PREPARE_CHECKOUT,
     ActionType.ADD_TO_CART,
     ActionType.RECOMMEND_PRODUCTS,

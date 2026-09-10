@@ -55,6 +55,11 @@ export function MerchantReport() {
     );
   }
 
+  // Total sales is a straight count of completed orders, independent of whether
+  // any of them ever hit friction - a shop with zero cases opened can still have
+  // real completed sales, so this must never be hidden behind the "nothing
+  // happened yet" branch below, which is about assistant activity, not revenue.
+  const noSalesYet = report.completed_order_count === 0;
   const nothingYet = report.shoppers_helped === 0;
 
   return (
@@ -69,6 +74,26 @@ export function MerchantReport() {
       </div>
 
       <div className="panel-body">
+        <div className="headline-figure">
+          <div className="eyebrow">Total sales</div>
+          <div className="bignum num">
+            {noSalesYet
+              ? `0.00 ${report.total_sales_currency}`
+              : `${report.total_sales_amount} ${report.total_sales_currency}`}
+          </div>
+          <p className="note" style={{ margin: "4px 0 0" }}>
+            {noSalesYet
+              ? "No completed orders in this window yet."
+              : `${report.completed_order_count} completed order${
+                  report.completed_order_count === 1 ? "" : "s"
+                }${
+                  report.average_order_value
+                    ? `, averaging ${report.average_order_value} ${report.total_sales_currency}`
+                    : ""
+                }.`}
+          </p>
+        </div>
+
         {nothingYet ? (
           <p className="empty">
             Nothing yet. As shoppers run into problems, what the assistant did
@@ -133,6 +158,28 @@ export function MerchantReport() {
                     title={`${report.holdout.holdout_resolved} of ${report.holdout.holdout_cases} - no assistance given`}
                   />
                 </div>
+              </>
+            )}
+
+            {report.top_products.length > 0 && (
+              <>
+                <div className="gate-label" style={{ margin: "22px 0 8px" }}>
+                  Top products
+                </div>
+                <p className="note" style={{ marginTop: 0 }}>
+                  {report.product_data_has_history
+                    ? "By quantity sold in this window."
+                    : "By quantity sold - product-level data is only tracked from " +
+                      "when this started, so older orders are not included."}
+                </p>
+                {report.top_products.map((p) => (
+                  <div key={p.product_id} className="frictionrow">
+                    <span>{p.product_name}</span>
+                    <span className="num">
+                      {p.quantity} sold ({p.revenue} {report.total_sales_currency})
+                    </span>
+                  </div>
+                ))}
               </>
             )}
 

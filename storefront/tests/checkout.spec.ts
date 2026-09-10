@@ -194,6 +194,73 @@ test.describe('Transcript integrity', () => {
     expect(lastShopperTurn.length).toBeGreaterThan(bareLabel.length);
   });
 
+  // Reported live: a shopper who typed a fresh, unrelated question right
+  // after a declined payment sometimes saw the decline's own escalation
+  // sentence again, as if it were the answer to their new question - and the
+  // new question's real answer never appeared. Root cause: the poll
+  // effect's `seen` set and append-base were captured once, from `turns`
+  // closed over when the effect last ran (which re-ran on every message).
+  // A poll already in flight when the next message landed resolved holding
+  // a stale `turns`, and `onTurns([...staleTurns, ...fresh])` overwrote the
+  // newer turns with that stale base plus a re-appended old reply. Forcing
+  // the poll to be in flight at the wrong moment (delaying the transcript
+  // GET, the same technique tried in an earlier reproduction attempt) is
+  // what makes this reproducible rather than timing-dependent.
+  test('a declined payment does not clobber the next real reply', async ({ page }) => {
+    let delayPollsUntil = 0;
+    await page.route('**/api/chat/*/*', async (route) => {
+      if (route.request().method() === 'GET' && Date.now() < delayPollsUntil) {
+        await new Promise((r) => setTimeout(r, 4000));
+      }
+      await route.continue();
+    });
+
+    await page.goto(NORTHFIELD, { waitUntil: 'networkidle' });
+    await page.locator('.panel', { hasText: 'Nothing here yet' }).waitFor({ timeout: 15000 });
+    await addFirstProduct(page);
+
+    const stamp = Date.now();
+    await signUp(page, `walkr_${stamp}`, `walkr_${stamp}@example.com`);
+    await expect(page.locator('select.card-picker')).toBeVisible({ timeout: 15000 });
+
+    // From the moment the decline fires, force the next few poll ticks to
+    // hang for 4s - long enough to still be in flight when the follow-up
+    // chat message's own direct reply lands.
+    delayPollsUntil = Date.now() + 15000;
+
+    await page.locator('select.card-picker').selectOption('0002');
+    await page.getByRole('button', { name: 'Pay now' }).click();
+
+    // A decline navigates to the order view (not the sidebar's inline gate)
+    // and opens the chat itself with the escalation reply - wait on that
+    // reply rather than the sidebar state, which this flow does not use.
+    await expect(
+      page.locator('.bubble.assistant', { hasText: 'passed it to someone at the shop' }),
+    ).toBeVisible({ timeout: 15000 });
+
+    const chatlaunch = page.locator('.chatlaunch');
+    if (await chatlaunch.isVisible()) await chatlaunch.click();
+
+    const composer = page.getByPlaceholder(/Ask a question|Type a message|message/i);
+    await composer.fill('show me shoes under 2000');
+    await composer.press('Enter');
+
+    // The real answer to the new question - not another copy of the
+    // escalation sentence - must be the last assistant turn, and must
+    // appear once. Waited out past every delayed poll tick, so this is
+    // the settled state, not a snapshot mid-race.
+    await page.waitForTimeout(6000);
+
+    const assistantTurns = await page.locator('.bubble.assistant').allTextContents();
+    const escalations = assistantTurns.filter((t) =>
+      t.includes("passed it to someone at the shop"),
+    );
+    expect(escalations.length).toBe(1);
+    expect(assistantTurns[assistantTurns.length - 1]).not.toContain(
+      'passed it to someone at the shop',
+    );
+  });
+
   // Issue #5: a declined payment used to write its own internal, invented
   // message ("My card was declined.") into the transcript as if the shopper
   // had typed it.

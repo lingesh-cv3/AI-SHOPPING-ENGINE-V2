@@ -415,16 +415,34 @@ export default function App() {
   const checkout = (cardLast4: string) =>
     guard(async () => {
       if (!cart) return;
-      const r = await api.checkout(cart.cart_id, cardLast4);
+      const r = await api.checkout(cart.cart_id, cardLast4, sessionId);
       setResult(r);
 
       if (r.succeeded) {
         setPipeline(null);
         setCart(await api.createCart());
+      } else if (r.chat_reply) {
+        // The backend already ran this decline through the real pipeline -
+        // a case, the honest specific reason, recovery or escalation - and
+        // wrote its own turn into this same session. Showing that turn here
+        // is display only; posting a second, separately-reasoned message
+        // (as this used to do via reportFriction) would tell the shopper
+        // two different things about the one decline.
+        setChatTurns((prev) => [
+          ...prev,
+          { speaker: "shopper", text: "My payment didn't go through." },
+          { speaker: "assistant", text: r.chat_reply as string, usedModel: false },
+        ]);
+        if (!openedForDeadSearch) {
+          setChatOpen(true);
+          setOpenedForDeadSearch(true);
+        } else if (!chatOpen) {
+          setUnread((n) => n + 1);
+        }
       } else {
-        // A declined card is the moment a shopper is most likely to leave. They get
-        // told what happened and what can be done about it, which differs by
-        // platform - one can retry the payment, the other cannot.
+        // No session_id reached the backend (should not happen from this
+        // storefront, but the field is optional) - fall back to the old
+        // generic path rather than showing nothing.
         await reportFriction(
           "PAYMENT_DECLINED",
           "My payment didn't go through.",

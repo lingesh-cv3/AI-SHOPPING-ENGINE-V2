@@ -638,6 +638,49 @@ class SentMail(Base):
     )
 
 
+class OrderLine(Base):
+    """One product line of one completed (paid) order.
+
+    Written once, at the same call sites that already write the payment
+    ledger (`db.idempotency.payment_settled`) for a *succeeded* checkout -
+    never for a decline or an abandoned cart, and never twice for a retried
+    already-paid cart, because `payment_settled` itself is only ever called
+    once per cart (guarded by the `begin_payment`/ledger claim). The source
+    is the `Order.lines` the adapter's own checkout/recovery response already
+    returns - never invented, never backfilled for orders that predate this
+    table.
+
+    `row_id` is derived from the settling idempotency key plus the cart line
+    id, so even a best-effort double-call (see the recovery call site, which
+    is intentionally best-effort/non-fatal) cannot double-insert the same
+    line - a second write with the same primary key is a no-op merge, not a
+    duplicate row.
+    """
+
+    __tablename__ = "order_lines"
+
+    row_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+    order_id: Mapped[str] = mapped_column(String(64), index=True)
+    cart_id: Mapped[str] = mapped_column(String(64), index=True)
+
+    product_id: Mapped[str] = mapped_column(String(120), index=True)
+    product_name: Mapped[str] = mapped_column(String(255))
+    quantity: Mapped[int] = mapped_column(Integer)
+    unit_price: Mapped[str | None] = mapped_column(String(32))
+    line_total: Mapped[str | None] = mapped_column(String(32))
+    currency: Mapped[str | None] = mapped_column(String(8))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_order_lines_conn_product", "connection_id", "product_id"),
+    )
+
+
 class SessionHoldout(Base):
     """Whether one session was assigned to the no-assistance holdout group.
 

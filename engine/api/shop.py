@@ -140,6 +140,13 @@ class CheckoutBody(BaseModel):
     #: Test cards ending 0002, 0003 and 0004 always decline, so the recovery flow
     #: can be demonstrated on demand rather than waited for.
     card_last4: str = "1111"
+    #: The shopper's chat session, so a decline here can run through the exact
+    #: same pipeline a chat-driven pay does - a real case, the honest specific
+    #: decline reason, and Kettle's recovery or Northfield's escalation. Optional
+    #: only because a caller with no chat session at all (there is none today,
+    #: but nothing stops one) still gets a paid or declined order back correctly;
+    #: it just does not get the chat-side handling this session_id turns on.
+    session_id: str | None = None
 
 async def _already_bought(adapter, order_id: str | None) -> dict:
     """The answer for a basket that has already been paid for.
@@ -449,7 +456,11 @@ async def apply_promotion(
 async def checkout(
     connection_id: str, cart_id: str, body: CheckoutBody,
     who: Visitor = Depends(visitor),
-    _=Depends(shopper_scoped()),
+    # Named auth_key, not key - this function already reassigns `key` to the
+    # payment idempotency string a few lines down, and this project has
+    # already lost a day once to that exact shadowing (see CLAUDE.md's
+    # Working practices). Different name, no ambiguity either way.
+    auth_key=Depends(shopper_scoped()),
 ) -> dict:
     """Complete the order.
 
@@ -515,6 +526,37 @@ async def checkout(
             if result.succeeded and order
             else "declined"
         ),
+        amount=(
+            str(order.amount_paid.amount)
+            if result.succeeded and order and order.amount_paid
+            else None
+        ),
+        currency=(
+            order.amount_paid.currency
+            if result.succeeded and order and order.amount_paid
+            else None
+        ),
+        lines=(
+            [
+                {
+                    "product_id": line.product_id,
+                    "product_name": line.title,
+                    "quantity": line.quantity,
+                    "unit_price": (
+                        str(line.unit_price.amount) if line.unit_price else None
+                    ),
+                    "line_total": (
+                        str(line.line_total.amount) if line.line_total else None
+                    ),
+                    "currency": (
+                        line.unit_price.currency if line.unit_price else None
+                    ),
+                }
+                for line in order.lines
+            ]
+            if result.succeeded and order
+            else None
+        ),
     )
 
 
@@ -527,6 +569,8 @@ async def checkout(
         await db.owners.take(
             connection_id, db.owners.ORDER, order.order_id, keys[0]
         )
+
+    chat_reply: str | None = None
 
     if result.succeeded and order is not None:
         await confirm_order(
@@ -542,12 +586,49 @@ async def checkout(
         # recovery, or an approval simply expired unactioned. All three
         # record a decline unresolved and never look at it again; this is
         # the one place that closes the loop for all of them.
-        await db.resolve_unresolved_payment_cases_for_cart(connection_id, cart_id)
+        paid_money = order.amount_paid if order else None
+        await db.resolve_unresolved_payment_cases_for_cart(
+            connection_id,
+            cart_id,
+            amount=str(paid_money.amount) if paid_money else None,
+            currency=paid_money.currency if paid_money else None,
+        )
+    elif not result.succeeded and body.session_id:
+        # Same reasoning as /api/chat/pay's decline branch, because this is the
+        # same money declined through a second door. Before this, a decline here
+        # created no case and reached no escalation or recovery at all - the
+        # storefront's own "My payment didn't go through" chat message ran
+        # through ordinary reasoning instead, which cannot know the specific
+        # decline reason and, on Northfield, has no capability data telling it
+        # recovery is unavailable until the model works that out itself. Running
+        # the identical skip_model, synthetic turn `pay()` uses gets this route
+        # the exact same honest reason, case, and escalation/recovery outcome.
+        from . import chat as chat_module
+
+        recovered = await chat_module.chat(
+            chat_module.ChatRequest(
+                connection_id=connection_id,
+                session_id=body.session_id,
+                message="My card was declined.",
+                friction="PAYMENT_DECLINED",
+                cart_id=cart_id,
+                order_id=order.order_id if order else None,
+                skip_model=True,
+                synthetic=True,
+            ),
+            key=auth_key,
+            who=who,
+        )
+        continuation = (recovered.reply or "").removeprefix(
+            "I'm sorry that didn't work. "
+        )
+        chat_reply = f"{chat_module._decline_fact(result.decline_reason)} {continuation}"
 
     return {
         "succeeded": result.succeeded,
         "payment_status": str(result.payment_status),
         "decline_reason": str(result.decline_reason) if result.decline_reason else None,
+        "chat_reply": chat_reply,
         "order": None
         if order is None
         else {

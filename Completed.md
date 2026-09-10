@@ -84,6 +84,11 @@ implement it, deliberately. See Completed Work, #31.
 `/merchant`, answering from the same report and pending-approval data the
 console already shows, grounded rather than invented, and read-only: it
 proposes nothing, decides nothing, writes nothing. See Completed Work, #32.
+**Merchant Payments & Checkout** - a recovery queue in `/merchant`, reading
+the same merchant-scoped report and approval data the Merchant Copilot uses,
+that lets a merchant approve or reject a pending payment recovery directly
+from their own console for the first time - previously only reachable from
+CV3's own operations queue. See Completed Work, #35.
 
 ### For CV3
 
@@ -1428,3 +1433,104 @@ below; `npm run build` now exits 0.)
     new roadmap features, so the value-bar/feature-spec process does not
     apply - each fix restores or corrects behaviour a shopper already relies
     on rather than adding a new capability line to the roadmap.
+
+35. **Built the Merchant-facing Payments & Checkout recovery queue** - Merchant
+    Roadmap Phase 1, closing the exact gap CLAUDE.md names for the Merchant
+    Copilot ("every answer that identifies a problem must offer the action
+    that fixes it, executable from the same panel"), applied here to payment
+    recovery specifically rather than to the Copilot's general answering.
+
+    Before this session, a merchant had no reachable way to act on a pending
+    payment-recovery case from their own console at all. `storefront/src/
+    ApprovalQueue.tsx` exists in the repo but is not imported or rendered
+    anywhere (confirmed by grep) - so the only place a recovery could be
+    approved or rejected was CV3's own `/operations` console, never the
+    merchant's. `storefront/src/PaymentsPanel.tsx` (new, wired into
+    `MerchantConsole.tsx`) closes that: payment failures, recovery
+    opportunities, pending recovery, recoveries completed and revenue
+    recovered, all read from the existing merchant-scoped
+    `GET /api/report/{connection}` and `GET /api/approvals/{connection}`
+    routes, with Approve/Reject buttons that call the existing
+    `POST /api/approvals/{connection}/{approval_id}` route
+    (`console_api.decide`) - the same risk-gated, idempotent decide path the
+    operations console already uses. No new `ActionType`, no Risk Gate
+    bypass, no path for the Copilot or the model to authorize a payment - the
+    merchant's own explicit tap is still what the pipeline requires, same as
+    every other financial action in this codebase.
+
+    `engine/db/repository.py`'s `merchant_report()` gained two figures this
+    session: `recovery_count` (resolved outcomes carrying a
+    `revenue_recovered_amount` - a count, not a currency total) and
+    `recovery_opportunities` (cases whose `selected_action` is RETRY_PAYMENT/
+    OFFER_ALTERNATE_PAYMENT/SPLIT_PAYMENT - not the same as the raw
+    PAYMENT_DECLINED friction count, since not every decline gets a recovery
+    action proposed: Northfield has no recovery capability at all, so every
+    decline there escalates instead). `engine/copilot/service.py` was
+    extended to surface and explain both fields, since the copilot already
+    read `db.merchant_report()` and `db.pending_approvals()` for its answers
+    (Completed.md #32) - the UI panel and the Copilot are reading the
+    identical repository call, so they cannot disagree. When
+    `supports_payment_recovery` is false, the panel shows why and renders no
+    approve/reject controls at all - never an empty queue implying nothing is
+    wrong.
+
+    `revenue_recovered` was not renamed or reframed as "lost revenue"
+    anywhere in this change; a payment failure is shown as a failure count,
+    and money is only ever counted once an `Outcome` row actually carries a
+    captured amount - no projection, no counterfactual claim.
+
+    Verified end to end, not assumed:
+    - `healthcheck.py`: 103/103 passed at the point this feature's own checks
+      were exercised (a later re-run after further live testing, described
+      below, showed 4 unrelated model-proposal-selection failures under the
+      documented Groq throttle - none touch this diff, and the recovery
+      -specific checks "case reaches the queue", "approving executes",
+      "revenue is captured", "the order is actually paid", "a second approval
+      changes nothing", and "the shopper is told the outcome" passed in both
+      runs). `fuzz.py`: every invariant held across 20 sequences. `auditroutes.py`:
+      every probe held. `npm run build`: clean, 0 errors.
+    - **Zero data**: exercised directly against a real merchant, not a seeded
+      empty one - `GET /api/report/conn_kettle?days=0` returned
+      `recovery_count: 0`, `recovery_opportunities: 0`,
+      `revenue_recovered: "0.00"`, empty friction, no crash, no divide-by-zero.
+    - **Real volume**: exercised against Kettle's actual case volume, not a
+      demo-scale fixture - `recovery_opportunities: 1393`, `recovery_count: 285`,
+      `revenue_recovered: "559588.60"` INR, live-read (`recovery_count` well
+      below `recovery_opportunities`, consistent with not every recovery
+      succeeding - not an inflated or coincidentally-matching pair of numbers).
+    - **A platform that cannot**: Northfield's panel, live-checked, shows the
+      "not supported" explanation with zero Approve buttons anywhere on the
+      page (confirmed via a real Playwright browser session, not just a
+      curl check).
+    - **A platform that is down**: the Kettle merchant backend (port 8002)
+      was actually stopped, and a real pending approval was decided against
+      it live - the response degraded honestly (`"error_code":
+      "UPSTREAM_ERROR"`, `"summary": "The platform reported a problem:
+      transport failure calling /graphql"`, `"final_state": "FAILED"`), no
+      raw platform error reached the caller, and the queue remained readable
+      throughout. The backend was then restarted.
+    - **Live browser click-through**: a real Playwright session (not the
+      typecheck/build guard alone) drove a fresh shopper through Kettle -
+      add to cart, sign up, pay with card 0002 (recoverable decline) - which
+      produced a real pending approval, then opened the Kettle merchant
+      console, confirmed the pending card rendered with its diagnosis and
+      shopper-reply text and a visible Approve button, clicked Approve, and
+      confirmed on reload that the case had left the pending queue with no
+      JavaScript console errors at any point. A `value-auditor` pass run
+      mid-session correctly caught that this exact step, and the two
+      real-client conditions above, had not yet been exercised and blocked
+      the feature from this file until they were - the audit's objection is
+      recorded here because it is the reason this entry says "verified" with
+      evidence rather than by inspection.
+
+    Six value-bar answers: (1) a merchant's one marketer, deciding whether to
+    approve a specific pending recovery for a specific order, from their own
+    console; (2) they can now act on a recovery from their own console at
+    all, where before the only reachable path was CV3's own operations queue;
+    (3) a wrong approve moves real money against a live order - mitigated by
+    the pre-existing Risk Gate and idempotency, but the merchant's own
+    decision still carries real stakes; (4) the action is Approve/Reject, in
+    the same panel, same screen, no navigation away; (5) `recovery_count`,
+    `recovery_opportunities` and `revenue_recovered` in `merchant_report()`;
+    (6) see the four real-client conditions above, all four now exercised
+    rather than assumed.

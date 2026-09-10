@@ -75,6 +75,16 @@ class ActionType(StrEnum):
     #: total, nothing else - because an order id is guessable and there is
     #: no shopper identity to check it against yet.
     CHECK_ORDER_STATUS = "CHECK_ORDER_STATUS"
+
+    #: Report what is actually in the cart right now - lines, quantities,
+    #: total. Read and reports, same shape as CHECK_ORDER_STATUS.
+    #:
+    #: Added because "show cart" / "what's in my cart" had nowhere to go:
+    #: every proposable action was either a mutation (ADD_TO_CART etc.) or a
+    #: browse/recommend action, so the model fell back to offering category
+    #: choices - a shopper asking a direct question about their own cart got
+    #: an unrelated department list instead of an answer.
+    CHECK_CART_STATUS = "CHECK_CART_STATUS"
     REMOVE_CART_LINE = "REMOVE_CART_LINE"
     NOTIFY_BACK_IN_STOCK = "NOTIFY_BACK_IN_STOCK"
 
@@ -124,6 +134,7 @@ ACTION_RISK_PROPERTIES: dict[ActionType, RiskProperties] = {
     ActionType.PREPARE_CHECKOUT: RiskProperties(financial=False, reversible=True),
     ActionType.CLEAR_CART: RiskProperties(financial=False, reversible=True),
     ActionType.CHECK_ORDER_STATUS: RiskProperties(financial=False, reversible=True),
+    ActionType.CHECK_CART_STATUS: RiskProperties(financial=False, reversible=True),
     ActionType.REMOVE_CART_LINE: RiskProperties(financial=False, reversible=True),
     ActionType.NOTIFY_BACK_IN_STOCK: RiskProperties(
         financial=False, reversible=False, touches_customer_data=True

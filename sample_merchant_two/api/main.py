@@ -81,8 +81,10 @@ def graphql(body: GraphQLBody):
             return _ok("collections", store.collections())
 
         case "products":
-            found = store.search(v.get("search"), v.get("collection"), v.get("limit", 20))
-            return _ok("products", found)
+            found, total = store.search(
+                v.get("search"), v.get("collection"), v.get("limit", 20), v.get("offset", 0)
+            )
+            return {"data": {"products": found, "matchCount": total}}
 
         case "product":
             item = store.product(v.get("id", ""))
@@ -154,6 +156,16 @@ def graphql(body: GraphQLBody):
         case "resetStore":
             store.reset()
             return _ok("resetStore", True)
+
+        case "seedBulk":
+            # Test-only, mirrors Northfield's /_seed_bulk. Never called by the
+            # adapter or the engine, never part of any real platform's surface.
+            added = store.seed_bulk(v.get("count", 150))
+            return _ok("seedBulk", added)
+
+        case "clearBulk":
+            removed = store.clear_bulk()
+            return _ok("clearBulk", removed)
 
     return _error("UNKNOWN_OPERATION", f"no operation named {op!r}", 400)
 

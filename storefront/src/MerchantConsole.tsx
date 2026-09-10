@@ -12,6 +12,8 @@ import {
 import { Copilot } from "./Copilot";
 import { Gates } from "./Gates";
 import { MerchantReport } from "./MerchantReport";
+import { InventoryPanel } from "./InventoryPanel";
+import { PaymentsPanel } from "./PaymentsPanel";
 
 /** A handful of real questions the data can actually answer, shown as
  *  starter chips so a merchant sees what this can do before typing
@@ -144,6 +146,8 @@ export function MerchantConsole() {
       <main style={{ display: "flex", flexDirection: "column", gap: 20 }}>
         <MerchantCopilot />
         <MerchantReport />
+        <PaymentsPanel />
+        <InventoryPanel />
 
         <section className="panel">
           <div className="panel-head">

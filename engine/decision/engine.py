@@ -104,6 +104,7 @@ def operation_for(action_type: ActionType) -> Operation | None:
 ActionType.CLEAR_CART: Operation.UPDATE_CART,
 ActionType.PREPARE_CHECKOUT: Operation.GET_CART,
 ActionType.CHECK_ORDER_STATUS: Operation.GET_ORDER,
+        ActionType.CHECK_CART_STATUS: Operation.GET_CART,
         ActionType.APPLY_PROMOTION: Operation.APPLY_PROMOTION,
         ActionType.RETRY_PAYMENT: Operation.RECOVER_PAYMENT,
         ActionType.OFFER_ALTERNATE_PAYMENT: Operation.RECOVER_PAYMENT,

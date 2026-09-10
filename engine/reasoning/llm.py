@@ -36,10 +36,16 @@ logger = logging.getLogger(__name__)
 #: Groq's OpenAI-compatible endpoint.
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
+#: OpenAI's own endpoint.
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+
 #: Groq's recommended replacement for the retired Llama 3.3 70B. A production
 #: model rather than a preview one, and it supports tool calling, which the
 #: reasoning layer depends on.
 DEFAULT_MODEL = "openai/gpt-oss-120b"
+
+#: OpenAI's own cheap tool-calling model.
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 
 
 class LLMUnavailable(Exception):
@@ -76,23 +82,60 @@ class LLMConfig:
     timeout_seconds: float = 8.0
 
     @classmethod
+    def _provider(cls) -> str:
+        """Which provider to use, read once so both `from_env` and `available`
+        agree on it.
+
+        Two providers exist for two different reasons, not interchangeably:
+        OpenAI is what the shopper-facing engine runs on day to day (real
+        token cost, but no per-minute throttle to fight); Groq is what this
+        session's own testing and healthcheck runs use, specifically so
+        verifying a change never spends the user's OpenAI credits. Defaults
+        to "openai" - the engine, run by the user, should use OpenAI unless
+        something deliberately overrides it. Testing invocations set
+        `LLM_PROVIDER=groq` in their own shell/process environment rather
+        than touching this default.
+        """
+        return (os.getenv("LLM_PROVIDER", "openai").strip().lower() or "openai")
+
+    @classmethod
     def from_env(cls) -> LLMConfig:
-        key = os.getenv("GROQ_API_KEY", "").strip()
+        if cls._provider() == "groq":
+            key = os.getenv("GROQ_API_KEY", "").strip()
+            if not key:
+                raise LLMUnavailable(
+                    "GROQ_API_KEY is not set. Add it to .env at the project "
+                    "root, or set LLM_PROVIDER=openai to use OpenAI instead."
+                )
+            return cls(
+                api_key=key,
+                model=os.getenv("GROQ_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
+                base_url=os.getenv("GROQ_BASE_URL", GROQ_BASE_URL).strip()
+                or GROQ_BASE_URL,
+            )
+
+        key = os.getenv("OPENAI_API_KEY", "").strip()
         if not key:
             raise LLMUnavailable(
-                "GROQ_API_KEY is not set. Add it to .env at the project root."
+                "OPENAI_API_KEY is not set. Add it to .env at the project "
+                "root, or set LLM_PROVIDER=groq to use Groq instead."
             )
         return cls(
             api_key=key,
-            model=os.getenv("GROQ_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
-            base_url=os.getenv("GROQ_BASE_URL", GROQ_BASE_URL).strip() or GROQ_BASE_URL,
+            model=os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL).strip()
+            or DEFAULT_OPENAI_MODEL,
+            base_url=os.getenv("OPENAI_BASE_URL", OPENAI_BASE_URL).strip()
+            or OPENAI_BASE_URL,
         )
 
     @classmethod
     def available(cls) -> bool:
-        """Whether a key is configured. Used to decide whether to use the AI at
-        all, so the engine still runs with rules when it is not."""
-        return bool(os.getenv("GROQ_API_KEY", "").strip())
+        """Whether a key is configured for whichever provider is selected.
+        Used to decide whether to use the AI at all, so the engine still runs
+        with rules when it is not."""
+        if cls._provider() == "groq":
+            return bool(os.getenv("GROQ_API_KEY", "").strip())
+        return bool(os.getenv("OPENAI_API_KEY", "").strip())
 
 
 @dataclass

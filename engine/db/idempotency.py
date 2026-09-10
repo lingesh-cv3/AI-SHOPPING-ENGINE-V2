@@ -31,7 +31,7 @@ from sqlalchemy import select
 
 from shared.models import ACTION_RISK_PROPERTIES, ActionType
 
-from .models import ExecutionAttempt
+from .models import ExecutionAttempt, OrderLine
 from .session import session_scope
 
 #: How long a completed attempt is remembered. Long enough to cover any plausible
@@ -269,12 +269,23 @@ async def payment_settled(
     succeeded: bool,
     order_id: str | None,
     summary: str,
+    amount: str | None = None,
+    currency: str | None = None,
+    lines: list[dict] | None = None,
 ) -> None:
     """Record how the charge ended.
 
     A success locks the basket for good. A decline leaves it buyable, because the
     shopper is about to be offered another way to pay and refusing them then would
     turn a recoverable sale into a lost one.
+
+    `lines` - one dict per product on the order (product_id, product_name,
+    quantity, unit_price, line_total) straight from the adapter's own
+    `Order.lines` (or a recovery's `PaymentRecoveryResult.order.lines`) -
+    written as `OrderLine` rows, and only ever for a *succeeded*, priced
+    order, the same gate `amount_paid` already uses. A decline or an
+    unpriced/legacy row writes no product data, which is honest: there is
+    nothing completed to attribute it to.
     """
     key = cart_payment_key(connection_id, cart_id)
 
@@ -285,8 +296,43 @@ async def payment_settled(
         row.state = "DONE"
         row.succeeded = succeeded
         row.summary = summary[:500]
-        row.result = {"order_id": order_id} if order_id else {}
+        result: dict = {}
+        if order_id:
+            result["order_id"] = order_id
+        # Only a successful, priced order contributes a figure - a decline
+        # settles the row (so the ledger sees the attempt) but must never be
+        # counted as sales, and this is the one place `total_sales` reads
+        # its numbers from.
+        if succeeded and amount is not None:
+            result["amount_paid"] = amount
+            if currency:
+                result["currency"] = currency
+        row.result = result
         row.completed_at = datetime.now(UTC)
+
+        if succeeded and order_id and lines:
+            for i, line in enumerate(lines):
+                product_id = line.get("product_id")
+                if not product_id:
+                    continue
+                row_id = f"{key}:{i}"
+                order_line = await db.get(OrderLine, row_id)
+                if order_line is None:
+                    order_line = OrderLine(row_id=row_id)
+                    db.add(order_line)
+                order_line.connection_id = connection_id
+                order_line.order_id = order_id
+                order_line.cart_id = cart_id
+                order_line.product_id = str(product_id)
+                order_line.product_name = str(line.get("product_name") or product_id)
+                order_line.quantity = int(line.get("quantity") or 0)
+                order_line.unit_price = (
+                    str(line["unit_price"]) if line.get("unit_price") is not None else None
+                )
+                order_line.line_total = (
+                    str(line["line_total"]) if line.get("line_total") is not None else None
+                )
+                order_line.currency = line.get("currency") or currency
 
 
 async def release_payment(connection_id: str, cart_id: str) -> None:

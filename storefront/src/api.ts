@@ -213,6 +213,12 @@ export interface CheckoutResult {
   already_paid?: boolean;
   payment_status: string;
   decline_reason: string | null;
+  /** The engine's own honest account of a decline - the specific reason
+   *  and what happens next (recovery offered, or escalated) - present only
+   *  when a session_id was sent and the payment did not succeed. Post this
+   *  into the chat transcript rather than the generic "payment did not go
+   *  through" panel text alone. */
+  chat_reply: string | null;
   order: {
     order_id: string;
     status: string;
@@ -612,11 +618,17 @@ export const api = {
       body: JSON.stringify({ code }),
     }),
 
-  /** Cards ending 0002, 0003, 0004 always decline. */
-  checkout: (cartId: string, cardLast4: string) =>
+  /** Cards ending 0002, 0003, 0004 always decline. `sessionId` lets a
+   *  decline run through the real pipeline (a case, the honest specific
+   *  reason, recovery or escalation) instead of just returning the bare
+   *  platform result. */
+  checkout: (cartId: string, cardLast4: string, sessionId?: string) =>
     call<CheckoutResult>(shop(`/cart/${cartId}/checkout`), {
       method: "POST",
-      body: JSON.stringify({ card_last4: cardLast4 }),
+      body: JSON.stringify({
+        card_last4: cardLast4,
+        session_id: sessionId ?? null,
+      }),
     }),
 
   order: (orderId: string) => call<Order>(shop(`/order/${orderId}`)),
@@ -858,12 +870,17 @@ export const console_api = {
 
   queue: () => merchantCall<{ approvals: QueueItem[] }>(`/api/approvals/${getConnection()}`),
 
-  decide: (approvalId: string, approved: boolean, note?: string) =>
+  decide: (
+    approvalId: string,
+    approved: boolean,
+    note?: string,
+    decidedBy: string = "merchant",
+  ) =>
     merchantCall<Decision>(`/api/approvals/${getConnection()}/${approvalId}`, {
       method: "POST",
       body: JSON.stringify({
         approved,
-        decided_by: "cv3-operator",
+        decided_by: decidedBy,
         note: note ?? null,
       }),
     }),
@@ -877,7 +894,30 @@ export const console_api = {
       method: "POST",
       body: JSON.stringify({ question }),
     }),
+
+  catalogAlerts: () =>
+    merchantCall<CatalogAlerts>(`/api/catalog/${getConnection()}`),
 };
+
+/** Out-of-stock/low-stock products across the whole catalog - the same data
+ *  the Inventory panel and the merchant copilot's "what's out of stock"
+ *  answers both read from, so the two can never disagree.
+ *
+ *  The three booleans matter as much as the lists: a panel that only rendered
+ *  `out_of_stock`/`low_stock` could not tell a shopper "checked, nothing
+ *  wrong" from "could not check" or "only checked part of the catalog" -
+ *  exactly the silent-truncation failure this whole feature exists to fix. */
+export interface CatalogAlerts {
+  reachable: boolean;
+  complete: boolean;
+  scanned: number;
+  truncated_at: number | null;
+  out_of_stock: { product_id: string; sku: string | null; title: string }[];
+  low_stock: { product_id: string; sku: string | null; title: string }[];
+  /** Null when unreachable (unknown), false when the platform simply has no
+   *  low-stock concept (boolean stock only), true otherwise. */
+  low_stock_available: boolean | null;
+}
 
 export interface CopilotAnswer {
   answer: string;
@@ -894,7 +934,13 @@ export interface MerchantReport {
   handled_without_you: number;
   waiting_for_you: number;
   revenue_recovered: string;
+  recovery_count: number;
+  recovery_opportunities: number;
   currency: string;
+  completed_order_count: number;
+  total_sales_amount: string;
+  total_sales_currency: string;
+  average_order_value: string | null;
   supports_payment_recovery: boolean;
   median_resolution_ms: number | null;
   /** Null until at least one session has landed in the holdout group - a
@@ -908,6 +954,19 @@ export interface MerchantReport {
     assisted_resolved: number;
     assisted_resolution_rate: number | null;
   } | null;
+  /** Top products by quantity sold in this window, sourced from real
+   *  per-order-line data - only available for orders completed after this
+   *  capability shipped. Empty (not missing) with no completed orders yet. */
+  top_products: {
+    product_id: string;
+    product_name: string;
+    quantity: number;
+    revenue: string;
+    order_count: number;
+  }[];
+  /** False when there is no product-level order data at all yet (either no
+   *  completed orders in the window, or all of them predate this capability). */
+  product_data_has_history: boolean;
   friction: { type: string; count: number }[];
   recent: {
     case_id: string;

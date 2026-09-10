@@ -65,6 +65,25 @@ _RECOVERY_METHOD = {
 
 logger = logging.getLogger(__name__)
 
+#: Deliberately narrow and literal - phrases that cannot themselves be naming
+#: a category or a rating request, only ever a bare "show me what you sell".
+#: Does NOT include "top rated" phrasing: a bare "what are the top rated
+#: products" is its own, already-correct case (rating-sorted, every category)
+#: and must keep that signal rather than being flattened to a plain browse.
+_GENERIC_BROWSE_PHRASES = (
+    "what products are available",
+    "what products do you have",
+    "what do you have",
+    "what do you sell",
+    "what's available",
+    "what is available",
+    "show me everything",
+    "show me what you have",
+    "what can i buy",
+    "what's in the store",
+    "what is in the store",
+)
+
 #: Actions that finish without touching the merchant's backend. Answering a
 #: question and handing a case to a colleague are both real outcomes; neither is a
 #: commerce operation, and treating them as failures because no API was called
@@ -400,6 +419,26 @@ class ExecutionService:
                 price_bounded = max_price is not None or min_price is not None
                 top_rated = params.get("top_rated") is True
                 category = str(params.get("category") or "").strip()
+
+                # A deterministic backstop, not just a prompt rule. The model
+                # is told to leave category/query blank for a bare "what's
+                # available", but recent conversation about one category (a
+                # "top rated shoes" question, say, still in the history a few
+                # lines up) reliably pulled it back in anyway on live testing -
+                # the same "answer what's in front of you, not the history"
+                # instruction this codebase already relies on for other
+                # friction, just not reliable enough on its own here. A small,
+                # literal set of genuinely generic browse phrases - checked
+                # against this turn's own words, nothing inferred - always
+                # resets category/query/top_rated, because a phrase this
+                # generic cannot itself be naming a category to keep.
+                said = str(params.get("said") or "").strip().lower()
+                if action_type is ActionType.RECOMMEND_PRODUCTS and any(
+                    phrase in said for phrase in _GENERIC_BROWSE_PHRASES
+                ):
+                    category = ""
+                    query = ""
+                    top_rated = False
 
                 # A general "what do you have" - no keyword, no category, no
                 # price or rating narrowing - used to mean six products picked
@@ -916,6 +955,65 @@ class ExecutionService:
                     },
                 )
 
+            case ActionType.CHECK_CART_STATUS:
+                # Reads and reports. Same shape as PREPARE_CHECKOUT's own cart
+                # read just below, minus the "did they ask to pay" gate and
+                # the empty-cart refusal - "what's in my cart" on an empty
+                # cart is a legitimate question with a legitimate answer,
+                # not a failure.
+                if not case.cart_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="There is no cart to check.",
+                        error_code="CART_NOT_FOUND",
+                        final_state=str(CaseState.FAILED),
+                    )
+
+                cart = await adapter.get_cart(case.cart_id)
+
+                if cart.is_empty:
+                    return Executed(
+                        succeeded=True,
+                        action_type=str(action_type),
+                        summary="The cart is empty.",
+                        shopper_summary="Your cart is empty right now.",
+                        payload={"cart_id": cart.cart_id, "item_count": 0, "lines": []},
+                    )
+
+                items = ", ".join(
+                    f"{line.quantity} x {line.title}"
+                    if line.quantity != 1
+                    else line.title
+                    for line in cart.lines
+                )
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f"Cart {cart.cart_id}: {cart.item_count} item(s), "
+                        f"{cart.grand_total}."
+                    ),
+                    shopper_summary=(
+                        f"Your cart has {cart.item_count} item(s), "
+                        f"{cart.grand_total}: {items}."
+                    ),
+                    payload={
+                        "cart_id": cart.cart_id,
+                        "item_count": cart.item_count,
+                        "grand_total": str(cart.grand_total),
+                        "lines": [
+                            {
+                                "title": line.title,
+                                "variant": line.variant_id,
+                                "quantity": line.quantity,
+                                "total": str(line.line_total),
+                            }
+                            for line in cart.lines
+                        ],
+                    },
+                )
+
             case ActionType.PREPARE_CHECKOUT:
                 # Did the shopper actually ask to pay?
                 #
@@ -1098,6 +1196,61 @@ class ExecutionService:
                         final_state=str(CaseState.FAILED),
                     )
                 amount = outcome.amount_recovered
+
+                # A successful recovery is a completed purchase, the same as any
+                # other, and must count toward total sales the same way - not
+                # just toward revenue_recovered. Without this, the payment
+                # ledger (which total_sales reads) never learns this basket was
+                # ever paid, because recover_payment's own idempotency key is
+                # derived from the case and action, not from cart_payment_key -
+                # a different lock than the one begin_payment/payment_settled
+                # keep. Best-effort: a merchant's total-sales figure degrading
+                # to "missing this one row" is a far smaller problem than a
+                # shopper's recovered order failing over a report-side write.
+                if case.cart_id and amount:
+                    try:
+                        recovered_order = outcome.order
+                        await db.idempotency.payment_settled(
+                            case.connection_id,
+                            case.cart_id,
+                            succeeded=True,
+                            order_id=case.order_id,
+                            summary=f"recovered {case.order_id}",
+                            amount=str(amount.amount),
+                            currency=amount.currency,
+                            lines=(
+                                [
+                                    {
+                                        "product_id": line.product_id,
+                                        "product_name": line.title,
+                                        "quantity": line.quantity,
+                                        "unit_price": (
+                                            str(line.unit_price.amount)
+                                            if line.unit_price
+                                            else None
+                                        ),
+                                        "line_total": (
+                                            str(line.line_total.amount)
+                                            if line.line_total
+                                            else None
+                                        ),
+                                        "currency": (
+                                            line.unit_price.currency
+                                            if line.unit_price
+                                            else None
+                                        ),
+                                    }
+                                    for line in recovered_order.lines
+                                ]
+                                if recovered_order
+                                else None
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "could not record recovered payment in the sales ledger"
+                        )
+
                 return Executed(
                     succeeded=True,
                     action_type=str(action_type),

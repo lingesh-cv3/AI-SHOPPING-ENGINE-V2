@@ -64,6 +64,45 @@ export function ChatWidget({
   );
   const endRef = useRef<HTMLDivElement>(null);
 
+  // Always the latest `turns`/`open`/`onTurns`/`onUnread`, for the poll below
+  // to read at the moment it actually resolves - not whatever they were when
+  // the interval was set up. See the poll effect's own comment for why this
+  // exists. `onTurns` and `onUnread` need this too, not just `turns`/`open`:
+  // `onTurns` is `setChatTurns` (stable), but `onUnread` is passed from
+  // App.tsx as a new inline arrow function on every render
+  // (`onUnread={(n) => setUnread((prev) => prev + n)}`) - putting it in the
+  // poll effect's own dependency array would rebuild that effect on nearly
+  // every render of the parent, for reasons having nothing to do with this
+  // widget, which is the same "effect depends on something that changes too
+  // often" shape this whole fix exists to remove.
+  const turnsRef = useRef(turns);
+  useEffect(() => {
+    turnsRef.current = turns;
+  }, [turns]);
+  const openRef = useRef(open);
+  useEffect(() => {
+    openRef.current = open;
+  }, [open]);
+  const onTurnsRef = useRef(onTurns);
+  useEffect(() => {
+    onTurnsRef.current = onTurns;
+  }, [onTurns]);
+  const onUnreadRef = useRef(onUnread);
+  useEffect(() => {
+    onUnreadRef.current = onUnread;
+  }, [onUnread]);
+  // The session the poll below is actually running for, read at resolution
+  // time so an in-flight fetch started before a merchant/session switch
+  // cannot apply its result after the switch. Without this, a poll for the
+  // old session that resolves after `sessionId` has already changed would
+  // append the old session's turns onto the new session's transcript -
+  // `turnsRef`/`onTurnsRef` are correct "current", but "current" had by
+  // then become a different conversation.
+  const currentSessionRef = useRef(sessionId);
+  useEffect(() => {
+    currentSessionRef.current = sessionId;
+  }, [sessionId]);
+
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns, busy]);
@@ -138,11 +177,36 @@ export function ChatWidget({
   // polling, a shopper told "someone will pick this up" would sit there while the
   // money was recovered and never learn it happened.
   useEffect(() => {
-    const seen = new Set(turns.map((t) => t.text));
-
     async function poll() {
       try {
         const { turns: stored } = await api.transcript(sessionId);
+        // This poll was set up for `sessionId` (this effect's own closed-over
+        // value, fixed for its lifetime). If the shopper has since switched
+        // merchants/sessions, `currentSessionRef` now holds a different id -
+        // the fetch above was already in flight when that happened, so its
+        // result belongs to a conversation that is no longer on screen.
+        // Applying it anyway would append the old session's turns onto the
+        // new session's transcript. Discard rather than apply.
+        if (sessionId !== currentSessionRef.current) return;
+        // `seen` is read from turnsRef *here*, at the moment the network
+        // response actually lands - not captured once when the interval was
+        // set up. The old code built `seen` (and the base to append onto)
+        // from the `turns` closed over when this effect last ran, and this
+        // effect re-ran on every single message (it depended on `turns`).
+        // A poll that was already in flight when the shopper's next message
+        // landed - a real, reachable window: a card decline or a checkout
+        // both take real network/model time - resolved holding a `turns`
+        // array from *before* that message and its reply. Calling
+        // `onTurns([...staleTurns, ...fresh])` then overwrote the screen
+        // with that stale base plus whatever the poll found "fresh" (often
+        // the very reply that had just been handled directly), silently
+        // discarding the shopper's newer message and its real answer - a
+        // question answered correctly by the direct response, then clobbered
+        // back to a duplicate of the turn before it. Reading both `seen` and
+        // the append base from a ref that a separate effect keeps current on
+        // every render closes that window: whatever the poll finds is always
+        // compared and appended against what is actually on screen right now.
+        const seen = new Set(turnsRef.current.map((t) => t.text));
         // Matched on a prefix as well as the whole string. The pay endpoint
         // prepends a sentence to what the pipeline said, so the stored turn is a
         // suffix of what is already on screen - identical in substance, different
@@ -157,8 +221,8 @@ export function ChatWidget({
           .map((t) => ({ speaker: "assistant" as const, text: t.text }));
 
         if (fresh.length > 0) {
-          onTurns([...turns, ...fresh]);
-          if (!open) onUnread?.(fresh.length);
+          onTurnsRef.current([...turnsRef.current, ...fresh]);
+          if (!openRef.current) onUnreadRef.current?.(fresh.length);
         }
       } catch {
         // A failed poll is not worth surfacing. The next one may work.
@@ -167,7 +231,14 @@ export function ChatWidget({
 
     const id = window.setInterval(poll, 10_000);
     return () => window.clearInterval(id);
-  }, [sessionId, turns, open, onTurns, onUnread]);
+    // Deliberately depending on nothing but `sessionId` - that was the bug.
+    // `turns`/`open` changed on every message; `onTurns`/`onUnread` are
+    // props, and `onUnread` in particular is a new function identity on
+    // every parent render. Any of those in this array meant tearing the
+    // interval down and rebuilding it (with a fresh `seen` snapshot)
+    // constantly instead of once per session. Current values are read
+    // through the refs above instead.
+  }, [sessionId]);
 
   /** Send a message on the shopper's behalf, with whatever they picked.
    *

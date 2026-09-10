@@ -11,7 +11,410 @@ open. Both are kept current every session; this file is architecture and
 practices, and goes stale the moment it tries to describe current state
 instead. The rule that keeps the split honest lives in PROGRESS.md's own
 maintenance note - a finished item moves out of PROGRESS.md into Completed.md
-once every test suite it needs has actually passed, not before.
+once every test suite it needs has actually passed, **and once it clears the
+value bar below** - not before.
+
+
+## Research-Backed Product Roadmap
+
+This section defines the future product direction for the CV3 AI Shopping Engine.
+
+These are proposed features based on AI-commerce, shopper, merchant, and
+agentic-commerce research. A roadmap item is NOT an implementation claim.
+
+### Product Direction
+
+The engine should evolve from a basic AI shopping assistant into a
+commerce intelligence and action engine:
+
+- Shopper: help the customer buy better.
+- Merchant: help the merchant sell better.
+- CV3 Operations: help CV3 operate and improve multiple merchants better.
+
+The shared intelligence loop is:
+
+Observe → Understand → Decide → Risk-check → Act → Measure → Learn
+
+New capabilities should use the existing architecture wherever applicable:
+
+browser/storefront
+→ engine
+→ reasoning
+→ decision
+→ risk
+→ execution
+→ adapter
+→ merchant
+→ outcome/measurement
+
+New features must not bypass the existing Decision Engine, Risk Gate,
+tenant isolation, payment protections, or auditability requirements.
+
+---
+
+## Shopper Roadmap
+
+### Phase 1 — Core Shopping Intelligence
+
+**Blocked until the reply-before-data constraint (see Feature Implementation
+Rules) is addressed — items 1 through 4 below:**
+
+1. **Advanced Product Discovery**
+   - Outcome: a shopper describing what they need in their own words reaches a
+     product they would not have found by keyword, and the reply says *why*
+     that product fits their stated need, grounded in the record actually
+     fetched during the turn — not a generic description written before the
+     fetch happens.
+   - Moves: dead searches down.
+
+2. **Smart Product Comparison**
+   - Outcome: a shopper comparing two named products is told which difference
+     actually matters for what they said they wanted, grounded in the real
+     fetched values.
+   - Structured live fetch is done (Completed.md #27 — both products are
+     always fetched fresh, never from anything cached earlier in the
+     conversation). The synthesis — explaining meaningful differences rather
+     than listing specifications — is not done, and cannot be done properly
+     until the reply-before-data constraint is fixed. See PROGRESS.md.
+
+3. **Personalized Recommendations**
+   - Outcome: a returning shopper is shown something that visibly reflects
+     what they've bought, kept and returned, and can tell that it does — not
+     a recommendation that happens to be correct by coincidence.
+   - Moves: resolution rate, returns.
+   - Recommendations must remain grounded in available merchant data.
+
+4. **Mission-Based Shopping**
+   - Outcome: a shopper stating an overall goal ("I need a running setup for
+     a marathon") gets a complete, compatible set of items with a reason per
+     item, addable in one step — rather than treating every message as an
+     isolated product query.
+   - Moves: items per order.
+
+**Not blocked:**
+
+5. **Smart Cart and Checkout Recovery**
+   - Outcome: a shopper who would have abandoned instead completes the
+     purchase, because the specific thing stopping them — an unexpected cost,
+     a return policy they couldn't find, uncertainty about a size — was
+     answered before they left.
+   - Moves: recovered revenue, resolution rate.
+   - Preserve existing payment and shopper-confirmation invariants.
+
+### Phase 2 — Deeper Shopping Assistance
+
+6. **Smart Bundles / Complete the Set**
+7. **Compatibility Assistant**
+8. **Return-Risk Prevention**
+9. **Post-Purchase Assistant**
+10. **Multimodal Shopping**
+
+These should focus on helping the shopper make a better decision while
+avoiding unsupported product or compatibility claims. Write outcome statements
+for each (see Feature Implementation Rules) before selecting any of these for
+implementation — do not build from the name alone.
+
+### Phase 3 — Advanced / Strategic Shopper Capabilities
+
+11. **Proactive Shopping Assistance**
+12. **Gift Assistant**
+13. **Voice Shopping**
+14. **Multi-Channel Shopper Continuity**
+15. **External AI Shopping / Agentic-Commerce Channels**
+
+These are later-stage capabilities and should not be treated as prerequisites
+for the core engine.
+
+---
+
+## Merchant Roadmap
+
+### Phase 1 — Merchant Intelligence
+
+1. **CV3 Merchant Copilot**
+   - *Partially built — see Completed.md #32, reopened in PROGRESS.md against
+     the value bar.* The read-only answering half is done: it answers from
+     report, capabilities, policy, rules, actions, unmet demand and catalogue
+     alerts. Not done: every answer that identifies a problem must offer the
+     action that fixes it, executable from the same panel through the
+     existing risk gate. A merchant who asks "what's out of stock" and is
+     simply told, with nothing to do about it from that screen, has not
+     received a finished feature.
+   - Also owed: `_catalog_alerts` calls `search_products("", limit=100)` on
+     every request, correct for Northfield's small catalogue and wrong for a
+     real client's — the real-volume condition has never been exercised for
+     this feature.
+
+2. **AI Store Diagnosis**
+   - Outcome: a merchant is told a specific problem, the evidence behind the
+     diagnosis, what it's costing them, and can act on it without leaving the
+     screen. Not "here are some issues" — a diagnosis with no attached action
+     is the read-only twin anti-pattern (see below), whatever it's called.
+
+3. **Recovery Opportunity Radar**
+   - Outcome: revenue currently being lost is surfaced with a specific,
+     actionable case behind each instance, and a person can act on each one
+     from the radar itself.
+   - Moves: recovered revenue.
+
+4. **Catalog Intelligence**
+   - Outcome: a merchant is shown the specific products whose missing,
+     inconsistent or weak information is costing them sales, ranked by what
+     it's costing, and this must be demonstrated at real catalogue size, not
+     just Northfield's demo catalogue.
+   - Moves: dead searches down.
+
+5. **Inventory Intelligence**
+   - Outcome: a merchant learns which specific inventory position is about to
+     cost them a sale, in time to do something about it, at real catalogue
+     size.
+   - Moves: dead searches, resolution rate.
+
+### Phase 2 — Merchant Optimization
+
+6. **Revenue-at-Risk Detection**
+7. **Voice-of-Customer Intelligence**
+8. **Return Intelligence**
+9. **Return Prevention**
+10. **Promotion / Discount Intelligence**
+11. **Product Content Assistant**
+12. **Search Intelligence**
+13. **Recommendation Quality Monitoring**
+14. **Shopper Segmentation**
+15. **Customer Lifetime-Value Intelligence**
+
+### Phase 3 — Merchant Decision and Automation Layer
+
+16. **Natural-Language Merchant Policy Builder**
+17. **Policy Simulator**
+18. **Merchant Approval & Action Center**
+19. **Merchant Action Audit Trail**
+20. **Automated Merchant Daily Brief**
+21. **AI Commerce ROI / Incrementality**
+22. **Agent Readiness / Agentic Commerce**
+
+Merchant automation must remain subject to the existing risk model and
+merchant/platform capabilities. Financial actions remain human-controlled.
+
+Write outcome statements for Phase 2 and Phase 3 items, following the pattern
+above, at the point each is selected for implementation — not in advance and
+not from the name alone.
+
+---
+
+## CV3 Operations Roadmap
+
+### Phase 1 — Operations Intelligence
+
+1. **CV3 Operations Copilot**
+   - *Partially built — see Completed.md #33, reopened in PROGRESS.md against
+     the value bar.* The read-only answering half is done: it answers from
+     ops_stats, pending_across, handovers_across and decided_across, resolves
+     connection ids to real merchant names, and correctly declines
+     merchant-specific questions in favour of the Merchant Copilot. Not done:
+     an operator should be able to approve, close, or escalate directly from
+     the answer, through the existing routes and risk gate, rather than
+     reading the answer and then going to the queue to act on it.
+
+2. **Cross-Merchant Command Center**
+   - Outcome: an operator covering ten accounts sees what needs them next
+     across all of them, ordered by what it costs to ignore rather than by
+     arrival time, and can work it without changing screens.
+
+3. **Integration Health Monitoring**
+   - Outcome: a broken adapter or platform connection is detected and named,
+     with the specific failing operation identified, before a shopper hits it.
+
+4. **Automatic Incident Detection**
+   - Outcome: a systemic problem — one answer or one failure suddenly
+     repeating across many sessions — is surfaced while it is happening, not
+     in a later report. This is the failure mode that did not exist before
+     agents: a single misconfiguration can now propagate identically across
+     every conversation at once, invisibly, until someone happens to notice.
+
+### Phase 2 — Operations Automation and Intelligence
+
+5. **Cross-Merchant Revenue-at-Risk Radar**
+6. **Incident Diagnosis**
+7. **Adaptive Approval Queue**
+8. **Operator Copilot**
+9. **Cross-Merchant Pattern Detection**
+10. **Playbook Engine**
+11. **AI-Generated Resolution Playbooks**
+12. **SLA Monitoring**
+13. **SLA-Breach Prediction**
+14. **Operations Daily Brief**
+15. **Client Escalation Manager**
+16. **Automated Client Performance Reporting**
+
+### Phase 3 — Measurement, Evaluation and Strategic Operations
+
+17. **AI Performance Monitoring**
+18. **Decision Engine Monitoring**
+19. **Risk Gate Monitoring**
+20. **Adapter Performance Monitoring**
+21. **AI Evaluation Lab**
+22. **Shadow Mode**
+23. **Regression Evaluation**
+24. **Human-Decision Learning**
+25. **Cross-Merchant Benchmarking**
+26. **Automated ROI / Business-Impact Reporting**
+27. **Client Opportunity Discovery**
+28. **CRO / GEO Intelligence Feed**
+29. **Agentic-Commerce Monitoring**
+
+Write outcome statements for Phase 2 and Phase 3 items at the point each is
+selected for implementation.
+
+---
+
+## Feature Implementation Rules
+
+### The loop is not optional
+
+Every roadmap feature runs the full loop:
+
+1. Observe / retrieve relevant data
+2. Reason about the situation
+3. Produce candidate actions or recommendations
+4. Apply deterministic decision logic
+5. Apply the Risk Gate
+6. Execute through the appropriate adapter when allowed
+7. Record the outcome
+8. Measure the result
+
+A feature that stops after step 2 is a report, not a feature. It may still be
+worth building — but it must be **named** as informational in its spec, and it
+must name the action it leads to and make that action reachable from the same
+screen in one step. "The operator can read it and go and do something about it
+somewhere else" is not reachable.
+
+The AI proposes. Deterministic systems decide what is allowed.
+
+Existing security invariants always take precedence over new feature
+requirements.
+
+### The value bar
+
+A feature is not done until all six of these have written answers. Answer them
+in the spec **before** building, and re-check them before moving the item to
+Completed.md.
+
+1. **Whose decision changes?** Name the person — a shopper mid-purchase, a
+   merchant's one marketer, a CV3 operator with ten accounts. Not "the
+   merchant" as an abstraction.
+2. **What can they do now that they could not do before?** If the honest
+   answer is "see something they could already see, phrased differently",
+   stop.
+3. **What does it cost them if this is wrong?** A feature that cannot be wrong
+   in a way that matters is not doing anything.
+4. **Where is the action?** Name the specific action this leads to and how it
+   is reached. If there is none, this is informational — see above.
+5. **What number moves?** Name the figure in the merchant report or ops stats
+   that changes when this works. If no existing figure moves, this feature
+   owes one.
+6. **Does it survive a real client?** See "Real-client conditions" below.
+
+### Real-client conditions
+
+CV3's clients are around fifty mid-market merchants on custom builds, Magento
+and Shopware. Not Shopify, not demo stores. Every feature must be checked
+against all four of these before it is called done:
+
+- **Zero data.** A merchant connected this morning. No cases, no orders, no
+  history. The feature must render something honest, not an empty panel, a
+  divide-by-zero, or a confident 0%.
+- **Real volume.** A 40,000-SKU catalogue and six figures of cases. Anything
+  that reads "all" of something, or paginates with a fixed limit and presents
+  the page as the whole, is wrong at this size. `_catalog_alerts`'s
+  `search_products("", limit=100)` is the worked example: correct for
+  Northfield, silently wrong for a real Magento client, and nothing in the old
+  instructions would have flagged it.
+- **A platform that cannot.** The operation this feature needs is not in that
+  adapter's capabilities. The feature degrades honestly and says why, the same
+  shape Northfield's missing payment recovery already uses.
+- **A platform that is down.** The adapter raises. The turn degrades rather
+  than breaking.
+
+State in the spec which of the four were actually exercised and how. "It should
+handle that" is not an answer; a run against a seeded empty merchant is.
+
+### Named anti-patterns
+
+These have all shipped here or nearly shipped. Recognising one is grounds to
+stop and re-spec, not to proceed carefully.
+
+- **The Q&A panel.** A free-text box answering from data already on the
+  screen. It re-presents; it does not change anything. Allowed only as a layer
+  over a feature that already acts — never as the implementation of a roadmap
+  item.
+- **The read-only twin.** Building the informational version of a feature and
+  marking the roadmap item done. "AI Store Diagnosis" is not done by a panel
+  that describes problems; it is done when a diagnosis leads to a fix.
+- **The demo-grade slice.** Works for the one path a walkthrough takes. Fails
+  the four real-client conditions above.
+- **The unreachable claim.** Learned in Completed.md #25: reachable through the
+  actual UI on every surface a real user would use. Extend it — also reachable
+  at real data volume, not only on a seeded demo row.
+- **The generic reply.** A reply written before the data it describes exists.
+  See "The reply-before-data constraint" below.
+- **The unmeasured feature.** Shipped with no figure that moves. There is now
+  no way to tell whether it worked, so nobody will ever remove it either.
+
+### The reply-before-data constraint
+
+`engine.reasoning.reason()` writes the shopper-facing reply **before**
+`execute_case()` runs (`chat.py:374` vs `:552`). So any reply describing data
+fetched during the turn is written before that data exists, and can only ever
+be generic.
+
+This is not a bug in one action. It is a shape that caps the value of every
+feature whose worth depends on saying something true about what was just
+fetched — Advanced Product Discovery, Smart Product Comparison, Personalized
+Recommendations, and Mission-Based Shopping are all limited by it.
+
+**Do not build those four until this is addressed.** Building them against the
+current shape produces exactly the generic output this document is trying to
+stop. Closing it needs a second reasoning pass over the executed result, or a
+different pipeline shape — it is architecture work, and it belongs at the top
+of the shopper queue rather than inside a checkbox note. See PROGRESS.md,
+Next Steps, item 0.
+
+### Before building anything from the roadmap
+
+Write a short spec first — six value-bar answers, which real-client conditions
+apply and how they will be exercised, and which existing figure moves. Show it
+before writing code. A roadmap item's **name** is not a spec, and building
+straight from the name is how the thin version gets built. Use the
+`feature-spec` agent for this.
+
+---
+
+## Roadmap Priority Rule
+
+The roadmap is intentionally larger than the immediate implementation scope.
+
+Do not add every roadmap item to PROGRESS.md.
+
+Only move a feature into PROGRESS.md when implementation of that feature is
+actually planned and work has begun or is explicitly queued for the current
+development phase.
+
+A feature remains a roadmap item until it is selected for implementation.
+
+A feature becomes completed only when it is implemented end-to-end, relevant
+tests pass, the real user-facing behavior has been verified, **and it clears
+the value bar above** — a feature can pass every test it has and still not be
+done, if what it tests is correctness rather than whether it changed anything
+for anybody.
+
+ROADMAP ≠ PROGRESS ≠ COMPLETED.
+
+- CLAUDE.md roadmap = future product direction
+- PROGRESS.md = currently unfinished/unbuilt/pending work
+- Completed.md = completed, verified, and value-bar-cleared work
+
+
 
 ---
 
@@ -77,6 +480,11 @@ software competitor must be fully autonomous because they have no people. CV3 ca
 sell "your problem got sorted" rather than "here is a tool" - which makes the
 approval queue the product rather than a limitation, and it is the one thing a
 software vendor cannot copy.
+
+This is also why the value bar above matters more here than it would for a pure
+software vendor: CV3's whole positioning is that a human resolves what the engine
+cannot. A feature that only reports and never acts quietly reverts that positioning
+back to "here is a tool" - the exact thing this section says CV3 is not selling.
 
 ### Business value, concretely
 
@@ -321,6 +729,16 @@ same kind of fact before calling the class of bug closed - fixing the one
 instance you were shown and stopping there is how the same mistake gets made
 again at the next call site.
 
+**A feature can be correct, tested, invariant-clean, and still not worth
+having shipped.** Both the Merchant Copilot and the Operations Copilot passed
+every existing gate cleanly - invariant-guard found nothing wrong, all three
+suites held, browser verification was thorough - and both shipped as read-only
+panels answering questions about data the console already displayed. Neither
+changes what anyone can do. The gates that existed checked whether the feature
+was dangerous; nothing checked whether it was pointless. See the value bar
+under Feature Implementation Rules, and use `value-auditor` before trusting
+that "verified end to end" means "worth having built."
+
 ---
 
 ## Agents
@@ -332,11 +750,44 @@ Project subagents live in `.claude/agents/`. One line each:
 - **invariant-guard** — read-only check of a diff against the six hard invariants and the idempotency-key rule. Use after any change to `engine/risk`, `engine/execution`, `engine/api`, `engine/db`, or `shared/`.
 - **test-runner** — runs `healthcheck.py` / `fuzz.py` / `auditroutes.py` against the running services and interprets SKIP/FAIL correctly. Use to validate any change to `engine/`.
 - **frontend-verifier** — runs the real typecheck guard (`npm run build`, not `dev`) plus lint, then walks the changed feature by hand. Use after any change under `storefront/`.
-- **progress-scribe** — updates PROGRESS.md and Completed.md in their existing terse style, cross-checked against real git state. Moves an item from PROGRESS.md to Completed.md only once every test suite it needs has actually passed - never mid-task, and never on the strength of "the code is written." Use at the end of a session, not mid-task.
+- **progress-scribe** — updates PROGRESS.md and Completed.md in their existing terse style, cross-checked against real git state. Moves an item from PROGRESS.md to Completed.md only once every test suite it needs has actually passed and it clears the value bar - never mid-task, and never on the strength of "the code is written." Use at the end of a session, not mid-task.
 - **bug-reproducer** — reproduces a bug first and records the exact call and response, before any fix is written. Use before starting any bug fix, so the eventual regression test asserts against a real reproduction rather than the fix's own logic.
 - **doc-auditor** — reads CLAUDE.md, Completed.md and PROGRESS.md against the actual code and reports contradictions (stale counts, renamed things, drifted claims, or an item described as done in Completed.md that a suite no longer backs). Use periodically or whenever a docs claim looks suspicious.
+- **feature-spec** — writes the six value-bar answers, the real-client conditions and the figure that moves, before any code. Use at the start of any roadmap feature, before implementation begins.
+- **value-auditor** — read-only check of a finished feature against the value bar, the four real-client conditions and the named anti-patterns. Reports which conditions were actually exercised versus assumed. Use before moving any roadmap item to Completed.md, the same way invariant-guard is used before considering a change to engine/ done.
 
-**Wiring:** after any change under `engine/`, run `invariant-guard` and `test-runner` before considering the change done. After any change under `storefront/`, run `frontend-verifier` before considering the change done. Do this even if not asked explicitly — it's the equivalent of the checks a human would run before calling the work finished.
+**Wiring:** after any change under `engine/`, run `invariant-guard` and
+`test-runner` before considering the change done. After any change under
+`storefront/`, run `frontend-verifier`. For any **roadmap feature**, run
+`feature-spec` before starting and `value-auditor` before moving the item to
+Completed.md. Do this even if not asked explicitly — it's the equivalent of the
+checks a human would run before calling the work finished.
+
+The two feature gates catch different failures and neither substitutes for the
+other. invariant-guard catches a feature that is dangerous. value-auditor
+catches a feature that is pointless. Both copilots passed invariant-guard
+cleanly and would have failed value-auditor.
+
+**Documentation is not optional at session end.** Before ending any session
+that touched `engine/`, `storefront/`, `adapters/`, or moved a roadmap item's
+status, run `progress-scribe`. This is a trigger, not a suggestion — the same
+force as the invariant-guard and value-auditor lines above. Do this even if
+not asked explicitly and even if the session felt exploratory rather than
+finished.
+
+`progress-scribe` must, every time it runs:
+
+- Move any item out of PROGRESS.md into Completed.md only if every test suite
+  it needs has passed **and** `value-auditor` has returned VALUABLE for it —
+  never on the strength of "the code is written," and never mid-task.
+- Cross-check its own claims against real git state and the actual running
+  behaviour, not against what the session intended to do.
+- Update PROGRESS.md's Next Steps and Known Issues to match what is actually
+  still open, not what was open at the start of the session.
+
+A session that ends without this step is exactly how CLAUDE.md, Completed.md
+and PROGRESS.md drift out of sync with the real code — which is the problem
+this whole set of instructions exists to stop.
 
 ## The constraint
 

@@ -169,19 +169,30 @@ class SampleMerchantAdapter(StandardCommerceInterface):
     # ---- Catalog ---------------------------------------------------------
 
     async def search_products(
-        self, query: str, *, limit: int = 20, dept: str | None = None
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        dept: str | None = None,
+        offset: int = 0,
     ) -> ProductSearchResult:
         """Search or browse. An empty result is returned, never raised.
 
-        `dept` is an extension beyond the standard interface. Category browsing is
-        not on the Standard Commerce Interface because not every platform has a
-        comparable concept - some have collections, some have tags, some have
-        nothing. Where a platform does support it, the adapter can expose it, and
-        the Decision Engine simply never uses it.
+        `dept` and `offset` are extensions beyond the standard interface.
+        Category browsing is not on the Standard Commerce Interface because not
+        every platform has a comparable concept - some have collections, some
+        have tags, some have nothing. `offset` exists because this platform's
+        `/items` endpoint genuinely supports bounded pagination (page-size and
+        offset, the same shape a real Magento/Shopware search API exposes) -
+        a caller that needs the whole catalogue, not just one page, can pass
+        it. Where a platform does support either, the adapter can expose it,
+        and the Decision Engine simply never uses it.
         """
         params: dict[str, object] = {"q": query, "limit": limit}
         if dept:
             params["dept"] = dept
+        if offset:
+            params["offset"] = offset
 
         body = await self._client.request("GET", f"{API}/items", params=params)
         items = self._unwrap(body, "items")
