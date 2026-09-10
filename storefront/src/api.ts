@@ -843,6 +843,7 @@ export const console_api = {
     autoAllowed: string[],
     blocked: string[],
     holdoutPercent: number,
+    approvalTimeoutMinutes?: number,
   ) =>
     merchantCall<Policy>(`/api/policy/${getConnection()}`, {
       method: "PUT",
@@ -851,6 +852,12 @@ export const console_api = {
         auto_allowed: autoAllowed,
         blocked,
         holdout_percent: holdoutPercent,
+        // Omitted (not sent as null) when not explicitly changed, so the
+        // route's "leave the current value alone" branch is what runs -
+        // sending null would ask it to fall back to a hardcoded default.
+        ...(approvalTimeoutMinutes !== undefined
+          ? { approval_timeout_minutes: approvalTimeoutMinutes }
+          : {}),
       }),
     }),
 
@@ -950,10 +957,14 @@ export interface SalesTrend {
 
 export interface Conversion {
   days: number;
+  carts_created: number;
   checkout_attempts: number;
   completed_orders: number;
   failed_checkout_attempts: number;
+  abandoned_before_checkout: number;
   checkout_success_rate: number | null;
+  cart_to_checkout_rate: number | null;
+  funnel_has_history: boolean;
   scope_note: string;
 }
 

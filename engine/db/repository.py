@@ -26,6 +26,7 @@ from .models import (
     Approval,
     Case,
     ExecutionAttempt,
+    FunnelEvent,
     MerchantPolicy,
     Outcome,
     OrderLine,
@@ -663,33 +664,72 @@ async def total_sales(connection_id: str, *, days: int = 30) -> dict:
     }
 
 
+async def record_funnel_event(
+    connection_id: str, event_type: str, cart_id: str
+) -> None:
+    """Log one real funnel-stage event. Called exactly once, from
+    `shop.py::create_cart`, at the moment a cart is actually minted - see
+    `FunnelEvent`'s own docstring for why this is safe against refresh/retry
+    duplication (the storefront only calls that route when it doesn't
+    already hold a cart id) and why it covers guests as well as signed-in
+    shoppers (unlike `ShopperCart`, which only exists for accounts).
+    """
+    async with session_scope() as db:
+        db.add(
+            FunnelEvent(
+                event_id=_id("fev"),
+                connection_id=connection_id,
+                event_type=event_type,
+                cart_id=cart_id,
+            )
+        )
+
+
 async def checkout_conversion(connection_id: str, *, days: int = 30) -> dict:
-    """The one real, already-instrumented conversion figure this engine can
-    honestly report: of the checkout attempts this engine actually recorded,
-    how many completed.
+    """The real funnel this engine can honestly report, from cart creation
+    through to a completed order.
 
-    Sourced from the same `ExecutionAttempt` ledger `total_sales` reads -
-    every checkout attempt through this engine writes a row here *before*
-    the platform is called (`idempotency.py::claim`), and is marked
-    succeeded/failed afterward, never deleted. So unlike `total_sales`
-    (which counts only the successful subset), this counts every attempt,
-    successful or declined, in the window - a real numerator/denominator
-    pair, not an inferred one.
+    Two independently-sourced, SQL-aggregated counts:
 
-    This is deliberately NOT a full top-of-funnel conversion rate (session ->
-    cart -> checkout start -> paid). Cart creation is not timestamped as a
-    distinct event anywhere in this schema (`ShopperCart` is upserted once
-    per shopper per merchant and reused forever, not one row per visit), and
-    a guest's cart is not tracked in that table at all - so "how many carts
-    were started in this window" cannot be answered honestly from existing
-    data. Reporting a fabricated version of that number would be exactly the
-    kind of invented figure CLAUDE.md's value bar exists to block. What is
-    reported here - checkout attempts and how many of them succeeded - is
-    real and SQL-aggregated, and is labelled as exactly that: a checkout
-    success rate, not a session-to-sale funnel.
+    - `carts_created`, from `FunnelEvent` (`CART_CREATED` rows) - real
+      instrumentation, written at the moment `create_cart` actually mints a
+      cart, covering guests and signed-in shoppers alike. Only carts
+      created after this table shipped are counted; an older cart has no
+      row here and cannot be reconstructed, which is why `funnel_has_history`
+      exists below rather than letting a small `carts_created` silently
+      read as "business is slow".
+    - `checkout_attempts`/`completed_orders`, from the same `ExecutionAttempt`
+      ledger `total_sales` reads - every checkout attempt through this
+      engine writes a row here *before* the platform is called
+      (`idempotency.py::claim`), marked succeeded/failed afterward, never
+      deleted. So unlike `total_sales` (successful subset only), this
+      counts every attempt, successful or declined - a real
+      numerator/denominator pair, not an inferred one.
+
+    Still deliberately NOT a "sessions/visits" funnel - this engine has no
+    page-view or store-visit event for guests at all (a guest is only ever
+    identified once they create a cart), so "how many people looked at the
+    shop" is not answerable from existing data without a different kind of
+    instrumentation than a cart-scoped event log. What's reported here is
+    exactly the two real stages this engine can instrument end to end:
+    cart -> checkout attempt -> completed order.
     """
     since = datetime.now(UTC) - timedelta(days=days)
     async with session_scope() as db:
+        cart_id_rows = await db.execute(
+            select(FunnelEvent.cart_id).where(
+                FunnelEvent.connection_id == connection_id,
+                FunnelEvent.event_type == "CART_CREATED",
+                FunnelEvent.created_at >= since,
+            )
+        )
+        window_cart_ids = [row[0] for row in cart_id_rows.all()]
+        earliest_event = await db.scalar(
+            select(func.min(FunnelEvent.created_at)).where(
+                FunnelEvent.connection_id == connection_id,
+                FunnelEvent.event_type == "CART_CREATED",
+            )
+        )
         total_attempts = await db.scalar(
             select(func.count(ExecutionAttempt.idempotency_key)).where(
                 ExecutionAttempt.connection_id == connection_id,
@@ -708,26 +748,64 @@ async def checkout_conversion(connection_id: str, *, days: int = 30) -> dict:
             )
         )
 
+        # How many of THIS window's carts ever reached a checkout attempt,
+        # at any time - not "how many checkout attempts happened in this
+        # window", which is a different, unrelated population (it includes
+        # attempts against carts created before this window, and before
+        # this instrumentation even existed). Comparing those two raw
+        # counts directly is exactly the bug this join avoids: an old shop
+        # with a long attempt history but only one freshly-instrumented
+        # cart would otherwise show a "conversion rate" over 100%.
+        #
+        # The join key is `ExecutionAttempt.case_id`, which `idempotency.py
+        # ::claim` sets to the raw cart id (truncated to 40 chars) for every
+        # CHECKOUT row - not a separate column added for this, an existing
+        # fact about how that ledger already keys itself.
+        reached_checkout = 0
+        if window_cart_ids:
+            truncated_ids = {cid[:40] for cid in window_cart_ids}
+            reached_checkout = await db.scalar(
+                select(func.count(func.distinct(ExecutionAttempt.case_id))).where(
+                    ExecutionAttempt.connection_id == connection_id,
+                    ExecutionAttempt.action_type == "CHECKOUT",
+                    ExecutionAttempt.case_id.in_(truncated_ids),
+                )
+            ) or 0
+
+    carts_created = len(window_cart_ids)
     total_attempts = total_attempts or 0
     succeeded = succeeded or 0
     failed = total_attempts - succeeded
     success_rate = (
         round(succeeded / total_attempts * 100, 1) if total_attempts else None
     )
+    # By construction reached_checkout counts distinct ids drawn from the
+    # same carts_created set, so this is never negative and the rate below
+    # is never over 100%.
+    abandoned_before_checkout = carts_created - reached_checkout
+    cart_to_checkout_rate = (
+        round(reached_checkout / carts_created * 100, 1) if carts_created else None
+    )
 
     return {
         "days": days,
+        "carts_created": carts_created,
         "checkout_attempts": total_attempts,
         "completed_orders": succeeded,
         "failed_checkout_attempts": failed,
+        "abandoned_before_checkout": abandoned_before_checkout,
         "checkout_success_rate": success_rate,
+        "cart_to_checkout_rate": cart_to_checkout_rate,
+        # False until at least one FunnelEvent row exists for this
+        # merchant - a merchant connected before this shipped sees an
+        # honest "no history" rather than a confusing 0 that reads as "no
+        # carts ever", when the truth is "not measured yet".
+        "funnel_has_history": earliest_event is not None,
         "scope_note": (
-            "Checkout-attempt-to-completion only - this engine does not "
-            "currently timestamp cart creation as a distinct event, so a "
-            "full session-to-sale funnel (visits, carts started, "
-            "abandonment before checkout) cannot be reported honestly from "
-            "existing data. This figure covers only the stage this engine "
-            "already records: an attempted payment through to its outcome."
+            "Cart-to-order only - this engine has no page-view or store-"
+            "visit event for guests, so a full sessions/visits funnel "
+            "cannot be reported honestly from existing data. Cart creation "
+            "onward is real, SQL-aggregated instrumentation."
         ),
     }
 

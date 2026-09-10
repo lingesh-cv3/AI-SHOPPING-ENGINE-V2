@@ -1294,8 +1294,14 @@ check(
 )
 check(
     "conversion carries an honest scope note rather than implying a full funnel",
-    "session-to-sale funnel" in conv.get("scope_note", ""),
+    "sessions/visits funnel" in conv.get("scope_note", ""),
     conv.get("scope_note", "")[:60],
+    "engine/db/repository.py::checkout_conversion",
+)
+check(
+    "cart-to-checkout rate is bounded, not a mismatched-population ratio over 100%",
+    conv.get("cart_to_checkout_rate") is None or 0 <= conv["cart_to_checkout_rate"] <= 100,
+    f"cart_to_checkout_rate={conv.get('cart_to_checkout_rate')}",
     "engine/db/repository.py::checkout_conversion",
 )
 
@@ -1304,6 +1310,41 @@ check(
     "conversion reports null success rate rather than a fake 0% with no attempts",
     conv_zero.get("checkout_attempts") == 0 and conv_zero.get("checkout_success_rate") is None,
     str(conv_zero)[:80],
+    "engine/db/repository.py::checkout_conversion",
+)
+
+# A real cart-creation, taken all the way to a real checkout, must move both
+# carts_created (by one) and abandoned_before_checkout must NOT move (this
+# cart reached checkout, so it should not be counted as abandoned).
+before_funnel = call("GET", f"/api/conversion/{KETTLE}?days=1")
+signed_in_for(KETTLE, "hc_funnel")
+funnel_cart = call("POST", f"/api/shop/{KETTLE}/cart")
+call(
+    "POST",
+    f"/api/shop/{KETTLE}/cart/{funnel_cart['cart_id']}/lines",
+    {
+        "product_id": "KB-COL-02",
+        "variant_id": "KB-COL-02::250g whole bean",
+        "quantity": 1,
+    },
+)
+call(
+    "POST",
+    f"/api/shop/{KETTLE}/cart/{funnel_cart['cart_id']}/checkout",
+    {"card_last4": "1111"},
+)
+after_funnel = call("GET", f"/api/conversion/{KETTLE}?days=1")
+check(
+    "a real cart creation is counted in carts_created",
+    after_funnel.get("carts_created", 0) > before_funnel.get("carts_created", 0),
+    f"{before_funnel.get('carts_created')} -> {after_funnel.get('carts_created')}",
+    "engine/api/shop.py::create_cart, engine/db/repository.py::record_funnel_event",
+)
+check(
+    "a cart taken to a successful checkout does not count as abandoned",
+    after_funnel.get("abandoned_before_checkout", 0)
+    <= before_funnel.get("abandoned_before_checkout", 0),
+    f"{before_funnel.get('abandoned_before_checkout')} -> {after_funnel.get('abandoned_before_checkout')}",
     "engine/db/repository.py::checkout_conversion",
 )
 

@@ -320,14 +320,21 @@ these first:**
       four of its own genuine, explicitly-documented gaps rather than
       faking them:
 
-      1. **No full session-to-cart-to-checkout funnel.** Only checkout-
-         attempt-to-completion is reported (real, SQL-aggregated). Cart
-         creation is not timestamped as a distinct event anywhere in this
-         schema (`ShopperCart` is upserted once per shopper per merchant
-         and reused forever; a guest's cart isn't tracked there at all),
-         so "sessions/carts started this window" cannot be answered
-         honestly without new instrumentation. Needs a deliberate schema
-         addition (an event or counter at cart-creation time), not a query.
+      **Items 1 and 4 below were closed in a later session** (see
+      Completed.md #37) - cart-creation funnel instrumentation and the
+      approval-timeout mutability/bug fix are both done and verified.
+      Items 2 and 3 remain open, unchanged:
+
+      1. ~~No full session-to-cart-to-checkout funnel~~ **Partially
+         closed** (#37): cart creation is now genuinely instrumented
+         (`FunnelEvent`, logged at `shop.py::create_cart` for every
+         visitor, guest or signed-in), giving a real cart → checkout
+         attempt → completed order funnel with bounded, correct rates.
+         Still open: a true sessions/visits stage. This engine has no
+         page-view event for a guest before they create a cart, so "how
+         many people looked at the shop" remains unanswerable - that would
+         need a materially different kind of instrumentation (a page-view
+         or visit-start event), not an extension of the cart-creation log.
       2. **No real Returns capability.** Neither adapter declares a
          return/refund method, and `ISSUE_REFUND` is structurally
          unreachable (declared as a type, never in the model's proposable-
@@ -338,11 +345,19 @@ these first:**
          segments, or cohorts exist in the schema - Customer & Shopping
          Insights is intentionally narrow (unmet demand + friction only)
          rather than fabricating any of those.
-      4. **`approval_timeout_minutes` is still not merchant-configurable.**
-         `PUT /api/policy/{id}` silently re-saves the existing value
-         regardless of what is sent. Now shown read-only in Settings with
-         an explicit note, rather than a control that would do nothing -
-         making it changeable is separate, unstarted backend work.
+      4. ~~`approval_timeout_minutes` is still not merchant-configurable~~
+         **Closed** (#37): the route had a real bug (any unrelated policy
+         save silently reset the timeout to a hardcoded default) as well
+         as being unexposed - both fixed, and Settings now has a genuine
+         Save control, verified in a real browser to survive an unrelated
+         settings change.
+
+      **Also still open:** full page-by-page visual polish beyond Overview
+      and Orders & Conversion. Sales & Revenue, Product Performance,
+      Customer Insights, AI Commerce, Recovery, Holdout, Business Insights,
+      Platform and Settings still use the plainer card/list treatment from
+      #36 rather than the KPI-card/status-badge/summary-card system built
+      for Overview in #37 - a real UI-consistency gap, not a functional one.
 
 - [ ] AI Store Diagnosis
 - [ ] Recovery Opportunity Radar

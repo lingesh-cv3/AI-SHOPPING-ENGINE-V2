@@ -193,6 +193,19 @@ export function MerchantConsole() {
       await console_api.savePolicy(policy.mode, [], policy.blocked, percent),
     );
   }
+
+  async function onApprovalTimeout(minutes: number) {
+    if (!policy) return;
+    setPolicy(
+      await console_api.savePolicy(
+        policy.mode,
+        [],
+        policy.blocked,
+        policy.holdout_percent,
+        minutes,
+      ),
+    );
+  }
   if (!signedIn) {
     return (
       <MerchantSignIn
@@ -254,6 +267,7 @@ export function MerchantConsole() {
             onMode={setMode}
             onBlock={onBlock}
             onHoldout={onHoldout}
+            onApprovalTimeout={onApprovalTimeout}
           />
         )}
         {section === "copilot" && <MerchantCopilot />}

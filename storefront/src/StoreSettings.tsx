@@ -9,11 +9,11 @@ import { Gates } from "./Gates";
  * rather than an allowlist: the risk gate already decides safety, and a
  * second tick-box gate on top of it added no safety, only friction.
  *
- * `approval_timeout_minutes` is shown read-only. It is not currently
- * mutable through `PUT /api/policy/{id}` - `set_policy` re-saves the
- * existing value unchanged regardless of what is sent - so no save control
- * is offered for it here. Showing a control that silently does nothing
- * would be a fake control, which this console's own quality bar forbids.
+ * `approval_timeout_minutes` is now genuinely mutable, 1-120 minutes. It
+ * used to be shown read-only because `PUT /api/policy/{id}` silently reset
+ * it to a hardcoded default on every unrelated save (fixed in
+ * `engine/api/routes.py::set_policy` - see that function's own docstring
+ * for the bug this was) - a real fix, not just an unlocked control.
  */
 export function StoreSettings({
   policy,
@@ -23,6 +23,7 @@ export function StoreSettings({
   onMode,
   onBlock,
   onHoldout,
+  onApprovalTimeout,
 }: {
   policy: Policy;
   actions: ActionInfo[];
@@ -31,6 +32,7 @@ export function StoreSettings({
   onMode: (mode: string) => void;
   onBlock: (actionType: string, blocked: boolean) => void;
   onHoldout: (percent: number) => void;
+  onApprovalTimeout: (minutes: number) => void;
 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -40,6 +42,7 @@ export function StoreSettings({
         onMode={onMode}
         onBlock={onBlock}
         onHoldout={onHoldout}
+        onApprovalTimeout={onApprovalTimeout}
       />
 
       {test && (
@@ -63,12 +66,14 @@ function PolicyEditor({
   onMode,
   onBlock,
   onHoldout,
+  onApprovalTimeout,
 }: {
   policy: Policy;
   actions: ActionInfo[];
   onMode: (mode: string) => void;
   onBlock: (actionType: string, blocked: boolean) => void;
   onHoldout: (percent: number) => void;
+  onApprovalTimeout: (minutes: number) => void;
 }) {
   const [holdoutDraft, setHoldoutDraft] = useState(
     String(policy.holdout_percent),
@@ -81,6 +86,18 @@ function PolicyEditor({
   if (policy.holdout_percent !== seenHoldoutPercent) {
     setSeenHoldoutPercent(policy.holdout_percent);
     setHoldoutDraft(String(policy.holdout_percent));
+  }
+
+  const [timeoutDraft, setTimeoutDraft] = useState(
+    String(policy.approval_timeout_minutes),
+  );
+  const [savingTimeout, setSavingTimeout] = useState(false);
+  const [seenTimeout, setSeenTimeout] = useState(
+    policy.approval_timeout_minutes,
+  );
+  if (policy.approval_timeout_minutes !== seenTimeout) {
+    setSeenTimeout(policy.approval_timeout_minutes);
+    setTimeoutDraft(String(policy.approval_timeout_minutes));
   }
 
   const modes: Array<[string, string, string]> = [
@@ -203,9 +220,46 @@ function PolicyEditor({
           Approval timeout
         </div>
         <p className="note" style={{ marginTop: 0 }}>
-          {policy.approval_timeout_minutes} minutes before an undecided
-          approval expires and the shopper is told. Not changeable from
-          here yet - this figure is read-only in this console today.
+          How long a pending approval waits before it expires and the
+          shopper is told nobody got to it in time. A shopper staring at a
+          declined card will not wait long - this cannot be set above two
+          hours.
+        </p>
+        <div className="field">
+          <input
+            type="number"
+            min={1}
+            max={120}
+            value={timeoutDraft}
+            onChange={(e) => setTimeoutDraft(e.target.value)}
+            aria-label="Approval timeout minutes"
+            style={{ maxWidth: 90 }}
+          />
+          <button
+            disabled={
+              savingTimeout ||
+              timeoutDraft === String(policy.approval_timeout_minutes) ||
+              Number.isNaN(Number(timeoutDraft))
+            }
+            onClick={async () => {
+              setSavingTimeout(true);
+              try {
+                const clamped = Math.max(
+                  1,
+                  Math.min(120, Math.round(Number(timeoutDraft) || 15)),
+                );
+                onApprovalTimeout(clamped);
+              } finally {
+                setSavingTimeout(false);
+              }
+            }}
+          >
+            {savingTimeout ? "Saving…" : "Save"}
+          </button>
+        </div>
+        <p className="note">
+          {policy.approval_timeout_minutes} minute
+          {policy.approval_timeout_minutes === 1 ? "" : "s"} today.
         </p>
       </div>
     </section>

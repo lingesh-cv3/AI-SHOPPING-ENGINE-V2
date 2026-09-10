@@ -364,6 +364,12 @@ async def create_cart(
     # double charge that ledger exists to prevent.
     await db.idempotency.forget_payment(connection_id, cart.cart_id)
 
+    # The one real funnel-entry event this engine can log honestly - see
+    # `FunnelEvent`'s own docstring for why this covers guests too and why
+    # a refresh does not double-count (the storefront only reaches this
+    # route when it doesn't already hold a cart id).
+    await db.record_funnel_event(connection_id, "CART_CREATED", cart.cart_id)
+
     return _cart(cart)
 
 

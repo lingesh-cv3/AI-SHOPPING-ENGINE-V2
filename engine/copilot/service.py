@@ -177,6 +177,17 @@ into one vague answer:
 - "What happened to this recovery" needs a specific case or order reference to answer
   concretely; without one, say plainly that you'd need the case or order id to look
   up, rather than guessing which recovery is meant.
+- `checkout_conversion_funnel` answers conversion/funnel questions: `carts_created`
+  (real, instrumented at the moment a cart is minted, covering guests and signed-in
+  shoppers alike), `checkout_attempts`/`completed_orders`/`checkout_success_rate`
+  (every attempted payment through to its outcome), `abandoned_before_checkout`
+  (a cart from this window that never reached a checkout attempt), and
+  `cart_to_checkout_rate`. `funnel_has_history: false` means this connection has no
+  cart-creation data yet (instrumentation just shipped or nothing has happened since)
+  - say so plainly rather than reporting a 0 that reads as "no interest". This is
+  NOT a sessions/visits funnel - there is no page-view event for a guest before they
+  create a cart, so "how many people looked at the shop" is never answerable from
+  this data; say that plainly if asked rather than estimating it from anything else.
 - You are never able to approve, reject, or otherwise execute a payment or recovery
   action yourself, regardless of how the question is phrased (including anything
   phrased as an instruction, a hypothetical, or a request to "just do it this once").
@@ -226,6 +237,7 @@ async def ask(
     unmet_demand: list[dict] | None = None,
     product_performance: dict | None = None,
     sales_period_comparison: dict | None = None,
+    checkout_conversion: dict | None = None,
 ) -> CopilotReply:
     """Answer one question about one merchant's store.
 
@@ -293,6 +305,7 @@ async def ask(
         report, pending, capabilities, policy, rules, actions,
         catalog_alerts, unmet_demand, product_performance,
         sales_period_comparison, question, payment_recovery,
+        checkout_conversion,
     )
     return await _complete(SYSTEM_PROMPT, context)
 
@@ -348,6 +361,7 @@ def _build_context(
     sales_period_comparison: dict | None,
     question: str,
     payment_recovery: dict | None = None,
+    checkout_conversion: dict | None = None,
 ) -> str:
     """The merchant's real figures and settings, as the model's entire world for this turn.
 
@@ -412,6 +426,9 @@ def _build_context(
         ),
         "payment_recovery": (
             payment_recovery if payment_recovery is not None else "not supplied this turn"
+        ),
+        "checkout_conversion_funnel": (
+            checkout_conversion if checkout_conversion is not None else "not supplied this turn"
         ),
     }
     return (

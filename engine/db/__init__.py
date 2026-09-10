@@ -15,6 +15,7 @@ from .models import (
     Base,
     Case,
     ExecutionAttempt,
+    FunnelEvent,
     MerchantPolicy,
     Outcome,
     OrderLine,
@@ -40,6 +41,7 @@ from .repository import (
     pending_approvals,
     product_performance,
     record_case,
+    record_funnel_event,
     record_outcome,
     record_sent_mail,
     resolve_unresolved_payment_cases_for_cart,
@@ -107,4 +109,6 @@ __all__ = [
     "product_performance",
     "sales_period_comparison",
     "checkout_conversion",
+    "FunnelEvent",
+    "record_funnel_event",
 ]

@@ -26,12 +26,23 @@ class ConnectionSummary(BaseModel):
 
 
 class PolicyUpdate(BaseModel):
-    """A change to a connection's risk policy, from the console."""
+    """A change to a connection's risk policy, from the console.
+
+    `approval_timeout_minutes` is optional and left `None` by every existing
+    caller that doesn't mean to touch it (switching automation mode,
+    blocking an action, changing holdout) - the route reads the connection's
+    *current* value in that case rather than silently resetting it to the
+    field's own default. That silent-reset was a real bug this type used to
+    cause: constructing a fresh `RiskPolicy` on every save without this
+    field meant every unrelated setting change reset the timeout back to 15
+    minutes, regardless of what a merchant had actually configured.
+    """
 
     mode: AutomationMode
     auto_allowed: list[ActionType] = Field(default_factory=list)
     blocked: list[ActionType] = Field(default_factory=list)
     holdout_percent: int = Field(default=0, ge=0, le=100)
+    approval_timeout_minutes: int | None = Field(default=None, ge=1, le=120)
 
 
 class RejectionView(BaseModel):

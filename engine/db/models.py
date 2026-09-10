@@ -553,6 +553,49 @@ class ShopperCart(Base):
     )
 
 
+class FunnelEvent(Base):
+    """One real funnel-stage event, logged as it happens - not reconstructed
+    after the fact from a table that was never meant to answer this.
+
+    Exists to answer "how many carts were started this window" honestly,
+    which nothing in this schema could answer before: `ShopperCart` is
+    upserted once per shopper per merchant and reused forever, and a
+    guest's cart is not tracked there at all (guests use the cookie-keyed
+    `ResourceOwner` table instead). This logs the moment `create_cart`
+    actually mints a new cart, for every visitor - guest or signed-in -
+    so the count reflects real funnel entry regardless of account status.
+
+    Written once per real cart-creation call, from `shop.py::create_cart`
+    only. The storefront caches a cart id client-side and only calls that
+    route when it does not already have one (the same mechanism that makes
+    "cart persists across reload" already work), so a refresh does not
+    produce a second event for the same visit - this table inherits that
+    guarantee rather than re-implementing it.
+
+    Only one event type exists today: `CART_CREATED`. A "checkout started"
+    stage, distinct from an actual payment attempt, was deliberately not
+    added - this engine has no separate "viewed checkout" step before a
+    card is submitted (the `POST .../checkout` call *is* the payment
+    attempt, already recorded as an `ExecutionAttempt` row), so a distinct
+    "checkout started" event would be measuring something that does not
+    happen here.
+
+    Historical boundary: only carts created after this table shipped are
+    counted. An older cart has no row here and cannot be reconstructed -
+    stated in the funnel figures themselves, not hidden.
+    """
+
+    __tablename__ = "funnel_events"
+
+    event_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+    event_type: Mapped[str] = mapped_column(String(24), index=True)
+    cart_id: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, index=True
+    )
+
+
 class ResourceOwner(Base):
     """Who a cart, a conversation or an order belongs to.
 

@@ -1721,3 +1721,138 @@ below; `npm run build` now exits 0.)
     support changing it - Settings shows it read-only rather than a fake
     control). All four are recorded in `PROGRESS.md` rather than implied
     finished by this entry's existence.
+
+37. **Closed two real gaps left open by #36: the funnel and the settings bug.**
+
+    **The Orders & Conversion funnel now has a real cart-creation stage.**
+    Previously the only honest figure was checkout-attempt-to-completion,
+    because nothing timestamped cart creation as a distinct event. New
+    `FunnelEvent` model (`engine/db/models.py`) logs `CART_CREATED` at the
+    exact moment `shop.py::create_cart` mints a cart - for guests and
+    signed-in shoppers alike, unlike `ShopperCart` which only exists for
+    accounts. `db.checkout_conversion` now returns `carts_created`,
+    `abandoned_before_checkout`, and `cart_to_checkout_rate` alongside the
+    existing checkout-attempt figures, plus `funnel_has_history` (false
+    until at least one `FunnelEvent` row exists, so a merchant connected
+    before this shipped sees an honest "not measured yet" rather than a
+    confusing zero).
+
+    **A real correctness bug found and fixed during this session's own
+    verification, not shipped and left for someone else to find:** the
+    first implementation compared `carts_created` (only counting carts
+    created in the reporting window, which is small right after this
+    instrumentation ships) against `checkout_attempts` (which includes
+    every historical attempt, going back to before `FunnelEvent` existed) -
+    two populations that don't correspond, producing a `cart_to_checkout_rate`
+    of 38200% in manual testing. Fixed by joining on cart identity instead
+    of comparing raw counts: `ExecutionAttempt.case_id` already stores the
+    raw cart id for every `CHECKOUT` row (`idempotency.py::claim` sets
+    `case_id=cart_id[:40]` - an existing fact about how that ledger keys
+    itself, not a new column), so `checkout_conversion` now counts how many
+    of *this window's own created carts* reached a checkout attempt at any
+    time, which is bounded 0-100% by construction. Verified live: before
+    the fix, a real API call returned `cart_to_checkout_rate: 38200.0`;
+    after, the identical scenario returned `0.0` (a cart that hadn't
+    reached checkout) and then correctly moved once a real end-to-end
+    cart-to-checkout was driven through the actual routes. Two new
+    `healthcheck.py` checks pin this: one asserting the rate is always in
+    [0, 100], and a real before/after check that creates a cart, adds a
+    line, checks out with a working card, and confirms `carts_created`
+    moved and `abandoned_before_checkout` did not (a cart that reached
+    checkout must not read as abandoned).
+
+    Still explicitly not a sessions/visits funnel: this engine has no
+    page-view event for a guest before they create a cart, so "how many
+    people looked at the shop" remains unanswerable from existing data -
+    stated in the `scope_note` field itself and in the Copilot's system
+    prompt, not just a code comment.
+
+    `OrdersConversion.tsx` rebuilt around this as a real funnel
+    visualization (cart created → checkout attempted → completed, with the
+    conversion rate at each arrow), rather than the flat figure row it was
+    in #36.
+
+    **`approval_timeout_minutes` was not just unexposed in the UI - it was
+    silently broken.** Audited before touching anything: `PUT
+    /api/policy/{id}` constructed a fresh `RiskPolicy` on every save without
+    ever reading the connection's current timeout, so *any* unrelated
+    settings change (switching automation mode, blocking one action) reset
+    a merchant's configured timeout back to the field's hardcoded default
+    of 15 minutes. This was a real, live bug affecting the one existing
+    caller of that route, not merely a missing feature. Fixed in
+    `engine/api/routes.py::set_policy`: `PolicyUpdate` gained an optional
+    `approval_timeout_minutes` (bounded 1-120); when the request doesn't
+    specify one, the route now reads `engine.policies.get(connection_id)`'s
+    *current* value instead of falling back to `RiskPolicy`'s default.
+    `StoreSettings.tsx`'s previously-read-only display is now a real
+    input+Save control, matching the existing holdout-percent pattern.
+    Verified live in a real browser: saved 22 minutes, confirmed it
+    persisted, then switched the automation mode (an unrelated save) and
+    confirmed the timeout stayed at 22 rather than silently reverting to
+    15 - the exact bug this session fixed, reproduced and then confirmed
+    fixed in one browser session before being reset back to 15 to leave
+    the demo in its normal state.
+
+    **Overview rebuilt into a real dashboard**, not a sparse report: a KPI
+    row (total sales, completed orders, checkout success rate, AOV, each
+    with a period-over-period comparison where defensible), a Business
+    Health grid (six areas - Sales & Revenue, Orders & Conversion,
+    Inventory & Catalog, Payments & Checkout, AI/Recovery, Returns - each
+    computed client-side from the exact same fetched objects the dashboard
+    already holds, so a status can never disagree with the section it
+    summarizes; statuses are Healthy/Attention/Unavailable/Unsupported,
+    never "Healthy" for a connection with no data), a top-products table,
+    a needs-attention feed, summary cards, and an evidence-tagged
+    opportunities list, all deep-linking into the relevant section. New
+    `.kpi-card`/`.health-card`/`.status-badge`/`.summary-card`/
+    `.opportunity-card`/`.funnel` CSS added to `styles.css`, reusing the
+    existing token palette (`--surface`, `--line`, `--ok`, `--friction`,
+    `--accent`) rather than introducing a second visual language.
+
+    Verified live in a real browser for both merchants: Kettle's Overview
+    showed a populated KPI row, six business-health cards with real status
+    badges, and a working funnel view (77 carts created, 71.4% reached
+    checkout, 47% of those succeeded, 22 abandoned, all internally
+    consistent); Northfield's health grid correctly showed differentiated
+    statuses per area (Healthy for sales/orders, Attention for inventory/
+    payments with real counts, Unsupported for AI/Recovery and Returns) -
+    not a uniform "everything's fine" or a uniform "everything's broken",
+    which would each have been evidence of a fake/hardcoded status. Zero
+    JavaScript console errors on either merchant.
+
+    **The Merchant Copilot was extended to the new funnel data**, not left
+    behind: `checkout_conversion` is now passed into `copilot.ask()` and
+    `_build_context` (`engine/api/routes.py::merchant_copilot`,
+    `engine/copilot/service.py`), with a new `SYSTEM_PROMPT` section
+    explaining `carts_created`/`abandoned_before_checkout`/
+    `cart_to_checkout_rate`/`funnel_has_history` and repeating the
+    sessions-vs-visits limitation. Verified live: asked "How many carts
+    were abandoned before checkout?" against Kettle, got "There were 22
+    carts abandoned before checkout" - checked directly against
+    `/api/conversion`'s own `abandoned_before_checkout: 22` for the same
+    window, an exact match, confirming the Copilot and the UI cannot
+    disagree because they read the identical repository call.
+
+    **Verification.** `healthcheck.py`: 114 passed / 2 model-throttle-flaky
+    failures on the run that added the new checks (confirmed non-
+    deterministic across repeated runs, per the established pattern - a
+    later run against `main` showed 112 passed / 1 flaky failure, a
+    different check each time, never a Merchant-surface or funnel check).
+    `fuzz.py`: every invariant held. `auditroutes.py`: held at every probe.
+    `npm run build`/`npm run lint`: clean (same 7 pre-existing lint
+    errors, none new). Live Playwright walkthrough covering Overview's new
+    dashboard elements, the funnel view, and the approval-timeout fix, for
+    both merchants, zero JS errors throughout.
+
+    **What remains genuinely unfinished, not faked:** a true sessions/
+    visits stage (would need a page-view event this engine has never had,
+    for guests specifically - a materially bigger instrumentation project
+    than a cart-creation log line); real Returns capability (still no
+    adapter implements it); deep customer-level analytics (still no
+    schema for CLV/cohorts/segments/repeat-purchase); and full
+    page-by-page visual polish beyond Overview and Orders & Conversion -
+    Sales & Revenue, Product Performance, Customer Insights, AI Commerce,
+    Recovery, Holdout, Business Insights, Platform and Settings all still
+    use the plainer card/list treatment from #36 rather than the fuller
+    KPI-card/status-badge system built for Overview in this session. All
+    recorded in `PROGRESS.md`.

@@ -272,12 +272,27 @@ async def set_policy(
     Financial actions in auto_allowed are accepted without complaint. That is
     deliberate - the gate overrides them anyway, and refusing here would hide the
     override rather than demonstrate it.
+
+    `approval_timeout_minutes` is read from the *current* policy when the
+    request doesn't specify one, rather than left to `RiskPolicy`'s own
+    default - constructing a fresh policy on every save previously reset a
+    merchant's configured timeout back to 15 minutes on every unrelated
+    change (switching mode, blocking an action). Fixed here, not by
+    changing the default itself, since the default is still correct for a
+    connection that has never set one.
     """
+    current = engine.policies.get(connection_id)
+    timeout = (
+        update.approval_timeout_minutes
+        if update.approval_timeout_minutes is not None
+        else current.approval_timeout_minutes
+    )
     policy = RiskPolicy(
         connection_id=connection_id,
         mode=update.mode,
         auto_allowed=set(update.auto_allowed),
         blocked=set(update.blocked),
+        approval_timeout_minutes=timeout,
         holdout_percent=update.holdout_percent,
     )
     engine.policies.set(policy)
@@ -931,6 +946,7 @@ async def merchant_copilot(
         unmet_demand=await db.unmet_demand(connection_id, days=30),
         product_performance=await db.product_performance(connection_id, days=30),
         sales_period_comparison=await db.sales_period_comparison(connection_id, days=7),
+        checkout_conversion=await db.checkout_conversion(connection_id, days=30),
     )
     return CopilotAnswer(answer=reply.answer, used_model=reply.used_model)
 
