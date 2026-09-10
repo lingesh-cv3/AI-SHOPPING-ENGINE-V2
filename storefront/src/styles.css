@@ -2899,6 +2899,39 @@ select.card-picker {
   gap: 12px;
 }
 
+.copilot-action-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--friction-soft);
+  border: 1px solid var(--friction);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.copilot-action-banner-btn {
+  font-family: var(--body);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--friction);
+  background: var(--paper);
+  border: 1px solid var(--friction);
+  border-radius: 999px;
+  padding: 6px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.copilot-action-banner-btn:hover {
+  background: var(--friction);
+  color: var(--paper);
+}
+
 .copilot-empty p {
   margin: 0 0 14px;
   font-size: 13px;

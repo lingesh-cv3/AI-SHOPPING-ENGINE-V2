@@ -3,6 +3,7 @@ import { MerchantSignIn } from "./MerchantSignIn";
 import { useCallback, useEffect, useState } from "react";
 import {
   console_api,
+  RECOVERY_ACTIONS,
   type ActionInfo,
   type Capabilities,
   type Pipeline,
@@ -37,7 +38,45 @@ const SUGGESTED_QUESTIONS = [
   "What can this platform do?",
 ];
 
-function MerchantCopilot() {
+function MerchantCopilot({
+  onNavigate,
+}: {
+  onNavigate: (section: string) => void;
+}) {
+  // A merchant asking the copilot "what's out of stock" was told, with
+  // nothing to do about it from that screen - the read-only-twin gap
+  // CLAUDE.md names against the value bar (PROGRESS.md, "CV3 Merchant
+  // Copilot"). The payments/recovery slice of that gap already has a real
+  // action attached elsewhere (PaymentsPanel, approve/reject through the
+  // risk gate) - what was still missing was the copilot ever pointing a
+  // merchant there. Reads the identical queue PaymentsPanel itself reads,
+  // filtered by the identical RECOVERY_ACTIONS set, so this can never
+  // disagree with what that panel shows or claim a count PaymentsPanel
+  // itself would not act on.
+  const [pendingRecoveryCount, setPendingRecoveryCount] = useState<
+    number | null
+  >(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    console_api
+      .queue()
+      .then((q) => {
+        if (cancelled) return;
+        const count = q.approvals.filter(
+          (a) => a.financial && RECOVERY_ACTIONS.has(a.action_type),
+        ).length;
+        setPendingRecoveryCount(count);
+      })
+      .catch(() => {
+        // No count is honest here - "0" would claim nothing is waiting,
+        // which is a different and stronger claim than "couldn't check".
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <Copilot
       eyebrow="Merchant copilot"
@@ -46,6 +85,18 @@ function MerchantCopilot() {
       suggestions={SUGGESTED_QUESTIONS}
       placeholder="Ask a question about your store…"
       ask={console_api.askCopilot}
+      actionBanner={
+        pendingRecoveryCount
+          ? {
+              text:
+                pendingRecoveryCount === 1
+                  ? "1 payment recovery case is waiting for your approval."
+                  : `${pendingRecoveryCount} payment recovery cases are waiting for your approval.`,
+              buttonLabel: "Review in Payments & Checkout",
+              onClick: () => onNavigate("payments"),
+            }
+          : null
+      }
     />
   );
 }
@@ -270,7 +321,9 @@ export function MerchantConsole() {
             onApprovalTimeout={onApprovalTimeout}
           />
         )}
-        {section === "copilot" && <MerchantCopilot />}
+        {section === "copilot" && (
+          <MerchantCopilot onNavigate={(s) => setSection(s as SectionId)} />
+        )}
       </main>
     </div>
   );

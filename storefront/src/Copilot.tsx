@@ -99,6 +99,13 @@ function renderInline(text: string): ReactNode {
   );
 }
 
+interface ActionBanner {
+  /** The real, current fact - e.g. "3 payment recovery cases are waiting". */
+  text: string;
+  buttonLabel: string;
+  onClick: () => void;
+}
+
 interface CopilotProps {
   /** Shown above the title, e.g. "Merchant copilot" / "Operations copilot". */
   eyebrow: string;
@@ -109,6 +116,16 @@ interface CopilotProps {
   suggestions: string[];
   placeholder: string;
   ask: (question: string) => Promise<CopilotAnswer>;
+  /** A real, currently-true fact with one reachable action attached, shown
+   *  above the transcript regardless of what's been asked - e.g. pending
+   *  payment-recovery cases, deep-linking straight to the panel that can
+   *  act on them. `null`/omitted when there is nothing actionable right
+   *  now, or nothing has been checked yet - never a placeholder. This is
+   *  the one place this otherwise read-only panel can point somewhere
+   *  that actually does something, closing the "answers a problem, then
+   *  leaves the merchant to go and act on it elsewhere" gap for whichever
+   *  problem types already have a real action wired up. */
+  actionBanner?: ActionBanner | null;
 }
 
 /**
@@ -128,6 +145,7 @@ export function Copilot({
   suggestions,
   placeholder,
   ask: askApi,
+  actionBanner,
 }: CopilotProps) {
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<CopilotTurn[]>([]);
@@ -169,6 +187,18 @@ export function Copilot({
         <span className="copilot-badge">Read-only</span>
       </div>
       <div className="panel-body copilot-body">
+        {actionBanner && (
+          <div className="copilot-action-banner">
+            <span>{actionBanner.text}</span>
+            <button
+              type="button"
+              className="copilot-action-banner-btn"
+              onClick={actionBanner.onClick}
+            >
+              {actionBanner.buttonLabel} →
+            </button>
+          </div>
+        )}
         {turns.length === 0 ? (
           <div className="copilot-empty">
             <p>{intro}</p>

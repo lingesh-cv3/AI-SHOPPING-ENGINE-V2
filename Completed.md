@@ -1903,3 +1903,78 @@ below; `npm run build` now exits 0.)
     own output independently notes it cannot see this class of bug, since
     it lives in the browser rather than anything a server-side check
     reaches).
+
+39. **Closed the payments/recovery slice of the Merchant Copilot's
+    "read-only twin" gap: the copilot now points a merchant at the one
+    real action it already has, instead of only ever answering.** Full
+    audit first (subagent, read-only, against CLAUDE.md/PROGRESS.md/
+    Completed.md and the actual code): confirmed Overview, Sales &
+    Revenue, Payments & Checkout, Holdout, Platform/Capabilities and
+    Settings are genuinely complete and connected end to end; confirmed
+    Returns is correctly MISSING rather than faked (no adapter declares
+    refund capability); confirmed Orders & Conversion's visitor/session
+    stage is correctly BLOCKED BY DATA (no page-view event exists for a
+    guest before cart creation - re-verified directly, not just accepted
+    from docs); and independently re-verified `_scan_catalog`'s real-
+    volume pagination fix by reading it, not trusting PROGRESS.md's own
+    claim. The one concrete, tractable gap the audit converged on: the
+    Merchant Copilot's catalogue/inventory/unmet-demand answers still have
+    no attached action (correctly BLOCKED - no adapter can write
+    inventory, so no fake action was invented for that), but the
+    payments/recovery answers *do* have a real, already-built action
+    sitting one section away (`PaymentsPanel.tsx`, #35) that the Copilot
+    never once pointed a merchant toward.
+
+    Deliberately did not build this from a fresh feature-spec on a whim -
+    CLAUDE.md requires a spec before any roadmap build, and the payments
+    slice already had every deterministic ingredient needed sitting in
+    `copilot/service.py::ask()` (`recovery_pending`, computed before the
+    model is ever called - real, not model-guessed). So the count is
+    fetched independently by `MerchantConsole.tsx`'s `MerchantCopilot()`
+    from the exact same `console_api.queue()` call and `RECOVERY_ACTIONS`
+    filter `PaymentsPanel.tsx` itself uses (moved to `api.ts` as a shared
+    export so the two can never drift apart), shown as a banner above the
+    transcript - present before any question is asked, not gated on the
+    model happening to mention it. Clicking it calls the same `onNavigate`
+    pattern `Overview.tsx` and `Recovery.tsx` already use to jump straight
+    to Payments & Checkout.
+
+    Verified live end to end with a real Playwright script against the
+    running Kettle merchant (not assumed from the diff): with zero pending
+    recovery cases, no banner renders (checked directly - a stale case
+    from an earlier check had already expired, confirmed by the API
+    itself returning `[]`, proving the banner tracks live state rather
+    than a cached figure). A fresh declined payment (test card `0002`) was
+    driven through checkout to create one real `OFFER_ALTERNATE_PAYMENT`
+    approval; the banner then read "1 payment recovery case is waiting for
+    your approval," and clicking "Review in Payments & Checkout" set
+    `aria-current` on that exact nav item. The case was then approved
+    through the real route (`/api/approvals/conn_kettle/{id}`, the same
+    one `PaymentsPanel` posts to) - recovered 1831.00 INR on order
+    KB-0088, `executed.succeeded: true` - and a re-run of the same script
+    confirmed the banner disappeared again, matching the now-empty queue.
+    Northfield checked separately: zero pending approvals (it doesn't
+    support recovery), so the banner correctly never appears there either
+    - platform-capability difference respected without a single
+    Northfield-specific line of code, because both merchants read the
+    identical deterministic filter.
+
+    Caught and fixed one lint regression before committing: exporting
+    `RECOVERY_ACTIONS` from `PaymentsPanel.tsx` (a component file) tripped
+    `react-refresh/only-export-components`. Moved the constant to `api.ts`
+    instead, which both `PaymentsPanel.tsx` and `MerchantConsole.tsx` now
+    import - `npm run lint` back to the same 7 pre-existing errors as
+    `main`, `npm run build` (tsc) clean. `auditroutes.py` clean
+    (unaffected by construction - no backend file in this diff).
+
+    **Not claimed as closing the Merchant Copilot roadmap item.** The
+    catalogue/inventory/unmet-demand slice of the same gap remains open -
+    there is no real action this engine can attach to "restock this SKU"
+    without fabricating a capability no adapter has, and CLAUDE.md
+    explicitly forbids inventing one. `PROGRESS.md` updated to record the
+    payments slice as closed and the catalogue/inventory slice as the
+    remaining, harder half - needing either a genuinely new merchant-side
+    capability (a to-do/reminder queue, not a fake platform write) or a
+    deliberate decision that "point at the Inventory panel" is itself
+    enough of an action, which is a product call CLAUDE.md's own process
+    says belongs in a `feature-spec` pass, not a freehand build.

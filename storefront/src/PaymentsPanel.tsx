@@ -1,17 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   console_api,
+  RECOVERY_ACTIONS,
   type Capabilities,
   type Decision,
   type MerchantReport as Report,
   type QueueItem,
 } from "./api";
-
-const RECOVERY_ACTIONS = new Set([
-  "RETRY_PAYMENT",
-  "OFFER_ALTERNATE_PAYMENT",
-  "SPLIT_PAYMENT",
-]);
 
 export function PaymentsPanel() {
   const [report, setReport] = useState<Report | null>(null);

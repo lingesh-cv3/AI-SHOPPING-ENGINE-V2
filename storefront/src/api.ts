@@ -424,6 +424,17 @@ export interface QueueItem {
   query: string | null;
 }
 
+/** The subset of ActionType that is both financial and a payment-recovery
+ *  attempt - the same distinction PaymentsPanel filters the approval queue
+ *  by, shared here rather than duplicated so a second reader (the Merchant
+ *  Copilot's actionable-count banner) can never drift from what that panel
+ *  itself treats as a recovery case. */
+export const RECOVERY_ACTIONS = new Set([
+  "RETRY_PAYMENT",
+  "OFFER_ALTERNATE_PAYMENT",
+  "SPLIT_PAYMENT",
+]);
+
 export interface Executed {
   succeeded: boolean;
   summary: string;

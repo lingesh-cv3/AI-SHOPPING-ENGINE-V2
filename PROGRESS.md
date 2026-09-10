@@ -244,13 +244,33 @@ these first:**
       session, see Completed.md #35): a merchant can now approve or reject a
       pending payment-recovery case directly from a new Payments &
       Checkout panel in their own console, through the existing risk gate -
-      previously only CV3's own operations queue could act on one. This
-      does not close the remaining gap for other problem types the Copilot
-      surfaces (catalogue alerts, unmet demand, inventory) - those still
-      have no action attached and the Merchant Copilot item stays reopened
-      here for that reason.
+      previously only CV3's own operations queue could act on one.
 
-      **`_catalog_alerts`'s real-volume bug is now fixed** (this session):
+      **The Copilot itself now points at that action** (Completed.md #39):
+      it previously never told a merchant the Payments & Checkout action
+      existed at all - a merchant had to already know to go look. It now
+      shows a real, live "N payment recovery cases are waiting" banner
+      (present before any question is asked, reading the identical queue
+      and filter `PaymentsPanel.tsx` itself uses, so the two can never
+      disagree) that jumps straight to that panel. Verified live: appears
+      only when a real case is pending, disappears once it's resolved,
+      and never appears on Northfield (no recovery capability there).
+
+      This still does not close the remaining gap for other problem types
+      the Copilot surfaces (catalogue alerts, unmet demand, inventory) -
+      those still have no action attached and the Merchant Copilot item
+      stays reopened for that reason, and it is the harder half: there is
+      no real platform capability to attach to "restock this SKU" without
+      inventing one no adapter has (CLAUDE.md explicitly forbids that), so
+      closing it needs either a genuinely new merchant-side capability (a
+      to-do/reminder queue, not a fake platform write) or a deliberate
+      product decision that "point at the Inventory panel" counts as
+      enough of an action - a call for a `feature-spec` pass, not a
+      freehand build.
+
+      **`_catalog_alerts`'s real-volume bug was fixed in an earlier
+      session** (independently re-verified by reading `_scan_catalog`
+      directly this session, not re-taken on trust):
       it no longer reads a fixed `search_products("", limit=100)` page and
       presents it as the whole catalog. `engine/api/routes.py::_scan_catalog`
       pages the adapter with real `offset`/`limit` pagination (added as an
