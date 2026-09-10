@@ -897,7 +897,85 @@ export const console_api = {
 
   catalogAlerts: () =>
     merchantCall<CatalogAlerts>(`/api/catalog/${getConnection()}`),
+
+  productPerformance: (days = 30, limit = 10) =>
+    merchantCall<ProductPerformance>(
+      `/api/products/${getConnection()}?days=${days}&limit=${limit}`,
+    ),
+
+  salesTrend: (days = 7) =>
+    merchantCall<SalesTrend>(`/api/sales-trend/${getConnection()}?days=${days}`),
+
+  conversion: (days = 30) =>
+    merchantCall<Conversion>(`/api/conversion/${getConnection()}?days=${days}`),
+
+  unmetDemand: (days = 30, limit = 10) =>
+    merchantCall<UnmetDemand>(
+      `/api/unmet-demand/${getConnection()}?days=${days}&limit=${limit}`,
+    ),
+
+  cases: (limit = 30) =>
+    merchantCall<{ cases: CaseRow[] }>(`/api/cases/${getConnection()}?limit=${limit}`),
 };
+
+interface ProductLine {
+  product_id: string;
+  product_name: string;
+  quantity: number;
+  revenue: string;
+  order_count: number;
+}
+
+export interface ProductPerformance {
+  days: number;
+  has_data: boolean;
+  distinct_products_sold: number;
+  top_by_quantity: ProductLine[];
+  top_by_revenue: ProductLine[];
+  lowest_performers: ProductLine[];
+  lowest_performers_note: string;
+  historical_note: string;
+}
+
+export interface SalesTrend {
+  days: number;
+  recent_order_count: number;
+  recent_total: string;
+  prior_order_count: number;
+  prior_total: string;
+  change_amount: string;
+  change_pct: string | null;
+  note: string | null;
+}
+
+export interface Conversion {
+  days: number;
+  checkout_attempts: number;
+  completed_orders: number;
+  failed_checkout_attempts: number;
+  checkout_success_rate: number | null;
+  scope_note: string;
+}
+
+export interface UnmetDemand {
+  days: number;
+  queries: { query: string; times_asked: number }[];
+}
+
+export interface CaseRow {
+  case_id: string;
+  friction_type: string | null;
+  state: string;
+  query: string | null;
+  order_id: string | null;
+  diagnosis: string | null;
+  used_model: boolean;
+  selected_action: string | null;
+  risk_outcome: string | null;
+  risk_rule: string | null;
+  financial: boolean;
+  created_at: string;
+}
 
 /** Out-of-stock/low-stock products across the whole catalog - the same data
  *  the Inventory panel and the merchant copilot's "what's out of stock"

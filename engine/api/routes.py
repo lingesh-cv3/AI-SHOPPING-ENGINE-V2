@@ -676,6 +676,64 @@ async def merchant_report(
     return report
 
 
+@app.get(f"{API}/products/{{connection_id}}")
+async def product_performance_route(
+    connection_id: str,
+    days: int = 30,
+    limit: int = 10,
+    _=Depends(merchant_scoped()),
+) -> dict:
+    """The full product-performance breakdown - quantity ranking, revenue
+    ranking and lowest performers - that `/report` only ever embedded a
+    5-item quantity slice of. The Copilot already reads this same repository
+    function directly; this route is what lets the Product Performance UI
+    surface do the same, so the two can never disagree.
+    """
+    _adapter(connection_id)
+    return await db.product_performance(connection_id, days=days, limit=limit)
+
+
+@app.get(f"{API}/sales-trend/{{connection_id}}")
+async def sales_trend_route(
+    connection_id: str, days: int = 7, _=Depends(merchant_scoped())
+) -> dict:
+    """Recent-window-versus-prior-window revenue comparison, for the Sales &
+    Revenue surface's trend figure. Reuses `total_sales`'s exact source, so
+    the trend cannot disagree with the report's own headline total.
+    """
+    _adapter(connection_id)
+    return await db.sales_period_comparison(connection_id, days=days)
+
+
+@app.get(f"{API}/conversion/{{connection_id}}")
+async def conversion_route(
+    connection_id: str, days: int = 30, _=Depends(merchant_scoped())
+) -> dict:
+    """Checkout-attempt-to-completion, the one funnel stage this engine
+    actually instruments end to end. See `db.checkout_conversion`'s own
+    docstring for why this is not, and does not claim to be, a full
+    session-to-sale funnel.
+    """
+    _adapter(connection_id)
+    return await db.checkout_conversion(connection_id, days=days)
+
+
+@app.get(f"{API}/unmet-demand/{{connection_id}}")
+async def unmet_demand_route(
+    connection_id: str,
+    days: int = 30,
+    limit: int = 10,
+    _=Depends(merchant_scoped()),
+) -> dict:
+    """What shoppers searched for and did not find, ranked by how often. The
+    Copilot already answers from this; this route lets the Customer &
+    Shopping Insights UI surface show the same list.
+    """
+    _adapter(connection_id)
+    demand = await db.unmet_demand(connection_id, days=days, limit=limit)
+    return {"days": days, "queries": demand}
+
+
 #: Safety cap on how many pages `_scan_catalog` will walk for one request.
 #: 200/page * 250 pages = 50,000 products - comfortably past a 40,000-SKU
 #: real-client catalogue (CLAUDE.md's own real-volume worked example) while

@@ -89,6 +89,16 @@ the same merchant-scoped report and approval data the Merchant Copilot uses,
 that lets a merchant approve or reject a pending payment recovery directly
 from their own console for the first time - previously only reachable from
 CV3's own operations queue. See Completed Work, #35.
+**The Merchant console, as one product** - `/merchant` restructured from a
+long scroll of cards into a left-nav console across six groups (Merchant,
+Business, Commerce, AI & Outcomes, Store, AI): a real Overview, Sales &
+Revenue with a period trend, Product Performance (quantity/revenue/lowest),
+Orders & Conversion (the one funnel stage this engine genuinely
+instruments), Customer & Shopping Insights, Returns (honestly unsupported,
+not faked), AI Commerce, Recovery, Holdout / Experiment with sample-size
+caveats, and a deterministic Business Insights synthesis - each section
+naming its own real-client limitations rather than hiding them. See
+Completed Work, #36.
 
 ### For CV3
 
@@ -1534,3 +1544,180 @@ below; `npm run build` now exits 0.)
     `recovery_opportunities` and `revenue_recovered` in `merchant_report()`;
     (6) see the four real-client conditions above, all four now exercised
     rather than assumed.
+
+36. **Rebuilt the Merchant tab as one coherent product** - restructured
+    `MerchantConsole.tsx` from a single long scroll of unrelated cards into
+    a left-nav console (`.merchant-shell`/`.merchant-nav`) with six groups
+    matching a real information architecture (Merchant/Business/Commerce/
+    AI & Outcomes/Store/AI), and built or exposed the sections that
+    previously had no real surface, closing several genuine gaps the audit
+    for this session found rather than assumed:
+
+    - **Overview** (new `Overview.tsx`): total sales, completed orders,
+      shoppers helped, checkout success rate, and a "needs your attention"
+      list (waiting-on-you cases, pending recoveries, out-of-stock counts,
+      an unreachable-platform warning) that deep-links into the section
+      with the detail. Every figure is read from the same routes the
+      dedicated sections use, so this page cannot show a number a section
+      it links to would contradict.
+    - **Sales & Revenue** (`MerchantReport.tsx`, trimmed and refocused):
+      total sales, AOV, completed orders, revenue recovered, and now a real
+      period-over-period trend (`GET /api/sales-trend`, wrapping the
+      already-built-but-unexposed `db.sales_period_comparison`). Top
+      products, the holdout comparison, recent activity and friction
+      breakdown moved to their own sections below rather than staying
+      duplicated here.
+    - **Orders & Conversion** (new `OrdersConversion.tsx` + new
+      `db.checkout_conversion` + `GET /api/conversion`): the one funnel
+      stage this engine can report honestly. Every checkout attempt -
+      successful or declined - already writes an `ExecutionAttempt` row
+      before the platform is called (`idempotency.py::claim`), so
+      "checkout attempts vs. completed orders" is a real, SQL-aggregated,
+      already-instrumented pair, not a new fabricated metric. Explicitly
+      NOT a full session-to-sale funnel: `ShopperCart` is upserted once per
+      shopper per merchant and reused forever (not one row per visit), and
+      a guest's cart isn't tracked there at all, so "carts started this
+      window" cannot be answered honestly from existing data without new
+      instrumentation this session did not add. The UI and the repository
+      docstring both say this in the same words, so the limitation travels
+      with the number rather than living only in a code comment.
+    - **Product Performance** (new `ProductPerformance.tsx` + new
+      `GET /api/products`): the full `db.product_performance()` breakdown -
+      quantity ranking, revenue ranking, lowest performers - that `/report`
+      only ever embedded a 5-item quantity slice of. The Copilot already
+      read this function directly (session before this one); now the UI
+      does too, through the same call, so the two cannot disagree. Verified
+      live: switching to "By revenue" on Kettle re-ranks correctly (Burr
+      Hand Grinder leads by revenue despite Colombia Huila Washed selling
+      more units), and the Copilot asked the identical question in the same
+      session returned the identical ranking.
+    - **Customer & Shopping Insights** (new `CustomerInsights.tsx` + new
+      `GET /api/unmet-demand`): what shoppers searched for and didn't find
+      (`db.unmet_demand`, previously Copilot-only), plus the existing
+      friction breakdown. Deliberately does not invent repeat-purchase
+      tracking, CLV, or segments/cohorts - audited directly against
+      `engine/db/models.py` and confirmed no schema exists for any of
+      those, so the section says so in its own text rather than showing a
+      fabricated number.
+    - **Returns** (new `Returns.tsx`): audited before writing any UI -
+      neither adapter declares a return/refund capability, `ISSUE_REFUND`
+      exists as a type in `shared/models/action.py` but is not in the
+      model's proposable-action list (`engine/reasoning/prompts.py`) and no
+      adapter implements it, so it is structurally unreachable. This
+      section states that plainly instead of shipping a thin or fabricated
+      analytics page - the same shape `PaymentsPanel` already uses for
+      Northfield's missing recovery.
+    - **AI Commerce** (new `AICommerce.tsx`): shoppers helped, resolution
+      rate, problems solved, and recent case activity (now reading the
+      previously UI-unused `GET /api/cases` route), labelled explicitly as
+      observed outcomes, not a causal claim.
+    - **Recovery** (new `Recovery.tsx`): a read-only summary of the same
+      recovery figures `PaymentsPanel` shows, deep-linking to Payments &
+      Checkout for the actual Approve/Reject action rather than duplicating
+      those controls - one place to act, one place to disagree with.
+    - **Holdout / Experiment** (new `Holdout.tsx`, extracted from the old
+      report panel): the existing holdout comparison, now with sample sizes
+      shown explicitly and a directional-vs-real-signal caveat driven by an
+      actual `n<20` threshold rather than shown unconditionally - verified
+      live against Northfield's real data (1 holdout case, 4,971 assisted)
+      correctly triggering the "treat as directional, not proof" wording.
+      A revenue-per-holdout-group comparison is deliberately not shown:
+      `merchant_report()` does not compute one, only a resolution-rate
+      split, and showing a number nothing computes would be exactly the
+      kind of invented figure this session's own instructions warned
+      against.
+    - **Business Insights** (new `BusinessInsights.tsx`): a deterministic,
+      rule-based synthesis over data already shown elsewhere - recovery
+      opportunities outstanding, incomplete inventory scans, low checkout
+      success rate, best-seller-by-volume vs. best-seller-by-revenue
+      divergence, cases waiting on a human - each insight carries the exact
+      figure behind it and no insight fires without real evidence. No model
+      call: every rule is a threshold over a number already computed by an
+      existing route, which avoids both inventing advice and spending
+      Groq-throttled model budget on something a deterministic rule
+      answers just as well.
+    - **Platform/Capabilities** and **Settings** (`PlatformCapabilities.tsx`,
+      `StoreSettings.tsx`): extracted unchanged from the old single-page
+      layout into their own sections - same data, same logic, verified
+      identical behaviour. Settings gained one honest addition:
+      `approval_timeout_minutes` is now shown read-only, with an explicit
+      note that it is not currently changeable from the UI - audited first
+      and confirmed `PUT /api/policy/{id}` (`set_policy`,
+      `engine/api/routes.py`) re-saves the existing value unchanged
+      regardless of what is sent, so no save control is offered for a
+      setting that would silently do nothing.
+    - **Merchant Copilot**: unchanged logic, now its own top-level section
+      rather than always-on-screen. Spot-verified this session against two
+      of the newly-surfaced domains - "What should I pay attention to
+      today?" (correctly synthesized payment declines, pending recoveries,
+      unmet demand and out-of-stock products from real, live figures) and
+      "Which products generated the most revenue?" (returned the identical
+      ranking, in the identical order, as the new Product Performance UI's
+      revenue view) - not the full fifteen-phrasing checklist, since most
+      of that surface was already verified in the session that built the
+      Merchant Copilot (#32) and its later extensions.
+
+    Six new merchant-scoped routes/repository functions this session:
+    `db.checkout_conversion` + `GET /api/conversion`, `GET /api/products`
+    (wrapping the already-existing `db.product_performance`),
+    `GET /api/sales-trend` (wrapping the already-existing
+    `db.sales_period_comparison`), `GET /api/unmet-demand` (wrapping the
+    already-existing `db.unmet_demand`) - all SQL-aggregated, none pulling
+    a full table into Python, none introducing a new arbitrary limit.
+
+    **Real-client conditions, all four actually exercised, not assumed:**
+    - *Zero data*: `?days=0` against a real merchant on `/api/conversion`,
+      `/api/products` and `/api/sales-trend` all returned honest
+      zero/null/empty shapes (`checkout_success_rate: null`, `has_data:
+      false`, an explanatory `note`), never a fabricated 0%.
+    - *Real volume*: exercised against Kettle's actual data - 380 checkout
+      attempts, 1,481 recovery opportunities, 16 products scanned - not a
+      demo-scale fixture.
+    - *Unsupported capability*: Northfield's Recovery and Returns sections
+      both render their honest unsupported explanation with no action
+      control, confirmed live in a real Playwright browser session for
+      both.
+    - *Platform/API down*: not separately re-exercised for the four new
+      routes this session, because none of them call the adapter at all -
+      `checkout_conversion`, `product_performance`, `sales_period_comparison`
+      and `unmet_demand` are pure reads over this engine's own ledger
+      (`ExecutionAttempt`, `OrderLine`, `Case`), so a platform outage cannot
+      break them by construction. This is a property of the design, stated
+      here rather than left to be assumed: it does not need a platform-down
+      test the way `InventoryPanel`'s catalog scan or `PaymentsPanel`'s
+      approve action do (both already covered in earlier entries), because
+      neither of those adapter calls is on this session's new code paths.
+
+    **Verification.** `healthcheck.py` gained "Product performance",
+    "Orders & conversion" and "Merchant surfaces are tenant-scoped" sections
+    (7 new checks, all model-free) - 109 passed / 4 model-throttle-flaky
+    failures on the run used for this entry (the four failures rotate
+    between runs and are all model-proposal-selection checks unrelated to
+    this diff - confirmed by running twice and seeing a different failing
+    set each time, none of them ever a Merchant-surface check).
+    `auditroutes.py` extended with the four new routes (refused without a
+    key, accepted with it) and held at every probe. `fuzz.py` held every
+    invariant across 20 sequences, run twice (once against the worktree,
+    once against `main` after the code was copied back). `npm run build`
+    clean both times. Live browser walkthrough (Playwright, not just the
+    build guard) drove all fifteen nav sections for both Kettle and
+    Northfield with zero JavaScript console errors, and separately dumped
+    the honesty-critical sections' actual rendered text (Recovery, Returns,
+    Payments & Checkout, Holdout for Northfield; Overview, Business
+    Insights, and the revenue-view toggle for Kettle) to confirm real
+    content rather than just "the panel didn't crash". One real bug found
+    and fixed by this walkthrough: `Overview.tsx`'s pending-recovery label
+    pluralized as "recoveryies" - fixed to "recovery"/"recoveries" and
+    reconfirmed by rebuild.
+
+    **What this session did NOT build, stated rather than left ambiguous:**
+    a full session-to-cart-to-checkout funnel (needs new cart-creation
+    instrumentation, not a new query - see Orders & Conversion above),
+    return/refund capability itself (no adapter supports it - Returns
+    states this rather than faking it), deep customer-level analytics -
+    CLV, cohorts, segments, repeat-purchase tracking (no schema exists -
+    Customer Insights states this rather than faking it), and
+    `approval_timeout_minutes` mutability (backend does not currently
+    support changing it - Settings shows it read-only rather than a fake
+    control). All four are recorded in `PROGRESS.md` rather than implied
+    finished by this entry's existence.

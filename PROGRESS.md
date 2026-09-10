@@ -307,6 +307,43 @@ these first:**
       status above - it is a quality fix to the existing read-only
       answering half, not the still-missing act-from-the-answer capability.
 
+      **The Merchant console was rebuilt as one coherent product** in a
+      separate session (see Completed.md #36): left-nav across six groups,
+      Overview, Sales & Revenue with a real trend, Product Performance
+      fully exposed, Orders & Conversion (checkout-attempt success rate,
+      genuinely instrumented), Customer & Shopping Insights, an honestly-
+      unsupported Returns section, AI Commerce, Recovery, Holdout with
+      sample-size caveats, and a deterministic Business Insights synthesis.
+      This is a real, tested, browser-verified restructuring - but it does
+      NOT close this item's own remaining gap (catalogue/inventory/unmet-
+      demand Copilot answers still have no attached action) and introduces
+      four of its own genuine, explicitly-documented gaps rather than
+      faking them:
+
+      1. **No full session-to-cart-to-checkout funnel.** Only checkout-
+         attempt-to-completion is reported (real, SQL-aggregated). Cart
+         creation is not timestamped as a distinct event anywhere in this
+         schema (`ShopperCart` is upserted once per shopper per merchant
+         and reused forever; a guest's cart isn't tracked there at all),
+         so "sessions/carts started this window" cannot be answered
+         honestly without new instrumentation. Needs a deliberate schema
+         addition (an event or counter at cart-creation time), not a query.
+      2. **No real Returns capability.** Neither adapter declares a
+         return/refund method, and `ISSUE_REFUND` is structurally
+         unreachable (declared as a type, never in the model's proposable-
+         action list, no adapter implements it). The Returns section says
+         this plainly; building real return handling is its own feature,
+         not attempted here.
+      3. **No deep customer analytics.** No repeat-purchase index, CLV,
+         segments, or cohorts exist in the schema - Customer & Shopping
+         Insights is intentionally narrow (unmet demand + friction only)
+         rather than fabricating any of those.
+      4. **`approval_timeout_minutes` is still not merchant-configurable.**
+         `PUT /api/policy/{id}` silently re-saves the existing value
+         regardless of what is sent. Now shown read-only in Settings with
+         an explicit note, rather than a control that would do nothing -
+         making it changeable is separate, unstarted backend work.
+
 - [ ] AI Store Diagnosis
 - [ ] Recovery Opportunity Radar
 - [ ] Catalog Intelligence

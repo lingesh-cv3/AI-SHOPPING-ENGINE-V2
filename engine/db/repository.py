@@ -663,6 +663,75 @@ async def total_sales(connection_id: str, *, days: int = 30) -> dict:
     }
 
 
+async def checkout_conversion(connection_id: str, *, days: int = 30) -> dict:
+    """The one real, already-instrumented conversion figure this engine can
+    honestly report: of the checkout attempts this engine actually recorded,
+    how many completed.
+
+    Sourced from the same `ExecutionAttempt` ledger `total_sales` reads -
+    every checkout attempt through this engine writes a row here *before*
+    the platform is called (`idempotency.py::claim`), and is marked
+    succeeded/failed afterward, never deleted. So unlike `total_sales`
+    (which counts only the successful subset), this counts every attempt,
+    successful or declined, in the window - a real numerator/denominator
+    pair, not an inferred one.
+
+    This is deliberately NOT a full top-of-funnel conversion rate (session ->
+    cart -> checkout start -> paid). Cart creation is not timestamped as a
+    distinct event anywhere in this schema (`ShopperCart` is upserted once
+    per shopper per merchant and reused forever, not one row per visit), and
+    a guest's cart is not tracked in that table at all - so "how many carts
+    were started in this window" cannot be answered honestly from existing
+    data. Reporting a fabricated version of that number would be exactly the
+    kind of invented figure CLAUDE.md's value bar exists to block. What is
+    reported here - checkout attempts and how many of them succeeded - is
+    real and SQL-aggregated, and is labelled as exactly that: a checkout
+    success rate, not a session-to-sale funnel.
+    """
+    since = datetime.now(UTC) - timedelta(days=days)
+    async with session_scope() as db:
+        total_attempts = await db.scalar(
+            select(func.count(ExecutionAttempt.idempotency_key)).where(
+                ExecutionAttempt.connection_id == connection_id,
+                ExecutionAttempt.action_type == "CHECKOUT",
+                ExecutionAttempt.state == "DONE",
+                ExecutionAttempt.completed_at >= since,
+            )
+        )
+        succeeded = await db.scalar(
+            select(func.count(ExecutionAttempt.idempotency_key)).where(
+                ExecutionAttempt.connection_id == connection_id,
+                ExecutionAttempt.action_type == "CHECKOUT",
+                ExecutionAttempt.state == "DONE",
+                ExecutionAttempt.succeeded.is_(True),
+                ExecutionAttempt.completed_at >= since,
+            )
+        )
+
+    total_attempts = total_attempts or 0
+    succeeded = succeeded or 0
+    failed = total_attempts - succeeded
+    success_rate = (
+        round(succeeded / total_attempts * 100, 1) if total_attempts else None
+    )
+
+    return {
+        "days": days,
+        "checkout_attempts": total_attempts,
+        "completed_orders": succeeded,
+        "failed_checkout_attempts": failed,
+        "checkout_success_rate": success_rate,
+        "scope_note": (
+            "Checkout-attempt-to-completion only - this engine does not "
+            "currently timestamp cart creation as a distinct event, so a "
+            "full session-to-sale funnel (visits, carts started, "
+            "abandonment before checkout) cannot be reported honestly from "
+            "existing data. This figure covers only the stage this engine "
+            "already records: an attempted payment through to its outcome."
+        ),
+    }
+
+
 async def product_performance(
     connection_id: str, *, days: int = 30, limit: int = 10
 ) -> dict:

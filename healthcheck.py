@@ -1255,6 +1255,79 @@ check(
 
 # ---------------------------------------------------------------------------
 
+section("Product performance")
+
+perf = call("GET", f"/api/products/{KETTLE}?days=30&limit=5")
+check(
+    "product performance returns quantity and revenue rankings",
+    "top_by_quantity" in perf and "top_by_revenue" in perf,
+    f"has_data={perf.get('has_data')}",
+    "engine/db/repository.py::product_performance",
+)
+if perf.get("has_data"):
+    check(
+        "lowest performers is a real, separate ranking",
+        "lowest_performers" in perf and isinstance(perf["lowest_performers"], list),
+        f"{len(perf.get('lowest_performers') or [])} entries",
+        "engine/db/repository.py::product_performance",
+    )
+
+perf_zero = call("GET", f"/api/products/{KETTLE}?days=0")
+check(
+    "product performance is honest about zero data, not a fabricated ranking",
+    perf_zero.get("has_data") is False and perf_zero.get("top_by_quantity") == [],
+    str(perf_zero)[:80],
+    "engine/db/repository.py::product_performance",
+)
+
+# ---------------------------------------------------------------------------
+
+section("Orders & conversion")
+
+conv = call("GET", f"/api/conversion/{KETTLE}?days=30")
+check(
+    "checkout conversion counts every attempt, not only successes",
+    conv.get("checkout_attempts", 0) >= conv.get("completed_orders", 0)
+    and conv.get("checkout_attempts", 0) > 0,
+    f"{conv.get('completed_orders')} of {conv.get('checkout_attempts')}",
+    "engine/db/repository.py::checkout_conversion",
+)
+check(
+    "conversion carries an honest scope note rather than implying a full funnel",
+    "session-to-sale funnel" in conv.get("scope_note", ""),
+    conv.get("scope_note", "")[:60],
+    "engine/db/repository.py::checkout_conversion",
+)
+
+conv_zero = call("GET", f"/api/conversion/{KETTLE}?days=0")
+check(
+    "conversion reports null success rate rather than a fake 0% with no attempts",
+    conv_zero.get("checkout_attempts") == 0 and conv_zero.get("checkout_success_rate") is None,
+    str(conv_zero)[:80],
+    "engine/db/repository.py::checkout_conversion",
+)
+
+# ---------------------------------------------------------------------------
+
+section("Merchant surfaces are tenant-scoped")
+
+for path in (
+    f"/api/products/{KETTLE}",
+    f"/api/conversion/{KETTLE}",
+    f"/api/sales-trend/{KETTLE}",
+    f"/api/unmet-demand/{KETTLE}",
+):
+    resp = call("GET", path, key=NO_KEY)
+    ok = resp.get("_status") == 401
+    check(
+        f"{path} refuses a request with no key",
+        ok,
+        f"status={resp.get('_status')}" if ok else f"ACCEPTED: {str(resp)[:60]}",
+        "engine/api/auth.py::merchant_scoped",
+    )
+
+# ---------------------------------------------------------------------------
+
 section("Cart, through the chat")
 
 if model_on:

@@ -1,26 +1,29 @@
 import { useEffect, useState } from "react";
-import { console_api, type MerchantReport as Report } from "./api";
+import { console_api, type MerchantReport as Report, type SalesTrend } from "./api";
 
 /**
- * What the engine did for this shop.
+ * Sales & Revenue.
  *
- * The console had settings and no reporting, so a merchant could configure the
- * assistant and never learn whether it had helped anyone. We were recording revenue
- * recovered and not showing it to the person whose revenue it was.
- *
- * Written for a shop owner rather than an operator. The headline number is money,
- * because that is the one a merchant checks against their own books. Case counts
- * and throughput belong on the operations console, which is a different page for a
- * different person.
+ * Scoped deliberately narrow now that this console has dedicated sections
+ * for the things that used to live here too: product-level detail moved to
+ * Product Performance, the holdout comparison to Holdout / Experiment,
+ * recent case activity to AI Commerce, and search/friction detail to
+ * Customer & Shopping Insights. What stays here is the money: total sales,
+ * completed orders, AOV, recovered revenue, and the period-over-period
+ * trend - all sourced from the same `ExecutionAttempt` ledger, so none of
+ * these figures can disagree with each other.
  */
 export function MerchantReport() {
   const [report, setReport] = useState<Report | null>(null);
+  const [trend, setTrend] = useState<SalesTrend | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    console_api
-      .report()
-      .then(setReport)
+    Promise.all([console_api.report(), console_api.salesTrend(7).catch(() => null)])
+      .then(([r, t]) => {
+        setReport(r);
+        setTrend(t);
+      })
       .catch((e) =>
         setError(e instanceof Error ? e.message : "Could not load your figures."),
       );
@@ -33,7 +36,7 @@ export function MerchantReport() {
     return (
       <section className="panel">
         <div className="panel-head">
-          <span className="eyebrow">Your figures</span>
+          <span className="eyebrow">Sales &amp; revenue</span>
         </div>
         <div className="panel-body">
           <p className="empty">{error}</p>
@@ -46,7 +49,7 @@ export function MerchantReport() {
     return (
       <section className="panel">
         <div className="panel-head">
-          <span className="eyebrow">Your figures</span>
+          <span className="eyebrow">Sales &amp; revenue</span>
         </div>
         <div className="panel-body">
           <p className="empty">Loading...</p>
@@ -57,20 +60,15 @@ export function MerchantReport() {
 
   // Total sales is a straight count of completed orders, independent of whether
   // any of them ever hit friction - a shop with zero cases opened can still have
-  // real completed sales, so this must never be hidden behind the "nothing
-  // happened yet" branch below, which is about assistant activity, not revenue.
+  // real completed sales, so this must never be hidden behind any assistant-activity
+  // branch.
   const noSalesYet = report.completed_order_count === 0;
-  const nothingYet = report.shoppers_helped === 0;
 
   return (
     <section className="panel">
       <div className="panel-head">
-        <span className="eyebrow">Last {report.days} days</span>
-        {report.median_resolution_ms !== null && (
-          <span className="eyebrow">
-            typically {formatMs(report.median_resolution_ms)}
-          </span>
-        )}
+        <span className="eyebrow">Sales &amp; revenue</span>
+        <span className="eyebrow">last {report.days} days</span>
       </div>
 
       <div className="panel-body">
@@ -94,181 +92,48 @@ export function MerchantReport() {
           </p>
         </div>
 
-        {nothingYet ? (
-          <p className="empty">
-            Nothing yet. As shoppers run into problems, what the assistant did
-            about them shows up here.
-          </p>
-        ) : (
-          <>
-            {report.supports_payment_recovery && (
-              <div className="headline-figure">
-                <div className="eyebrow">Sales recovered</div>
-                <div className="bignum num">
-                  {report.revenue_recovered} {report.currency}
-                </div>
-                <p className="note" style={{ margin: "4px 0 0" }}>
-                  Money that would otherwise have been lost to a failed payment.
-                </p>
-              </div>
-            )}
-
-            <div className="figures">
-              <Figure value={report.shoppers_helped} label="Shoppers helped" />
-              <Figure
-                value={pct(report.resolution_rate)}
-                label="Resolved"
-                title={
-                  report.resolution_rate === null
-                    ? "No problems opened in this window yet."
-                    : "Of the problems opened, the share that reached a resolution."
-                }
-              />
-              <Figure value={report.problems_solved} label="Problems solved" />
-              <Figure
-                value={report.handled_without_you}
-                label="Without your time"
-              />
-              <Figure
-                value={report.waiting_for_you}
-                label="Waiting on you"
-                warn={report.waiting_for_you > 0}
-              />
+        {trend && (trend.recent_order_count > 0 || trend.prior_order_count > 0) && (
+          <div className="headline-figure" style={{ marginTop: 14 }}>
+            <div className="eyebrow">
+              Last {trend.days} days vs. the {trend.days} before
             </div>
-
-            {report.holdout && (
-              <>
-                <div className="gate-label" style={{ margin: "22px 0 8px" }}>
-                  With the assistant vs. without
-                </div>
-                <p className="note" style={{ marginTop: 0 }}>
-                  A slice of your shoppers get no help at all, so this line is
-                  the difference the assistant actually made - not a number
-                  that includes sales that would have happened anyway.
-                </p>
-                <div className="figures">
-                  <Figure
-                    value={pct(report.holdout.assisted_resolution_rate)}
-                    label="Resolved, assisted"
-                    title={`${report.holdout.assisted_resolved} of ${report.holdout.assisted_cases}`}
-                  />
-                  <Figure
-                    value={pct(report.holdout.holdout_resolution_rate)}
-                    label="Resolved, holdout"
-                    title={`${report.holdout.holdout_resolved} of ${report.holdout.holdout_cases} - no assistance given`}
-                  />
-                </div>
-              </>
-            )}
-
-            {report.top_products.length > 0 && (
-              <>
-                <div className="gate-label" style={{ margin: "22px 0 8px" }}>
-                  Top products
-                </div>
-                <p className="note" style={{ marginTop: 0 }}>
-                  {report.product_data_has_history
-                    ? "By quantity sold in this window."
-                    : "By quantity sold - product-level data is only tracked from " +
-                      "when this started, so older orders are not included."}
-                </p>
-                {report.top_products.map((p) => (
-                  <div key={p.product_id} className="frictionrow">
-                    <span>{p.product_name}</span>
-                    <span className="num">
-                      {p.quantity} sold ({p.revenue} {report.total_sales_currency})
-                    </span>
-                  </div>
-                ))}
-              </>
-            )}
-
-            {report.friction.length > 0 && (
-              <>
-                <div className="gate-label" style={{ margin: "22px 0 8px" }}>
-                  What shoppers ran into
-                </div>
-                {report.friction.map((f) => (
-                  <div key={f.type} className="frictionrow">
-                    <span>{f.type.replace(/_/g, " ").toLowerCase()}</span>
-                    <span className="num">{f.count}</span>
-                  </div>
-                ))}
-              </>
-            )}
-
-            <div className="gate-label" style={{ margin: "22px 0 8px" }}>
-              Recently
+            <div className="bignum num">
+              {trend.recent_total} {report.total_sales_currency}
+              {trend.change_pct !== null && (
+                <span
+                  className={
+                    Number(trend.change_amount) >= 0 ? "trend up" : "trend down"
+                  }
+                  style={{ marginLeft: 10, fontSize: "0.5em" }}
+                >
+                  {Number(trend.change_amount) >= 0 ? "+" : ""}
+                  {trend.change_pct}%
+                </span>
+              )}
             </div>
-            {report.recent.map((c) => (
-              <div key={c.case_id} className="recentrow">
-                <div className="recent-head">
-                  <span className="eyebrow">
-                    {c.friction_type?.replace(/_/g, " ") ?? "question"}
-                  </span>
-                  <span className="eyebrow">{when(c.created_at)}</span>
-                </div>
-                {c.diagnosis && <p className="recent-diag">{c.diagnosis}</p>}
-                {c.shopper_reply && (
-                  <p className="recent-said">
-                    Told them: {trim(c.shopper_reply)}
-                  </p>
-                )}
-              </div>
-            ))}
-          </>
+            <p className="note" style={{ margin: "4px 0 0" }}>
+              {trend.prior_order_count > 0
+                ? `versus ${trend.prior_total} ${report.total_sales_currency} in the prior period`
+                : "no completed sales in the prior period to compare against"}
+            </p>
+          </div>
+        )}
+
+        {report.supports_payment_recovery && (
+          <div className="headline-figure" style={{ marginTop: 14 }}>
+            <div className="eyebrow">Sales recovered</div>
+            <div className="bignum num">
+              {report.revenue_recovered} {report.currency}
+            </div>
+            <p className="note" style={{ margin: "4px 0 0" }}>
+              Money that would otherwise have been lost to a failed payment -
+              {" "}{report.recovery_count} of {report.recovery_opportunities}{" "}
+              recovery opportunities completed. Full detail in AI &amp;
+              Outcomes &gt; Recovery.
+            </p>
+          </div>
         )}
       </div>
     </section>
   );
-}
-
-function Figure({
-  value,
-  label,
-  warn,
-  title,
-}: {
-  value: number;
-  label: string;
-  warn?: boolean;
-  title?: string;
-}) {
-  return (
-    <div title={title}>
-      <div className={warn && value > 0 ? "figure num warn" : "figure num"}>
-        {value}
-      </div>
-      <div className="eyebrow">{label}</div>
-    </div>
-  );
-}
-
-/** A percentage figure, shown as an integer. "0.0" reads as zero and "100.0"
- *  as perfect, neither of which is worth the characters. */
-function pct(rate: number | null): number {
-  if (rate === null) return 0;
-  return Math.round(rate);
-}
-
-/** Milliseconds are an engineering unit. A merchant wants "under a second". */
-function formatMs(ms: number): string {
-  if (ms < 1000) return "under a second";
-  if (ms < 60000) return Math.round(ms / 1000) + " seconds";
-  return Math.round(ms / 60000) + " minutes";
-}
-
-function when(iso: string): string {
-  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return mins + "m ago";
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return hours + "h ago";
-  return Math.round(hours / 24) + "d ago";
-}
-
-/** The assistant's replies run to a couple of sentences. One is enough here. */
-function trim(text: string): string {
-  const first = text.split("\n")[0];
-  return first.length > 110 ? first.slice(0, 110) + "..." : first;
 }

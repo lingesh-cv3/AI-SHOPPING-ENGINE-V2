@@ -3112,5 +3112,144 @@ select.card-picker {
 
 .copilot-ask:disabled {
   opacity: 0.45;
+}
+
+/* ---- merchant console shell / navigation ---- */
+
+.merchant-shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: var(--gap);
+  align-items: start;
+}
+
+@media (max-width: 780px) {
+  .merchant-shell {
+    grid-template-columns: 1fr;
+  }
+}
+
+.merchant-nav {
+  position: sticky;
+  top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.merchant-nav-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.merchant-nav-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: 6px 10px 4px;
+}
+
+.merchant-nav-item {
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.merchant-nav-item:hover {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.merchant-nav-item[aria-current="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.merchant-content {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+/* ---- overview / cross-links ---- */
+
+.attention-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px dashed var(--line);
+  background: transparent;
+  padding: 10px 4px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.attention-row:last-child {
+  border-bottom: 0;
+}
+
+.attention-row:hover {
+  background: var(--paper);
+}
+
+.attention-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.figure-btn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.navlink {
+  display: inline-block;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 12px;
+  padding: 7px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+
+.navlink:hover {
+  background: var(--accent-soft);
+}
+
+.trend {
+  font-weight: 700;
+}
+
+.trend.up {
+  color: var(--ok);
+}
+
+.trend.down {
+  color: var(--friction);
+}
+
+.copilot-ask:disabled {
   cursor: default;
 }

@@ -23,6 +23,7 @@ from .models import (
     SessionHoldout,
 )
 from .repository import (
+    checkout_conversion,
     decide_approval,
     decided_across,
     expire_approvals,
@@ -105,4 +106,5 @@ __all__ = [
     "OrderLine",
     "product_performance",
     "sales_period_comparison",
+    "checkout_conversion",
 ]
