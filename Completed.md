@@ -2092,3 +2092,92 @@ below; `npm run build` now exits 0.)
     and match the existing pattern elsewhere in this file, but a live
     empty-merchant walkthrough was not performed this session). All
     recorded in `PROGRESS.md`.
+
+41. **Corrected Overview's layout to match the planned Merchant dashboard's
+    actual information hierarchy, after #40's first pass was rejected as
+    reading like "many bordered boxes stacked vertically" rather than one
+    coherent product.** Same data, same components reused - a pure layout/
+    density/proportion correction, no new backend work.
+
+    Restructured into the two-column hero the reference actually shows:
+    a left column stacking the KPI row above a Revenue Trend + Business
+    Health row, and a right column holding the Merchant Copilot as one
+    tall panel spanning the full height of both rows combined - not
+    squeezed into the KPI grid as #40 had it. KPI row forced to a real
+    4-across grid (`repeat(4, 1fr)`, not `auto-fit`) so it can never wrap
+    regardless of the Copilot column's width. Real bug found and fixed
+    during this session's own verification: KPI values were overflowing
+    their cards ("164666.8 INR" bleeding past the border) at the new
+    narrower width - fixed by giving the currency code its own smaller
+    line inside the value (`164666.80` / `INR`) rather than shrinking the
+    number into illegibility or truncating it with an ellipsis (rejected -
+    truncating a real figure is its own honesty problem, just a visual one
+    instead of a data one). A second wrap bug found the same way (Northfield's
+    "8888.11 INR" breaking mid-word into "8888.11" / "NR") was fixed by
+    making the currency unit `white-space: nowrap` inside a wrapping flex
+    container, so the two tokens wrap as whole units, never mid-word.
+
+    Product-intelligence row changed from equal thirds to `1.6fr 1fr 1fr`
+    so Top Performing Products (a real revenue/orders table) gets the
+    width its data actually needs, matching the reference's proportions
+    rather than an arbitrary equal split.
+
+    Opportunities rebuilt from stacked full-width highlighted text rows
+    into an actual card grid (`opportunity-grid`/`opportunity-card`) -
+    bordered boxes, each with a title, real evidence line, and its own
+    "View X →" button wired to `onNavigate`, rather than the whole row
+    being one giant click target with no visible action affordance. A
+    fourth real opportunity was added from data already fetched but not
+    previously surfaced there (`demand.queries`, the same unmet-demand
+    signal the attention feed already uses) - not new data, just not
+    wasted.
+
+    Commerce Health's six summary tiles reduced to five, matching the
+    reference's named set (Inventory, Payments, Returns, AI & Commerce
+    Outcomes, Holdout) - the separate "Recovery" tile was folded into "AI
+    & Commerce Outcomes" (`"N helped · M recovered"`) rather than kept as
+    a seventh, redundant figure the reference doesn't show separately.
+
+    Added the header block the reference's Overview actually has and
+    #40 omitted: a small "CV3 · MERCHANT" wordmark, the merchant's real
+    display name (fetched from the existing public `/api/connections`
+    list - the same source the shopper-facing header already reads, not a
+    second invented source) rather than the technical platform id, a
+    static subtitle line, and a merchant-identity chip (initials + name)
+    beside the date-range picker - built from real merchant data, not a
+    decorative account-switcher, since no profile-switching capability
+    exists to make one real.
+
+    **Verified live**, not just built, with a real Playwright pass against
+    both running merchants after every layout change, iterating on actual
+    rendered screenshots rather than code review alone - exactly the
+    working method this correction was itself triggered by skipping.
+    Confirmed both merchants: zero JS console errors, correct per-merchant
+    theming preserved, correct capability differences (Northfield's AI/
+    Recovery correctly `UNSUPPORTED`, no recovery opportunity card, no
+    recovery figure folded into its AI-outcomes tile), no overflow or
+    mid-word wrapping anywhere in the KPI row at 1600px width.
+
+    **Real-transaction verification**, end to end: recorded Kettle's
+    figures before (`173 orders`, `164666.80 INR`, AOV `2494.95`), drove a
+    real guest→signup→checkout purchase through the actual running system
+    (2× `KB-COL-02`, `2950.00 INR`), confirmed the report API updated
+    correctly (`174 orders`, `167616.80 INR` - exactly `+2950.00`, AOV
+    recalculated to `2501.74`), then confirmed the same three figures on
+    the actual rendered Overview page after a fresh load matched the API
+    response exactly, not approximately.
+
+    **Verification.** `npm run build` (tsc) clean, `npm run lint` back to
+    the same 7 pre-existing errors as `main` (0 new - this diff touches no
+    component that previously had zero errors). `auditroutes.py` clean.
+    `healthcheck.py` 111/113 passed, 2 model-wording-flaky failures (the
+    same class seen on every run this session, unrelated to a pure CSS/
+    layout diff that touches no backend file). `fuzz.py` clean (every
+    invariant held).
+
+    **What this does not change**: no new data, no new API, no new
+    backend logic - `daily_revenue_series`, `merchant_report`,
+    `checkout_conversion`, `product_performance`, `catalogAlerts`,
+    `capabilities`, and the Copilot's own data all remain exactly as #40
+    left them. This entry is a correction to how that same real data is
+    arranged and sized, nothing more.

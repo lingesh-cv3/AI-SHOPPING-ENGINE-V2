@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import {
+  api,
   console_api,
+  getConnection,
   type Capabilities,
   type CatalogAlerts,
+  type Connection,
   type Conversion,
   type MerchantReport as Report,
   type ProductPerformance as Performance,
@@ -59,7 +62,27 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
   const [demand, setDemand] = useState<UnmetDemand | null>(null);
   const [pendingRecovery, setPendingRecovery] = useState<number>(0);
   const [caps, setCaps] = useState<Capabilities | null>(null);
+  const [merchantName, setMerchantName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // The merchant's real display name ("Kettle & Bloom Coffee"), not the
+  // technical platform id `caps.platform` gives ("kettle-graphql") - from
+  // the same public connections list the shopper-facing header already
+  // reads, not a second, invented source of the merchant's name.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .connections()
+      .then((list: Connection[]) => {
+        if (cancelled) return;
+        const mine = list.find((c) => c.connection_id === getConnection());
+        setMerchantName(mine?.merchant_name ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -223,14 +246,15 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
     }
   }
 
-  const opportunities: { title: string; evidence: string; section: string }[] = [];
+  const opportunities: { title: string; evidence: string; section: string; action: string }[] = [];
   if (report.supports_payment_recovery) {
     const pending = report.recovery_opportunities - report.recovery_count;
     if (pending > 0) {
       opportunities.push({
         title: "Recoverable revenue is sitting in the queue",
-        evidence: `${pending} of ${report.recovery_opportunities} recovery opportunities not yet completed`,
-        section: "recovery",
+        evidence: `${pending} of ${report.recovery_opportunities} recovery opportunities not yet completed.`,
+        section: "payments",
+        action: "View Payments & Checkout",
       });
     }
   }
@@ -240,8 +264,9 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
     if (topByRevenue.product_id !== topByQuantity.product_id) {
       opportunities.push({
         title: `"${topByRevenue.product_name}" earns more per sale than your best seller by volume`,
-        evidence: `${topByRevenue.revenue} ${report.total_sales_currency} vs. ${topByQuantity.quantity} units for "${topByQuantity.product_name}"`,
+        evidence: `${topByRevenue.revenue} ${report.total_sales_currency} vs. ${topByQuantity.quantity} units for "${topByQuantity.product_name}".`,
         section: "products",
+        action: "View Product Performance",
       });
     }
   }
@@ -252,101 +277,131 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
         ? "Restocking these keeps sales you'd otherwise lose to a dead product page."
         : `Across the ${catalog.scanned} products scanned so far.`,
       section: "inventory",
+      action: "View Inventory",
+    });
+  }
+  if (demand && demand.queries.length > 0) {
+    opportunities.push({
+      title: `Shoppers keep searching for "${demand.queries[0].query}"`,
+      evidence: `Asked ${demand.queries[0].times_asked} time${demand.queries[0].times_asked === 1 ? "" : "s"} in this window - nothing in the catalog answers it.`,
+      section: "customers",
+      action: "View Shopping Insights",
     });
   }
 
+  const displayName = merchantName ?? caps.platform;
+  const initials = displayName
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase())
+    .join("") || "?";
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div className="panel-head" style={{ border: 0, padding: 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="overview-header">
         <div>
-          <span className="eyebrow">{caps.platform}</span>
-          <h2 style={{ margin: "4px 0 0", fontSize: "var(--step-3)" }}>Overview</h2>
+          <div className="overview-wordmark">CV3 · MERCHANT</div>
+          <h2 style={{ margin: "4px 0 0", fontSize: "var(--step-4)" }}>{displayName}</h2>
+          <p className="overview-subtitle">See how your business is going, and sell accordingly.</p>
         </div>
-        <div className="range-picker" role="group" aria-label="Date range">
-          {RANGE_OPTIONS.map((n) => (
-            <button
-              key={n}
-              className={`range-btn ${n === days ? "active" : ""}`}
-              onClick={() => setDays(n)}
-            >
-              Last {n} days
-            </button>
-          ))}
+        <div className="overview-header-right">
+          <div className="range-picker" role="group" aria-label="Date range">
+            {RANGE_OPTIONS.map((n) => (
+              <button
+                key={n}
+                className={`range-btn ${n === days ? "active" : ""}`}
+                onClick={() => setDays(n)}
+              >
+                Last {n} days
+              </button>
+            ))}
+          </div>
+          <div className="overview-account-chip">
+            <span className="overview-account-avatar">{initials}</span>
+            <span className="overview-account-text">
+              <span className="overview-account-name">{displayName}</span>
+              <span className="eyebrow">Merchant account</span>
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* KPI row + embedded Copilot, side by side */}
-      <div className="overview-top-row">
-        <div className="kpi-row">
-          <KpiCard
-            label="Total sales"
-            value={noSalesYet ? `0.00 ${report.total_sales_currency}` : `${report.total_sales_amount} ${report.total_sales_currency}`}
-            compare={
-              trend && trend.prior_order_count > 0 && trend.change_pct !== null
-                ? { pct: trend.change_pct, period: `${trend.days}d` }
-                : null
-            }
-            onClick={() => onNavigate("sales")}
-          />
-          <KpiCard
-            label="Completed orders"
-            value={report.completed_order_count}
-            onClick={() => onNavigate("sales")}
-          />
-          <KpiCard
-            label="Cart → checkout rate"
-            value={
-              !conversion || conversion.cart_to_checkout_rate === null
-                ? "—"
-                : `${conversion.cart_to_checkout_rate}%`
-            }
-            onClick={() => onNavigate("orders")}
-          />
-          <KpiCard
-            label="Average order value"
-            value={
-              report.average_order_value
-                ? `${report.average_order_value} ${report.total_sales_currency}`
-                : "—"
-            }
-            onClick={() => onNavigate("sales")}
-          />
+      {/* KPI row (own full row) + Trend/Health, stacked left; Copilot a
+       * tall single panel spanning that whole height on the right. */}
+      <div className="overview-hero">
+        <div className="overview-hero-left">
+          <div className="kpi-row">
+            <KpiCard
+              label="Revenue"
+              value={noSalesYet ? `0.00 ${report.total_sales_currency}` : `${report.total_sales_amount} ${report.total_sales_currency}`}
+              compare={
+                trend && trend.prior_order_count > 0 && trend.change_pct !== null
+                  ? { pct: trend.change_pct, period: `${trend.days}d` }
+                  : null
+              }
+              onClick={() => onNavigate("sales")}
+            />
+            <KpiCard
+              label="Orders"
+              value={report.completed_order_count}
+              onClick={() => onNavigate("sales")}
+            />
+            <KpiCard
+              label="Cart → checkout rate"
+              value={
+                !conversion || conversion.cart_to_checkout_rate === null
+                  ? "—"
+                  : `${conversion.cart_to_checkout_rate}%`
+              }
+              onClick={() => onNavigate("orders")}
+            />
+            <KpiCard
+              label="Average order value"
+              value={
+                report.average_order_value
+                  ? `${report.average_order_value} ${report.total_sales_currency}`
+                  : "—"
+              }
+              onClick={() => onNavigate("sales")}
+            />
+          </div>
+
+          <div className="overview-trend-row">
+            <section className="panel">
+              <div className="panel-head">
+                <span className="eyebrow">Revenue trend</span>
+              </div>
+              <div className="panel-body">
+                <RevenueTrendChart series={series} />
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-head">
+                <span className="eyebrow">Business health</span>
+                <span className={`status-badge ${overallHealthy ? "healthy" : anyAttention ? "attention" : "unavailable"}`}>
+                  {overallHealthy ? "Healthy" : anyAttention ? "Attention" : "Mixed"}
+                </span>
+              </div>
+              <div className="panel-body">
+                <div className="health-list">
+                  {health.map((h) => (
+                    <button key={h.key} className="health-list-row" onClick={() => onNavigate(h.section)}>
+                      <span className={`health-dot ${h.status}`} />
+                      <span className="health-list-name">{h.label}</span>
+                      <Badge status={h.status} />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </section>
+          </div>
         </div>
+
         <div className="overview-copilot-slot">
           <MerchantCopilot onNavigate={onNavigate} />
         </div>
-      </div>
-
-      {/* Revenue trend + Business health, side by side */}
-      <div className="overview-trend-row">
-        <section className="panel">
-          <div className="panel-head">
-            <span className="eyebrow">Revenue trend</span>
-          </div>
-          <div className="panel-body">
-            <RevenueTrendChart series={series} />
-          </div>
-        </section>
-
-        <section className="panel">
-          <div className="panel-head">
-            <span className="eyebrow">Business health</span>
-            <span className={`status-badge ${overallHealthy ? "healthy" : anyAttention ? "attention" : "unavailable"}`}>
-              {overallHealthy ? "Healthy" : anyAttention ? "Attention" : "Mixed"}
-            </span>
-          </div>
-          <div className="panel-body">
-            <div className="health-list">
-              {health.map((h) => (
-                <button key={h.key} className="health-list-row" onClick={() => onNavigate(h.section)}>
-                  <span className={`health-dot ${h.status}`} />
-                  <span className="health-list-name">{h.label}</span>
-                  <Badge status={h.status} />
-                </button>
-              ))}
-            </div>
-          </div>
-        </section>
       </div>
 
       {/* Top products / Products needing attention / What needs attention */}
@@ -453,14 +508,13 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
               onClick={() => onNavigate("returns")}
             />
             <SummaryCard
-              title="AI outcomes"
-              value={`${report.shoppers_helped} shoppers helped`}
+              title="AI & Commerce outcomes"
+              value={
+                report.supports_payment_recovery
+                  ? `${report.shoppers_helped} helped · ${report.recovery_count} recovered`
+                  : `${report.shoppers_helped} shoppers helped`
+              }
               onClick={() => onNavigate("ai-commerce")}
-            />
-            <SummaryCard
-              title="Recovery"
-              value={report.supports_payment_recovery ? `${report.recovery_count} recovered` : "Unsupported"}
-              onClick={() => onNavigate("recovery")}
             />
             <SummaryCard
               title="Holdout"
@@ -478,17 +532,17 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
             <span className="eyebrow">Sell better — opportunities</span>
           </div>
           <div className="panel-body">
-            {opportunities.map((o) => (
-              <button
-                key={o.title}
-                className="opportunity-card"
-                style={{ width: "100%", textAlign: "left", border: "none", borderLeft: "3px solid var(--accent)", cursor: "pointer" }}
-                onClick={() => onNavigate(o.section)}
-              >
-                <div className="opportunity-title">{o.title}</div>
-                <div className="note" style={{ margin: 0 }}>{o.evidence}</div>
-              </button>
-            ))}
+            <div className="opportunity-grid">
+              {opportunities.map((o) => (
+                <div key={o.title} className="opportunity-card">
+                  <div className="opportunity-title">{o.title}</div>
+                  <div className="note" style={{ margin: 0 }}>{o.evidence}</div>
+                  <button className="opportunity-card-action" onClick={() => onNavigate(o.section)}>
+                    {o.action} →
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         </section>
       )}
@@ -532,10 +586,22 @@ function KpiCard({
   onClick: () => void;
 }) {
   const pctNum = compare ? Number(compare.pct) : 0;
+  // A money value's currency code goes on its own smaller line rather than
+  // inline - "164666.80" + "INR" fits a compact card; "164666.80 INR" as
+  // one string does not, without shrinking the number itself unreadably.
+  const str = String(value);
+  const moneyMatch = str.match(/^(-?[\d.,]+)\s+([A-Z]{3})$/);
   return (
     <button className="kpi-card" style={{ cursor: "pointer", textAlign: "left", font: "inherit", color: "inherit" }} onClick={onClick}>
       <div className="eyebrow">{label}</div>
-      <div className="kpi-value">{value}</div>
+      {moneyMatch ? (
+        <div className="kpi-value">
+          {moneyMatch[1]}
+          <span className="kpi-value-unit">{moneyMatch[2]}</span>
+        </div>
+      ) : (
+        <div className="kpi-value">{value}</div>
+      )}
       {compare && (
         <div className={`kpi-compare ${pctNum > 0 ? "up" : pctNum < 0 ? "down" : "flat"}`}>
           {pctNum > 0 ? "+" : ""}

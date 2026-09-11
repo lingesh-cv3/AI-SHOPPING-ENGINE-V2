@@ -23,7 +23,7 @@ export function RevenueTrendChart({ series }: { series: SalesSeries | null }) {
   }
 
   const width = 640;
-  const height = 220;
+  const height = 300;
   const padLeft = 8;
   const padRight = 8;
   const padTop = 12;

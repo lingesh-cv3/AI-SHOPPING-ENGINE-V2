@@ -3324,22 +3324,40 @@ select.card-picker {
 
 .kpi-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 720px) {
+  .kpi-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .kpi-card {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius-card);
-  padding: 16px 18px;
+  padding: 14px 16px;
+  min-width: 0;
 }
 
 .kpi-value {
-  font-size: var(--step-4);
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 5px;
+  font-size: clamp(18px, 1.8vw, 26px);
   font-weight: 700;
-  line-height: 1.1;
+  line-height: 1.2;
   margin: 6px 0 2px;
+}
+
+.kpi-value-unit {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+  white-space: nowrap;
 }
 
 .kpi-compare {
@@ -3504,6 +3522,67 @@ select.card-picker {
   gap: 12px;
 }
 
+.overview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.overview-wordmark {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  line-height: 1.3;
+}
+
+.overview-subtitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.overview-header-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.overview-account-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.overview-account-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.overview-account-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.overview-account-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .range-picker {
   display: flex;
   gap: 4px;
@@ -3528,17 +3607,23 @@ select.card-picker {
   color: #fff;
 }
 
-.overview-top-row {
+/* The dashboard's top section reads as one two-column block: a left
+ * column stacking the KPI row above the Revenue Trend + Business Health
+ * row, and a right column holding the Copilot as a single tall panel that
+ * spans the full height of both rows combined - not squeezed into the KPI
+ * grid, not a small card between KPIs. */
+.overview-hero {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
-  gap: 20px;
+  grid-template-columns: minmax(0, 7fr) minmax(300px, 3fr);
+  gap: 16px;
   align-items: stretch;
 }
 
-.overview-top-row .kpi-row {
-  height: 100%;
-  grid-template-columns: repeat(2, 1fr);
-  align-content: start;
+.overview-hero-left {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
 }
 
 .overview-copilot-slot {
@@ -3551,18 +3636,19 @@ select.card-picker {
 
 .overview-trend-row {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);
-  gap: 20px;
+  grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr);
+  gap: 16px;
+  flex: 1;
 }
 
 .overview-triple-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 20px;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
 }
 
 @media (max-width: 1100px) {
-  .overview-top-row,
+  .overview-hero,
   .overview-trend-row,
   .overview-triple-row {
     grid-template-columns: 1fr;
@@ -3666,16 +3752,35 @@ select.card-picker {
   margin-bottom: 4px;
 }
 
-.opportunity-card {
-  border-left: 3px solid var(--accent);
-  padding: 10px 14px;
-  margin-bottom: 8px;
-  background: var(--accent-soft);
-  border-radius: 0 var(--radius-card) var(--radius-card) 0;
+.opportunity-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
 }
 
-.opportunity-card:last-child {
-  margin-bottom: 0;
+.opportunity-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--accent);
+  border-radius: var(--radius-card);
+  padding: 12px 14px;
+  background: var(--surface);
+  height: 100%;
+}
+
+.opportunity-card-action {
+  font-family: var(--body);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: none;
+  border-radius: 999px;
+  padding: 6px 12px;
+  margin-top: auto;
 }
 
 .opportunity-title {

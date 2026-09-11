@@ -394,12 +394,29 @@ these first:**
         one real rather than decorative chrome, so it was deliberately not
         added.
 
+      **Layout corrected in #41** after this first pass was rejected as
+      looking like "many bordered boxes stacked vertically" rather than
+      one coherent dashboard - the KPI+Copilot area was squeezed into one
+      row with the KPI grid forced to 2x2; the reference actually shows a
+      two-column hero (KPI row stacked above Trend+Health on the left,
+      Copilot as one tall panel on the right). Restructured to match, KPI
+      row forced to a true 4-across grid, opportunities rebuilt from
+      stacked text rows into a real card grid with per-card action
+      buttons, product-intelligence row proportions changed to give Top
+      Products its due width, Commerce Health trimmed to the reference's
+      five tiles, and the header block (wordmark, real merchant name,
+      subtitle, account chip) added since #40 omitted it. Two real
+      overflow/wrap bugs found and fixed during this session's own live
+      screenshot verification (KPI values bleeding past their card border;
+      a currency unit breaking mid-word) - same lesson as #40's off-by-one:
+      verify against the rendered page, not the code.
+
       **Still fully open:** full page-by-page visual polish beyond
       Overview and Orders & Conversion. Sales & Revenue, Product
       Performance, Customer Insights, AI Commerce, Recovery, Holdout,
       Business Insights, Platform and Settings still use the plainer
       card/list treatment from #36 rather than the KPI-card/status-badge/
-      trend-chart system built for Overview in #37/#40 - a real UI-
+      trend-chart system built for Overview in #37/#40/#41 - a real UI-
       consistency gap, not a functional one.
 
 - [ ] AI Store Diagnosis
