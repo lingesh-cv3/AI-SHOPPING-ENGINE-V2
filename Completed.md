@@ -2264,3 +2264,94 @@ below; `npm run build` now exits 0.)
     not yet cross-linked from Inventory & Catalog or Customer Insights
     (only reachable from its own nav item and the Copilot banner) - a
     real, if minor, discoverability gap for a future slice.
+
+43. **Rebuilt Sales & Revenue to Overview's visual tier - its own
+    analytics-oriented information architecture, not a copy of Overview.**
+    Audited first: the page was functionally correct (real
+    `ExecutionAttempt`-sourced totals, correctly scoped narrower than
+    Overview per its own docstring) but visually at the older #36 tier -
+    three stacked `headline-figure` blocks, no chart, no date-range
+    control, no product breakdown.
+
+    **A real, previously-invisible data-honesty bug found and fixed while
+    building this page, not assumed correct from the code**: `total_sales()`
+    computes `average_order_value` as `total / priced_count`, where
+    `priced_count` is only orders whose `ExecutionAttempt.result` actually
+    stored `amount_paid` - a real, intentional, documented distinction
+    (older rows written before `payment_settled` started storing it still
+    count toward `completed_order_count` but not toward the money
+    figures). Nothing exposed `priced_count` anywhere, so both this new
+    page and Overview showed "174 orders" beside "AOV 2700.61" with no way
+    for a merchant (or a reader of the code) to know those numbers
+    describe different populations (2700.61 x 174 is nowhere near the real
+    180941.00 total - it's 2700.61 x 67, the priced subset). Fixed by
+    adding `priced_order_count` to `total_sales()`'s and `merchant_report()`'s
+    return dicts and showing an honest caveat ("Based on 67 of 174 orders
+    with a recorded amount") under the AOV figure whenever the two counts
+    differ - on **both** Sales & Revenue and Overview, since both display
+    the identical figure and would otherwise mislead identically. Verified
+    live: Kettle showed "Based on 67 of 174", Northfield "Based on 70 of
+    158" - both real, both matching `priced_order_count` read directly
+    from the API.
+
+    **A second real bug found in the same pass**: Overview's KPI row
+    called `console_api.report()` with no `days` argument, so its
+    Revenue/Orders/AOV figures never actually respected the date-range
+    picker built for it in #40/#41 - only conversion/trend/chart/products
+    did. Fixed by threading `days` through (`console_api.report(days)`),
+    and gave `console_api.report()` an optional `days` parameter
+    (default 30, preserving every other caller unchanged).
+
+    **New page**: KPI row (Revenue, Orders, AOV with the new caveat,
+    Revenue Change - "Not enough data" shown honestly rather than a fake
+    percentage when there's no prior-period data to compare against, never
+    an invented delta), a real `RevenueTrendChart` fed by the existing
+    `/api/sales-series`, a Top-by-revenue table beside it, a Top-by-
+    quantity table (deliberately not merged with top-by-revenue - the
+    value bar's "selling best is quantity, highest revenue is revenue"
+    distinction stays visible rather than collapsed into one ambiguous
+    list), a real Attention panel (revenue-down-vs-prior-period when true,
+    and a genuinely new deterministic signal - product revenue
+    concentration, shown only when one product is >=40% of window revenue
+    and there are enough orders for the ratio to mean something), the
+    existing recovered-revenue block gated on `supports_payment_recovery`
+    exactly as before, and the embedded Merchant Copilot (reused, not
+    duplicated).
+
+    **Real transaction verification, end to end**: recorded Kettle's
+    before-state (173 orders, 179346.00 INR, AOV 2717.36, Colombia Huila
+    Washed at 57500.00 revenue), drove a real guest→signup→checkout
+    purchase (1x Colombia Huila Washed, 1595.00 INR captured), confirmed
+    after-state via the API (174 orders - exactly +1; 180941.00 -
+    exactly +1595.00; AOV recalculated correctly against the unchanged
+    67-order priced population) and then confirmed the identical figures
+    on the actual rendered page.
+
+    **Verified live on both merchants** via Playwright screenshots at
+    1600px: correct per-merchant theming preserved, correct capability
+    difference (Northfield shows no Recovered-revenue section at all,
+    matching `supports_payment_recovery: false` - no Northfield-specific
+    code, the same gate Kettle's page already used), real distinct
+    concentration attention items on each (74% Kettle / 73% Northfield -
+    coincidentally similar values, independently computed from each
+    merchant's own real data), zero JS console errors, the date-range
+    picker re-fetching all four data sources without breaking. One
+    environment-only false alarm during this verification, recorded so
+    the next session doesn't rediscover it: this specific dev machine's
+    cold Vite/fetch cycle took ~8-10 seconds to settle on this worktree,
+    long enough that two earlier verification passes (3-5s waits) saw a
+    permanent "Loading..." and were nearly written up as a real bug before
+    a longer wait proved the page resolves correctly - not a code defect.
+
+    **Verification.** `npm run build` (tsc) clean. `npm run lint`: 8
+    errors, identical to the post-MerchantTask baseline (0 new).
+    `auditroutes.py` clean. `healthcheck.py` 112/116 passed - 4 failures,
+    all from classes already diagnosed as model-wording-flaky or
+    order-dependent earlier this session, none touching sales/report
+    logic. `fuzz.py` clean (every invariant held).
+
+    **Not attempted this slice**, per explicit scope: Orders & Conversion,
+    Product Performance, Customer Insights, Inventory, Payments, AI
+    Commerce, Recovery, Holdout, Business Insights, Platform, Settings all
+    remain at the older #36 visual tier - each needs its own slice. The
+    visitor/session funnel was explicitly out of scope and not touched.

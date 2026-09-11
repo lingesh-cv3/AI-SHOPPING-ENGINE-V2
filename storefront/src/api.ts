@@ -905,7 +905,8 @@ export const console_api = {
 
   stats: () => merchantCall<Stats>(`/api/stats/${getConnection()}`),
 
-  report: () => merchantCall<MerchantReport>(`/api/report/${getConnection()}`),
+  report: (days = 30) =>
+    merchantCall<MerchantReport>(`/api/report/${getConnection()}?days=${days}`),
 
   askCopilot: (question: string) =>
     merchantCall<CopilotAnswer>(`/api/copilot/${getConnection()}`, {
@@ -1082,6 +1083,14 @@ export interface MerchantReport {
   recovery_opportunities: number;
   currency: string;
   completed_order_count: number;
+  /** How many of `completed_order_count` have a recorded payment amount
+   *  and so are actually included in `total_sales_amount`/
+   *  `average_order_value` - an order written before `payment_settled`
+   *  started storing `amount_paid` counts toward `completed_order_count`
+   *  but not toward the money figures. When this is less than
+   *  `completed_order_count`, AOV is real but computed over a smaller,
+   *  named population - not the full order count. */
+  priced_order_count: number;
   total_sales_amount: string;
   total_sales_currency: string;
   average_order_value: string | null;

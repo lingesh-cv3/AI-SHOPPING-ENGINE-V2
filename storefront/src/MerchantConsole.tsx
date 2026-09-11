@@ -227,7 +227,9 @@ export function MerchantConsole() {
 
       <main className="merchant-content">
         {section === "overview" && <Overview onNavigate={(s) => setSection(s as SectionId)} />}
-        {section === "sales" && <MerchantReport />}
+        {section === "sales" && (
+          <MerchantReport onNavigate={(s) => setSection(s as SectionId)} />
+        )}
         {section === "orders" && <OrdersConversion />}
         {section === "products" && <ProductPerformance />}
         {section === "customers" && <CustomerInsights />}

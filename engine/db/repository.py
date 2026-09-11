@@ -659,6 +659,14 @@ async def total_sales(connection_id: str, *, days: int = 30) -> dict:
     return {
         "days": days,
         "completed_order_count": order_count,
+        # Exposed so a caller can tell a merchant *why* average_order_value
+        # does not reconcile with total_sales_amount / completed_order_count
+        # when they differ - discovered while building the Sales & Revenue
+        # page: a merchant with orders from before `payment_settled` started
+        # storing `amount_paid` sees a correct but non-obvious AOV computed
+        # over a smaller population than "completed orders" implies. Rather
+        # than hide that gap, the UI can now say so.
+        "priced_order_count": priced_count,
         "total_sales_amount": f"{total:.2f}",
         "total_sales_currency": currency or "INR",
         "average_order_value": (f"{average:.2f}" if average is not None else None),
@@ -1426,6 +1434,7 @@ async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
         "recovery_opportunities": recovery_opportunities,
         "currency": currency,
         "completed_order_count": sales["completed_order_count"],
+        "priced_order_count": sales["priced_order_count"],
         "total_sales_amount": sales["total_sales_amount"],
         "total_sales_currency": sales["total_sales_currency"],
         "average_order_value": sales["average_order_value"],

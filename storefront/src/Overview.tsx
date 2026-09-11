@@ -87,7 +87,7 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
   useEffect(() => {
     let cancelled = false;
     Promise.all([
-      console_api.report(),
+      console_api.report(days),
       console_api.catalogAlerts().catch(() => null),
       console_api.conversion(days).catch(() => null),
       console_api.salesTrend(days).catch(() => null),
@@ -363,6 +363,12 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
                   ? `${report.average_order_value} ${report.total_sales_currency}`
                   : "—"
               }
+              note={
+                report.average_order_value &&
+                report.priced_order_count < report.completed_order_count
+                  ? `Based on ${report.priced_order_count} of ${report.completed_order_count} orders with a recorded amount.`
+                  : null
+              }
               onClick={() => onNavigate("sales")}
             />
           </div>
@@ -579,11 +585,13 @@ function KpiCard({
   value,
   compare,
   onClick,
+  note,
 }: {
   label: string;
   value: number | string;
   compare?: { pct: string; period: string } | null;
   onClick: () => void;
+  note?: string | null;
 }) {
   const pctNum = compare ? Number(compare.pct) : 0;
   // A money value's currency code goes on its own smaller line rather than
@@ -607,6 +615,11 @@ function KpiCard({
           {pctNum > 0 ? "+" : ""}
           {compare.pct}% vs. prior {compare.period}
         </div>
+      )}
+      {note && (
+        <p className="note" style={{ margin: "4px 0 0", fontSize: 11 }}>
+          {note}
+        </p>
       )}
     </button>
   );

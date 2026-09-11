@@ -380,13 +380,26 @@ these first:**
       a currency unit breaking mid-word) - same lesson as #40's off-by-one:
       verify against the rendered page, not the code.
 
+      **Sales & Revenue brought to the same visual tier in #43** - its
+      own analytics-oriented layout (KPI row, trend chart, top-by-revenue/
+      top-by-quantity tables, a real evidence-based Attention panel,
+      embedded Copilot), not a copy of Overview. Also fixed two real bugs
+      found while building it: `average_order_value` was silently computed
+      over a smaller population than `completed_order_count` implied (no
+      way for a merchant to know why the numbers didn't reconcile - now
+      exposed as `priced_order_count` with an honest caveat on both this
+      page and Overview), and Overview's own KPI row never actually
+      respected its date-range picker for Revenue/Orders/AOV (the `days`
+      param was never passed to `/api/report`).
+
       **Still fully open:** full page-by-page visual polish beyond
-      Overview and Orders & Conversion. Sales & Revenue, Product
-      Performance, Customer Insights, AI Commerce, Recovery, Holdout,
-      Business Insights, Platform and Settings still use the plainer
-      card/list treatment from #36 rather than the KPI-card/status-badge/
-      trend-chart system built for Overview in #37/#40/#41 - a real UI-
-      consistency gap, not a functional one.
+      Overview, Orders & Conversion, and now Sales & Revenue. Product
+      Performance, Customer Insights, Inventory & Catalog, Payments &
+      Checkout, AI Commerce, Recovery, Holdout, Business Insights,
+      Platform and Settings still use the plainer card/list treatment
+      from #36 rather than the KPI-card/status-badge/trend-chart system
+      built for Overview in #37/#40/#41 and extended to Sales & Revenue in
+      #43 - a real UI-consistency gap, not a functional one.
 
 - [ ] AI Store Diagnosis
 - [ ] Recovery Opportunity Radar
