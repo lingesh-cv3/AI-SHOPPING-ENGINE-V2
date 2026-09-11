@@ -928,8 +928,10 @@ export const console_api = {
   salesSeries: (days = 30) =>
     merchantCall<SalesSeries>(`/api/sales-series/${getConnection()}?days=${days}`),
 
-  conversion: (days = 30) =>
-    merchantCall<Conversion>(`/api/conversion/${getConnection()}?days=${days}`),
+  conversion: (days = 30, compare = false) =>
+    merchantCall<Conversion>(
+      `/api/conversion/${getConnection()}?days=${days}&compare=${compare}`,
+    ),
 
   unmetDemand: (days = 30, limit = 10) =>
     merchantCall<UnmetDemand>(
@@ -1011,8 +1013,7 @@ export interface SalesSeries {
   has_data: boolean;
 }
 
-export interface Conversion {
-  days: number;
+interface ConversionWindow {
   carts_created: number;
   checkout_attempts: number;
   completed_orders: number;
@@ -1020,8 +1021,15 @@ export interface Conversion {
   abandoned_before_checkout: number;
   checkout_success_rate: number | null;
   cart_to_checkout_rate: number | null;
+}
+
+export interface Conversion extends ConversionWindow {
+  days: number;
   funnel_has_history: boolean;
   scope_note: string;
+  /** The identical figures for the equal-length window immediately before
+   *  this one - present only when fetched with `compare: true`. */
+  prior?: ConversionWindow;
 }
 
 export interface UnmetDemand {

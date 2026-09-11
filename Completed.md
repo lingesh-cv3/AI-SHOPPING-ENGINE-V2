@@ -2355,3 +2355,97 @@ below; `npm run build` now exits 0.)
     Commerce, Recovery, Holdout, Business Insights, Platform, Settings all
     remain at the older #36 visual tier - each needs its own slice. The
     visitor/session funnel was explicitly out of scope and not touched.
+
+44. **Brought Orders & Conversion to Overview/Sales & Revenue's visual
+    tier, and added the one genuinely new capability it needed: period-
+    over-period comparison for the funnel.** Audited first: the funnel
+    itself (`checkout_conversion`) was already real and honest - cart
+    creation genuinely instrumented via `FunnelEvent`, checkout-attempt-
+    to-completion from the `ExecutionAttempt` ledger, the join that keeps
+    `cart_to_checkout_rate` bounded 0-100% already correct, the
+    sessions/visits limitation already stated rather than guessed. What
+    was missing was purely visual (no header, no date-range control, no
+    KPI row, no way to tell whether conversion is improving) and one real
+    functional gap: no way to answer "has conversion changed over the
+    selected period" - the exact question CLAUDE.md's roadmap and this
+    session's brief both name.
+
+    **Visitor/session funnel deliberately not built** - re-confirmed, not
+    re-decided: this engine still has no page-view event for a guest
+    before cart creation, and building one is a genuinely separate,
+    larger instrumentation project (a new event type, wiring the
+    storefront to emit it, a guest-identity model for a shopper who has
+    never created a cart) that a prior session's explicit instruction
+    already carved out of scope. The honest `scope_note` stays exactly as
+    it was - no invented denominator anywhere on the rebuilt page.
+
+    **New backend capability**: `checkout_conversion` gained an optional
+    `compare: bool` parameter. Refactored the funnel's core query into
+    `_conversion_window(connection_id, start, end)` - the identical join
+    logic (including the `case_id`-truncation join that keeps
+    `cart_to_checkout_rate` from ever exceeding 100%) now runs once for
+    the current window and, when `compare=True`, once more for the
+    equal-length window immediately before it, under a new `prior` key.
+    Not two independently-written queries that could drift apart - one
+    query shape, called twice. `compare` defaults to `False` and is
+    additive (no `prior` key at all when omitted), so every existing
+    caller (`Overview.tsx`'s health-status computation, the Merchant
+    Copilot's `checkout_conversion` context) is unaffected - verified
+    directly, not assumed, by confirming `'prior' not in response` on the
+    default call. New `/api/conversion/{connection_id}?compare=true` query
+    param, tenant-isolation re-verified directly on the modified route
+    (cross-merchant and no-key both refused with 401).
+
+    **New page**: header with a real 7/30/90-day picker, a 4-KPI row
+    (Carts created, Checkout attempts, Completed orders, Cart→checkout
+    rate with a real point-delta comparison badge - "+X pts vs. prior Nd"
+    when prior data exists, an honest "No prior-period data yet" when it
+    doesn't, never an invented percentage), the existing funnel
+    visualization kept as-is (it already had a real, distinctive shape),
+    a new **Biggest drop-off** panel - a real, deterministic signal
+    (whichever of the two real stages, cart-abandonment or checkout-
+    failure, lost more in absolute terms this window, each linking to the
+    section that can act on it: Customer Insights for abandonment,
+    Payments & Checkout for failures), a Funnel detail strip (the raw
+    abandoned/failed/success-rate figures, kept visible rather than
+    collapsed into just the "biggest" one), and the embedded Merchant
+    Copilot (reused, not duplicated).
+
+    **Real transaction verification, end to end, in isolation** (not
+    read from a noisy concurrent test run): recorded Kettle's before-state
+    (384 carts, 365 checkout attempts, 175 completed orders), drove a real
+    guest→signup→checkout purchase, confirmed after-state via the API
+    (385/366/176 - exactly +1 at every one of the three real stages).
+    Then retried the identical checkout on the same now-paid cart and
+    confirmed `already_paid: true` on the same order with all three
+    figures unchanged (366/176) - the funnel's exactly-once guarantee
+    holds under retry, not just under a fresh attempt.
+
+    **Verified live on both merchants** via Playwright screenshots at
+    1600px: correct per-merchant theming, real distinct figures on each
+    (Kettle: 384/365/175, cart-abandonment biggest drop at 269 cases;
+    Northfield: 329/265/160, biggest drop at 241 cases - independently
+    computed, no shared code path beyond the identical capability-
+    agnostic query), zero JS console errors, the date-range picker
+    re-fetching without breaking, Northfield's Copilot task banner
+    (11 tasks) rendering consistently across pages as expected.
+
+    **Verification.** `npm run build` (tsc) clean, `npm run lint`
+    identical 8-error baseline (0 new). `auditroutes.py` clean including
+    the modified route with its new query param. `healthcheck.py` run
+    twice: 113/116 then 112/116, different failure combinations both
+    times - all from classes already diagnosed as model-wording-flaky or
+    (for "a cart taken to a successful checkout does not count as
+    abandoned" specifically) a `days=1`-window timing artifact from the
+    suite's own concurrent cart-creation activity, previously documented
+    as non-deterministic in an earlier session unrelated to that
+    session's diff either. Not treated as a silent pass: the exact
+    invariant this check protects was independently verified above via a
+    clean, isolated real transaction with zero concurrent noise, and held
+    correctly both times (the purchased cart did not appear as abandoned).
+    `fuzz.py` clean (every invariant held).
+
+    **Not attempted this slice**, per the stated execution order: Product
+    Performance, Customer Insights, Inventory, Payments, AI Commerce,
+    Recovery, Holdout, Business Insights, Platform, Settings all remain at
+    the older #36 visual tier.

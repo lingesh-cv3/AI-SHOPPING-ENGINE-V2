@@ -694,66 +694,41 @@ async def record_funnel_event(
         )
 
 
-async def checkout_conversion(connection_id: str, *, days: int = 30) -> dict:
-    """The real funnel this engine can honestly report, from cart creation
-    through to a completed order.
-
-    Two independently-sourced, SQL-aggregated counts:
-
-    - `carts_created`, from `FunnelEvent` (`CART_CREATED` rows) - real
-      instrumentation, written at the moment `create_cart` actually mints a
-      cart, covering guests and signed-in shoppers alike. Only carts
-      created after this table shipped are counted; an older cart has no
-      row here and cannot be reconstructed, which is why `funnel_has_history`
-      exists below rather than letting a small `carts_created` silently
-      read as "business is slow".
-    - `checkout_attempts`/`completed_orders`, from the same `ExecutionAttempt`
-      ledger `total_sales` reads - every checkout attempt through this
-      engine writes a row here *before* the platform is called
-      (`idempotency.py::claim`), marked succeeded/failed afterward, never
-      deleted. So unlike `total_sales` (successful subset only), this
-      counts every attempt, successful or declined - a real
-      numerator/denominator pair, not an inferred one.
-
-    Still deliberately NOT a "sessions/visits" funnel - this engine has no
-    page-view or store-visit event for guests at all (a guest is only ever
-    identified once they create a cart), so "how many people looked at the
-    shop" is not answerable from existing data without a different kind of
-    instrumentation than a cart-scoped event log. What's reported here is
-    exactly the two real stages this engine can instrument end to end:
-    cart -> checkout attempt -> completed order.
+async def _conversion_window(
+    connection_id: str, start: datetime, end: datetime | None
+) -> dict:
+    """The core funnel counts for one arbitrary window `[start, end)` (`end`
+    of `None` means "through now"). Factored out of `checkout_conversion` so
+    the exact same query shape can be run twice - once for the current
+    window, once for the equal-length window immediately before it - without
+    two independently-written (and possibly drifting) implementations of the
+    same join.
     """
-    since = datetime.now(UTC) - timedelta(days=days)
     async with session_scope() as db:
-        cart_id_rows = await db.execute(
-            select(FunnelEvent.cart_id).where(
-                FunnelEvent.connection_id == connection_id,
-                FunnelEvent.event_type == "CART_CREATED",
-                FunnelEvent.created_at >= since,
-            )
-        )
+        cart_conditions = [
+            FunnelEvent.connection_id == connection_id,
+            FunnelEvent.event_type == "CART_CREATED",
+            FunnelEvent.created_at >= start,
+        ]
+        if end is not None:
+            cart_conditions.append(FunnelEvent.created_at < end)
+        cart_id_rows = await db.execute(select(FunnelEvent.cart_id).where(*cart_conditions))
         window_cart_ids = [row[0] for row in cart_id_rows.all()]
-        earliest_event = await db.scalar(
-            select(func.min(FunnelEvent.created_at)).where(
-                FunnelEvent.connection_id == connection_id,
-                FunnelEvent.event_type == "CART_CREATED",
-            )
-        )
+
+        attempt_conditions = [
+            ExecutionAttempt.connection_id == connection_id,
+            ExecutionAttempt.action_type == "CHECKOUT",
+            ExecutionAttempt.state == "DONE",
+            ExecutionAttempt.completed_at >= start,
+        ]
+        if end is not None:
+            attempt_conditions.append(ExecutionAttempt.completed_at < end)
         total_attempts = await db.scalar(
-            select(func.count(ExecutionAttempt.idempotency_key)).where(
-                ExecutionAttempt.connection_id == connection_id,
-                ExecutionAttempt.action_type == "CHECKOUT",
-                ExecutionAttempt.state == "DONE",
-                ExecutionAttempt.completed_at >= since,
-            )
+            select(func.count(ExecutionAttempt.idempotency_key)).where(*attempt_conditions)
         )
         succeeded = await db.scalar(
             select(func.count(ExecutionAttempt.idempotency_key)).where(
-                ExecutionAttempt.connection_id == connection_id,
-                ExecutionAttempt.action_type == "CHECKOUT",
-                ExecutionAttempt.state == "DONE",
-                ExecutionAttempt.succeeded.is_(True),
-                ExecutionAttempt.completed_at >= since,
+                *attempt_conditions, ExecutionAttempt.succeeded.is_(True)
             )
         )
 
@@ -797,7 +772,6 @@ async def checkout_conversion(connection_id: str, *, days: int = 30) -> dict:
     )
 
     return {
-        "days": days,
         "carts_created": carts_created,
         "checkout_attempts": total_attempts,
         "completed_orders": succeeded,
@@ -805,6 +779,64 @@ async def checkout_conversion(connection_id: str, *, days: int = 30) -> dict:
         "abandoned_before_checkout": abandoned_before_checkout,
         "checkout_success_rate": success_rate,
         "cart_to_checkout_rate": cart_to_checkout_rate,
+    }
+
+
+async def checkout_conversion(
+    connection_id: str, *, days: int = 30, compare: bool = False
+) -> dict:
+    """The real funnel this engine can honestly report, from cart creation
+    through to a completed order.
+
+    Two independently-sourced, SQL-aggregated counts:
+
+    - `carts_created`, from `FunnelEvent` (`CART_CREATED` rows) - real
+      instrumentation, written at the moment `create_cart` actually mints a
+      cart, covering guests and signed-in shoppers alike. Only carts
+      created after this table shipped are counted; an older cart has no
+      row here and cannot be reconstructed, which is why `funnel_has_history`
+      exists below rather than letting a small `carts_created` silently
+      read as "business is slow".
+    - `checkout_attempts`/`completed_orders`, from the same `ExecutionAttempt`
+      ledger `total_sales` reads - every checkout attempt through this
+      engine writes a row here *before* the platform is called
+      (`idempotency.py::claim`), marked succeeded/failed afterward, never
+      deleted. So unlike `total_sales` (successful subset only), this
+      counts every attempt, successful or declined - a real
+      numerator/denominator pair, not an inferred one.
+
+    Still deliberately NOT a "sessions/visits" funnel - this engine has no
+    page-view or store-visit event for guests at all (a guest is only ever
+    identified once they create a cart), so "how many people looked at the
+    shop" is not answerable from existing data without a different kind of
+    instrumentation than a cart-scoped event log. What's reported here is
+    exactly the two real stages this engine can instrument end to end:
+    cart -> checkout attempt -> completed order.
+
+    `compare=True` adds a `prior` key: the identical set of figures for the
+    equal-length window immediately before this one, computed by the exact
+    same `_conversion_window` query - so "has conversion changed" is
+    answered from two real, comparably-scoped windows, never a guessed
+    delta. `prior` is omitted (not zeroed) when `compare` is False, so a
+    caller that doesn't ask for it can't mistake its absence for "no
+    change".
+    """
+    now = datetime.now(UTC)
+    since = now - timedelta(days=days)
+    current = await _conversion_window(connection_id, since, None)
+
+    earliest_event = None
+    async with session_scope() as db:
+        earliest_event = await db.scalar(
+            select(func.min(FunnelEvent.created_at)).where(
+                FunnelEvent.connection_id == connection_id,
+                FunnelEvent.event_type == "CART_CREATED",
+            )
+        )
+
+    result = {
+        "days": days,
+        **current,
         # False until at least one FunnelEvent row exists for this
         # merchant - a merchant connected before this shipped sees an
         # honest "no history" rather than a confusing 0 that reads as "no
@@ -817,6 +849,12 @@ async def checkout_conversion(connection_id: str, *, days: int = 30) -> dict:
             "onward is real, SQL-aggregated instrumentation."
         ),
     }
+
+    if compare:
+        prior_since = since - timedelta(days=days)
+        result["prior"] = await _conversion_window(connection_id, prior_since, since)
+
+    return result
 
 
 async def product_performance(

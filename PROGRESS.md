@@ -392,8 +392,20 @@ these first:**
       respected its date-range picker for Revenue/Orders/AOV (the `days`
       param was never passed to `/api/report`).
 
+      **Orders & Conversion brought to the same tier in #44**, plus a
+      genuinely new capability: `checkout_conversion` gained an optional
+      `compare` parameter (one query shape run twice - current window and
+      the equal-length prior window - not two independently-written
+      queries), so the page can now answer "has conversion changed"
+      honestly, with a real point-delta or an honest "no prior data yet"
+      rather than an invented percentage. A new deterministic "biggest
+      drop-off" panel names whichever real stage (cart-abandonment vs.
+      checkout-failure) lost more this window. Visitor/session
+      instrumentation remains explicitly out of scope - re-confirmed, not
+      re-decided; still a separate, larger project.
+
       **Still fully open:** full page-by-page visual polish beyond
-      Overview, Orders & Conversion, and now Sales & Revenue. Product
+      Overview, Sales & Revenue, and now Orders & Conversion. Product
       Performance, Customer Insights, Inventory & Catalog, Payments &
       Checkout, AI Commerce, Recovery, Holdout, Business Insights,
       Platform and Settings still use the plainer card/list treatment

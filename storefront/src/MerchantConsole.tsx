@@ -230,7 +230,9 @@ export function MerchantConsole() {
         {section === "sales" && (
           <MerchantReport onNavigate={(s) => setSection(s as SectionId)} />
         )}
-        {section === "orders" && <OrdersConversion />}
+        {section === "orders" && (
+          <OrdersConversion onNavigate={(s) => setSection(s as SectionId)} />
+        )}
         {section === "products" && <ProductPerformance />}
         {section === "customers" && <CustomerInsights />}
         {section === "inventory" && <InventoryPanel />}

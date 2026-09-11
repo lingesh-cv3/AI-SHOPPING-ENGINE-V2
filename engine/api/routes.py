@@ -735,15 +735,19 @@ async def sales_series_route(
 
 @app.get(f"{API}/conversion/{{connection_id}}")
 async def conversion_route(
-    connection_id: str, days: int = 30, _=Depends(merchant_scoped())
+    connection_id: str,
+    days: int = 30,
+    compare: bool = False,
+    _=Depends(merchant_scoped()),
 ) -> dict:
     """Checkout-attempt-to-completion, the one funnel stage this engine
     actually instruments end to end. See `db.checkout_conversion`'s own
     docstring for why this is not, and does not claim to be, a full
-    session-to-sale funnel.
+    session-to-sale funnel. `compare=true` adds the equal-length prior
+    window's identical figures under `prior`.
     """
     _adapter(connection_id)
-    return await db.checkout_conversion(connection_id, days=days)
+    return await db.checkout_conversion(connection_id, days=days, compare=compare)
 
 
 @app.get(f"{API}/unmet-demand/{{connection_id}}")
