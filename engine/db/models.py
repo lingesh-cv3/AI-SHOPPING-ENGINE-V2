@@ -596,6 +596,58 @@ class FunnelEvent(Base):
     )
 
 
+class MerchantTask(Base):
+    """A merchant work item, deterministically flagged from real catalogue/
+    unmet-demand data - not a commerce `ActionType`, and never touches the
+    risk gate, an adapter, or merchant inventory. It is a CV3-owned record
+    a merchant can resolve or dismiss, closing the Merchant Copilot's
+    "read-only twin" gap for problem types that have no real platform
+    action to attach (unlike payments/recovery, see #39): there is no
+    adapter operation this engine may call to fix "out of stock", so the
+    action here is tracking the problem as a real, persisted decision
+    rather than inventing a fake inventory-write capability.
+
+    `kind` + `subject_key` name the underlying fact (e.g. `OUT_OF_STOCK` +
+    a product_id, or `UNMET_DEMAND` + a normalized search query) - stable
+    identity for the same real-world problem across repeated syncs. The
+    unique constraint below is the idempotency mechanism: asking the
+    Copilot the same question twice, or opening the Tasks panel twice,
+    upserts one row rather than creating a new task each time.
+
+    A `RESOLVED`/`DISMISSED` task is never silently reopened by a later
+    sync, even if the same fact is still true (matching `decide_approval`'s
+    own "decided once, never revisited unasked" behaviour) - an accepted,
+    named limitation rather than change-detection machinery this session
+    did not build.
+    """
+
+    __tablename__ = "merchant_tasks"
+
+    task_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    subject_key: Mapped[str] = mapped_column(String(160))
+    label: Mapped[str] = mapped_column(Text)
+    detail: Mapped[dict | None] = mapped_column(JSON, default=dict)
+    state: Mapped[str] = mapped_column(String(12), default="OPEN", index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[str | None] = mapped_column(String(80))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "connection_id", "kind", "subject_key", name="uq_merchant_task_subject"
+        ),
+        Index("ix_merchant_tasks_conn_state", "connection_id", "state"),
+    )
+
+
 class ResourceOwner(Base):
     """Who a cart, a conversation or an order belongs to.
 

@@ -96,6 +96,14 @@ class ApprovalDecision(BaseModel):
     note: str | None = None
 
 
+class MerchantTaskDecision(BaseModel):
+    """A merchant's decision to resolve or dismiss one work item - never an
+    inventory write, just a durable record that they handled it."""
+
+    resolved: bool
+    decided_by: str = "merchant"
+
+
 class SimulateResponse(BaseModel):
     """The full pipeline trace, for display."""
     #: None when the case could not be recorded. The turn still succeeded; only

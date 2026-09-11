@@ -24,6 +24,7 @@ import { Holdout } from "./Holdout";
 import { BusinessInsights } from "./BusinessInsights";
 import { PlatformCapabilities } from "./PlatformCapabilities";
 import { StoreSettings } from "./StoreSettings";
+import { TasksPanel } from "./TasksPanel";
 
 type SectionId =
   | "overview"
@@ -40,7 +41,8 @@ type SectionId =
   | "insights"
   | "platform"
   | "settings"
-  | "copilot";
+  | "copilot"
+  | "tasks";
 
 interface NavGroup {
   label: string;
@@ -82,7 +84,13 @@ const NAV: NavGroup[] = [
       { id: "settings", label: "Settings" },
     ],
   },
-  { label: "AI", items: [{ id: "copilot", label: "Merchant Copilot" }] },
+  {
+    label: "AI",
+    items: [
+      { id: "copilot", label: "Merchant Copilot" },
+      { id: "tasks", label: "Merchant Tasks" },
+    ],
+  },
 ];
 
 /**
@@ -248,6 +256,7 @@ export function MerchantConsole() {
         {section === "copilot" && (
           <MerchantCopilot onNavigate={(s) => setSection(s as SectionId)} />
         )}
+        {section === "tasks" && <TasksPanel />}
       </main>
     </div>
   );

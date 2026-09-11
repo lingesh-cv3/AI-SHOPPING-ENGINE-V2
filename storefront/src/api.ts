@@ -937,7 +937,41 @@ export const console_api = {
 
   cases: (limit = 30) =>
     merchantCall<{ cases: CaseRow[] }>(`/api/cases/${getConnection()}?limit=${limit}`),
+
+  tasks: (state?: string) =>
+    merchantCall<MerchantTasks>(
+      `/api/tasks/${getConnection()}${state ? `?state=${state}` : ""}`,
+    ),
+
+  decideTask: (taskId: string, resolved: boolean, decidedBy = "merchant") =>
+    merchantCall<{ task_id: string; state: string; changed: boolean }>(
+      `/api/tasks/${getConnection()}/${taskId}/decide`,
+      {
+        method: "POST",
+        body: JSON.stringify({ resolved, decided_by: decidedBy }),
+      },
+    ),
 };
+
+export interface MerchantTaskRow {
+  task_id: string;
+  kind: string;
+  subject_key: string;
+  label: string;
+  detail: Record<string, unknown>;
+  state: string;
+  created_at: string;
+  last_seen_at: string;
+  decided_at: string | null;
+  decided_by: string | null;
+}
+
+export interface MerchantTasks {
+  tasks: MerchantTaskRow[];
+  tasks_open_count: number;
+  tasks_resolved_recent_count: number;
+  days: number;
+}
 
 interface ProductLine {
   product_id: string;

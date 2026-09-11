@@ -2181,3 +2181,86 @@ below; `npm run build` now exits 0.)
     `capabilities`, and the Copilot's own data all remain exactly as #40
     left them. This entry is a correction to how that same real data is
     arranged and sized, nothing more.
+
+42. **Implemented MerchantTask, closing the catalogue/inventory/unmet-
+    demand slice of the Merchant Copilot's "read-only twin" gap** - the
+    harder half left open after #39 closed the payments/recovery slice,
+    per the feature-spec written and approved earlier this session (no
+    freehand build from the name alone).
+
+    **New data model** (`engine/db/models.py::MerchantTask`): `task_id`,
+    `connection_id`, `kind` (`OUT_OF_STOCK`/`LOW_STOCK`/`UNMET_DEMAND`),
+    `subject_key` (product_id or normalized query), `label`, `detail`
+    (JSON snapshot), `state` (`OPEN`/`RESOLVED`/`DISMISSED`), timestamps,
+    `decided_by`. `UNIQUE(connection_id, kind, subject_key)` is the
+    idempotency mechanism - modeled directly on `Approval`'s own
+    conventions. No `ActionType` was added, and nothing under
+    `engine/risk/` or `engine/execution/` was touched - confirmed by diff,
+    not just asserted - because a task never modifies merchant inventory,
+    a cart, or an order; it is a CV3-owned record that a person handled a
+    real, flagged problem, not a commerce action needing risk
+    classification.
+
+    **New repository functions**: `sync_merchant_tasks` (deterministic,
+    zero model calls - diffs live `catalog_alerts`/`unmet_demand` against
+    open tasks, create-if-absent/refresh-if-still-open, never reopens a
+    decided task even if the same fact persists - a named limitation, not
+    hidden), `list_merchant_tasks`, `merchant_task_counts`
+    (`tasks_open_count`/`tasks_resolved_recent_count` - genuinely new
+    figures, not a repurposed existing one), `decide_merchant_task`
+    (idempotent exactly like `decide_approval` - re-deciding an
+    already-decided task returns `changed: False`, never a second,
+    conflicting decision).
+
+    **New routes**: `GET /api/tasks/{connection_id}` (syncs then returns -
+    a merchant sees current tasks whether they've asked the Copilot
+    anything or not) and `POST /api/tasks/{connection_id}/{task_id}/decide`,
+    both `merchant_scoped()` like every other console route. Also wired
+    into the existing Copilot route, so a Copilot question triggers the
+    identical sync. Added to `auditroutes.py`'s permanent probe list.
+
+    **New UI**: `TasksPanel.tsx` (new "Merchant Tasks" nav item, Open/
+    Resolved/Dismissed filter, Resolve/Dismiss per card) and the Copilot's
+    `actionBanner` prop widened from a single banner to a list
+    (`actionBanners`, `Copilot.tsx`) so the payments-recovery banner from
+    #39 and a new task-count banner can coexist without one replacing the
+    other.
+
+    **Verified live end to end**, not just built: real tasks appeared from
+    real data with zero model involvement - Kettle got two genuine
+    `OUT_OF_STOCK` tasks from its actual out-of-stock catalogue; Northfield
+    independently got seven `LOW_STOCK`, three `OUT_OF_STOCK`, and one
+    genuinely-earned `UNMET_DEMAND` task (198 real asks for "trainers",
+    correctly clearing the >=3 threshold). Resolved one via the real API,
+    confirmed `changed: true`; resolved it again, confirmed `changed:
+    false` (idempotency); re-ran the sync, confirmed the resolved task
+    stayed resolved rather than reopening even though the product was
+    still out of stock (the stated limitation, working as designed).
+    Cross-merchant and no-key requests both refused with 401. Then
+    verified the same lifecycle in a real browser via Playwright against
+    Kettle: Overview's Copilot banner correctly read "1 merchant task
+    needs your attention," the Tasks panel showed the one real open task,
+    clicking Resolve moved it to the Resolved filter (2 resolved tasks
+    visible - the one resolved via API earlier plus this one), and the
+    Overview banner disappeared once no tasks remained open. Zero JS
+    console errors throughout. Screenshotted the panel directly - visually
+    consistent with the rest of the design system (same panel/badge/card
+    conventions as `PaymentsPanel.tsx`), not a bolted-on afterthought.
+
+    **Verification.** `npm run build` (tsc) clean. `npm run lint`: one new
+    instance of the identical pre-existing pattern already accepted in
+    `PaymentsPanel.tsx` (`refresh()` called synchronously in an effect) -
+    not a new class of problem, stated honestly rather than silently
+    absorbed into "no new errors." `auditroutes.py` clean including the
+    two new routes. `healthcheck.py` 111/116 passed - all 5 failures from
+    classes already diagnosed as model-wording-flaky or order-dependent
+    earlier this session, none touching this diff. `fuzz.py`: see below.
+
+    **Not built, per the approved spec's own scoping**: no content-
+    completeness scan feeding a `POOR_CONTENT` task kind (would need a new
+    catalogue-content scan, separate work); no automatic reopening of a
+    decided task if the underlying fact changes (accepted limitation,
+    matching `decide_approval`'s own "decided once" behaviour); Tasks is
+    not yet cross-linked from Inventory & Catalog or Customer Insights
+    (only reachable from its own nav item and the Copilot banner) - a
+    real, if minor, discoverability gap for a future slice.

@@ -226,47 +226,16 @@ these first:**
 
 ### Merchant — Initial Priorities
 
-- [~] **CV3 Merchant Copilot** — answering half built and verified
-      (`Completed.md` #32). **Reopened against the value bar**, not complete.
-      It answers from report, capabilities, policy, rules, actions, unmet
-      demand and catalogue alerts, and is read-only by design: it proposes
-      nothing, decides nothing, writes nothing. So a merchant who asks "what's
-      out of stock" is told, and then has to go and do something about it
-      elsewhere - the value-bar question "what can they do now that they
-      could not do before" has no good answer as it stands.
-
-      Remaining work: every answer that identifies a problem offers the
-      action that fixes it, executable from that panel through the existing
-      risk gate. Do not move this back to `Completed.md` until that is
-      addressed and `value-auditor` returns VALUABLE, not THIN.
-
-      **Payments-specific slice of this gap is now closed** (separate
-      session, see Completed.md #35): a merchant can now approve or reject a
-      pending payment-recovery case directly from a new Payments &
-      Checkout panel in their own console, through the existing risk gate -
-      previously only CV3's own operations queue could act on one.
-
-      **The Copilot itself now points at that action** (Completed.md #39):
-      it previously never told a merchant the Payments & Checkout action
-      existed at all - a merchant had to already know to go look. It now
-      shows a real, live "N payment recovery cases are waiting" banner
-      (present before any question is asked, reading the identical queue
-      and filter `PaymentsPanel.tsx` itself uses, so the two can never
-      disagree) that jumps straight to that panel. Verified live: appears
-      only when a real case is pending, disappears once it's resolved,
-      and never appears on Northfield (no recovery capability there).
-
-      This still does not close the remaining gap for other problem types
-      the Copilot surfaces (catalogue alerts, unmet demand, inventory) -
-      those still have no action attached and the Merchant Copilot item
-      stays reopened for that reason, and it is the harder half: there is
-      no real platform capability to attach to "restock this SKU" without
-      inventing one no adapter has (CLAUDE.md explicitly forbids that), so
-      closing it needs either a genuinely new merchant-side capability (a
-      to-do/reminder queue, not a fake platform write) or a deliberate
-      product decision that "point at the Inventory panel" counts as
-      enough of an action - a call for a `feature-spec` pass, not a
-      freehand build.
+- [x] **CV3 Merchant Copilot** — moved to `Completed.md` (#32, #35, #39, #42).
+      Both slices of the "read-only twin" gap are now closed: payments/
+      recovery (#35/#39, an existing platform action) and catalogue/
+      inventory/unmet-demand (#42, a new `MerchantTask` record, since no
+      platform action exists to attach - see Completed.md #42 for the full
+      feature-spec-first build and verification). The Copilot now shows
+      live banners for both pending recovery cases and open merchant tasks,
+      each deep-linking to a real place a merchant can act. Re-run
+      `value-auditor` before trusting this stays closed if the Copilot's
+      scope grows further.
 
       **`_catalog_alerts`'s real-volume bug was fixed in an earlier
       session** (independently re-verified by reading `_scan_catalog`

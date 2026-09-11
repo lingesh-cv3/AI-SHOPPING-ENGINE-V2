@@ -152,6 +152,7 @@ PROBES = [
     ("product performance", "GET", "/api/products/conn_demo", SK_DEMO, None, None),
     ("sales trend", "GET", "/api/sales-trend/conn_demo", SK_DEMO, None, None),
     ("sales series", "GET", "/api/sales-series/conn_demo", SK_DEMO, None, None),
+    ("merchant tasks", "GET", "/api/tasks/conn_demo", SK_DEMO, None, None),
     ("checkout conversion", "GET", "/api/conversion/conn_demo", SK_DEMO, None, None),
     ("unmet demand", "GET", "/api/unmet-demand/conn_demo", SK_DEMO, None, None),
     ("ops queue", "GET", "/api/ops/queue", OPERATOR, SK_DEMO, None),

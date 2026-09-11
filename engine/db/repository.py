@@ -28,6 +28,7 @@ from .models import (
     ExecutionAttempt,
     FunnelEvent,
     MerchantPolicy,
+    MerchantTask,
     Outcome,
     OrderLine,
     SentMail,
@@ -1046,6 +1047,197 @@ async def daily_revenue_series(connection_id: str, *, days: int = 30) -> dict:
         "prior": _series(prior_start, prior_by_day),
         "has_data": bool(current_by_day or prior_by_day),
     }
+
+
+#: Below this line: the second (catalogue/inventory/unmet-demand) slice
+#: of the Merchant Copilot's "read-only twin" gap - see #39 for the first
+#: (payments/recovery) slice and PROGRESS.md's "CV3 Merchant Copilot"
+#: entry for why this category needs a CV3-owned task record rather than
+#: a commerce ActionType: no adapter can write merchant inventory, so
+#: there is no real platform action to attach - "resolve this task" is
+#: the honest action, not a fake "restock" capability.
+
+#: A search asked this many times or more in the window is worth a task;
+#: one-off queries are noise, not a real demand signal.
+_UNMET_DEMAND_TASK_THRESHOLD = 3
+
+
+async def _upsert_task(
+    db, connection_id: str, kind: str, subject_key: str, label: str, detail: dict
+) -> None:
+    """Create-if-absent, refresh-if-still-open, leave-alone-if-decided.
+
+    The unique `(connection_id, kind, subject_key)` constraint is the
+    idempotency mechanism - this never creates a second row for the same
+    underlying fact, whether called once or a thousand times. A decided
+    (RESOLVED/DISMISSED) row is deliberately never reopened here, even if
+    the same fact is still true on a later sync - matching
+    `decide_approval`'s own "decided once, never silently revisited"
+    behaviour.
+    """
+    now = datetime.now(UTC)
+    result = await db.execute(
+        select(MerchantTask).where(
+            MerchantTask.connection_id == connection_id,
+            MerchantTask.kind == kind,
+            MerchantTask.subject_key == subject_key,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing is None:
+        db.add(
+            MerchantTask(
+                task_id=_id("mtask"),
+                connection_id=connection_id,
+                kind=kind,
+                subject_key=subject_key,
+                label=label,
+                detail=detail,
+                state="OPEN",
+                created_at=now,
+                last_seen_at=now,
+            )
+        )
+    elif existing.state == "OPEN":
+        existing.last_seen_at = now
+        existing.label = label
+        existing.detail = detail
+
+
+async def sync_merchant_tasks(
+    connection_id: str, *, catalog_alerts: dict | None, unmet_demand: list[dict] | None
+) -> None:
+    """Deterministically diff live catalogue/unmet-demand signals against
+    open tasks - create-if-absent, refresh-if-still-open. Zero model
+    involvement: this is pure rule-following over real data, called from
+    both the Tasks list route and the Copilot route so a task exists
+    whether a merchant opens the panel or just asks a question, and the
+    two can never disagree about what is currently flagged.
+
+    Best-effort at the connectivity level like every other catalogue read
+    in this codebase: a platform outage (`catalog_alerts["reachable"] is
+    False`) skips the catalogue half of this sync rather than falsely
+    resolving or falsely creating tasks from data that could not be read
+    this run. Unmet-demand sync is DB-only and unaffected by an adapter
+    outage.
+    """
+    async with session_scope() as db:
+        if catalog_alerts and catalog_alerts.get("reachable"):
+            for item in catalog_alerts.get("out_of_stock", []):
+                await _upsert_task(
+                    db, connection_id, "OUT_OF_STOCK", item["product_id"],
+                    f"{item['title']} is out of stock",
+                    {"product_id": item["product_id"], "title": item["title"]},
+                )
+            for item in catalog_alerts.get("low_stock", []):
+                await _upsert_task(
+                    db, connection_id, "LOW_STOCK", item["product_id"],
+                    f"{item['title']} is running low on stock",
+                    {"product_id": item["product_id"], "title": item["title"]},
+                )
+        for q in unmet_demand or []:
+            if q.get("times_asked", 0) < _UNMET_DEMAND_TASK_THRESHOLD:
+                continue
+            query = q["query"]
+            await _upsert_task(
+                db, connection_id, "UNMET_DEMAND", query.lower().strip()[:160],
+                f'Shoppers keep searching for "{query}" and finding nothing',
+                {"query": query, "times_asked": q["times_asked"]},
+            )
+
+
+async def list_merchant_tasks(
+    connection_id: str, *, state: str | None = None, limit: int = 50
+) -> list[dict]:
+    """The merchant's real, persisted work items - never re-derived from a
+    second calculation, so this can never disagree with the panel that
+    lets a merchant resolve one.
+    """
+    async with session_scope() as db:
+        conditions = [MerchantTask.connection_id == connection_id]
+        if state:
+            conditions.append(MerchantTask.state == state)
+        rows = await db.execute(
+            select(MerchantTask)
+            .where(*conditions)
+            .order_by(MerchantTask.last_seen_at.desc())
+            .limit(limit)
+        )
+        tasks = list(rows.scalars())
+    return [
+        {
+            "task_id": t.task_id,
+            "kind": t.kind,
+            "subject_key": t.subject_key,
+            "label": t.label,
+            "detail": t.detail or {},
+            "state": t.state,
+            "created_at": t.created_at.isoformat(),
+            "last_seen_at": t.last_seen_at.isoformat(),
+            "decided_at": t.decided_at.isoformat() if t.decided_at else None,
+            "decided_by": t.decided_by,
+        }
+        for t in tasks
+    ]
+
+
+async def merchant_task_counts(connection_id: str, *, days: int = 30) -> dict:
+    """`tasks_open_count`/`tasks_resolved_last_N_days` - the new, genuinely
+    new figures this feature owes per the value bar (not a repurposed
+    existing number), so it is possible to later tell whether the queue is
+    actually being used rather than shipping unmeasured.
+    """
+    since = datetime.now(UTC) - timedelta(days=days)
+    async with session_scope() as db:
+        open_rows = await db.execute(
+            select(func.count(MerchantTask.task_id)).where(
+                MerchantTask.connection_id == connection_id,
+                MerchantTask.state == "OPEN",
+            )
+        )
+        resolved_rows = await db.execute(
+            select(func.count(MerchantTask.task_id)).where(
+                MerchantTask.connection_id == connection_id,
+                MerchantTask.state == "RESOLVED",
+                MerchantTask.decided_at >= since,
+            )
+        )
+    return {
+        "tasks_open_count": int(open_rows.scalar() or 0),
+        "tasks_resolved_recent_count": int(resolved_rows.scalar() or 0),
+        "days": days,
+    }
+
+
+async def decide_merchant_task(
+    connection_id: str,
+    task_id: str,
+    *,
+    resolved: bool,
+    decided_by: str,
+) -> dict | None:
+    """Resolve or dismiss. Refuses to re-decide an already-decided task,
+    the identical idempotency guarantee `decide_approval` gives every
+    financial decision - two clicks (or a double-submit) never produce two
+    different outcomes or overwrite an audit record after the fact.
+    """
+    async with session_scope() as db:
+        result = await db.execute(
+            select(MerchantTask).where(
+                MerchantTask.task_id == task_id,
+                MerchantTask.connection_id == connection_id,
+            )
+        )
+        task = result.scalar_one_or_none()
+        if task is None:
+            return None
+        if task.state != "OPEN":
+            return {"task_id": task_id, "state": task.state, "changed": False}
+
+        task.state = "RESOLVED" if resolved else "DISMISSED"
+        task.decided_at = datetime.now(UTC)
+        task.decided_by = decided_by
+        return {"task_id": task_id, "state": task.state, "changed": True}
 
 
 async def friction_summary_across(

@@ -116,16 +116,17 @@ interface CopilotProps {
   suggestions: string[];
   placeholder: string;
   ask: (question: string) => Promise<CopilotAnswer>;
-  /** A real, currently-true fact with one reachable action attached, shown
-   *  above the transcript regardless of what's been asked - e.g. pending
-   *  payment-recovery cases, deep-linking straight to the panel that can
-   *  act on them. `null`/omitted when there is nothing actionable right
-   *  now, or nothing has been checked yet - never a placeholder. This is
-   *  the one place this otherwise read-only panel can point somewhere
-   *  that actually does something, closing the "answers a problem, then
-   *  leaves the merchant to go and act on it elsewhere" gap for whichever
-   *  problem types already have a real action wired up. */
-  actionBanner?: ActionBanner | null;
+  /** Real, currently-true facts each with one reachable action attached,
+   *  shown above the transcript regardless of what's been asked - e.g.
+   *  pending payment-recovery cases, or open merchant tasks - deep-linking
+   *  straight to the panel that can act on them. Empty/omitted when
+   *  nothing is actionable right now, or nothing has been checked yet -
+   *  never a placeholder. This is the one place this otherwise read-only
+   *  panel can point somewhere that actually does something, closing the
+   *  "answers a problem, then leaves the merchant to go and act on it
+   *  elsewhere" gap for whichever problem types already have a real
+   *  action wired up. */
+  actionBanners?: ActionBanner[];
 }
 
 /**
@@ -145,7 +146,7 @@ export function Copilot({
   suggestions,
   placeholder,
   ask: askApi,
-  actionBanner,
+  actionBanners,
 }: CopilotProps) {
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<CopilotTurn[]>([]);
@@ -187,18 +188,18 @@ export function Copilot({
         <span className="copilot-badge">Read-only</span>
       </div>
       <div className="panel-body copilot-body">
-        {actionBanner && (
-          <div className="copilot-action-banner">
-            <span>{actionBanner.text}</span>
+        {actionBanners?.map((b) => (
+          <div className="copilot-action-banner" key={b.text}>
+            <span>{b.text}</span>
             <button
               type="button"
               className="copilot-action-banner-btn"
-              onClick={actionBanner.onClick}
+              onClick={b.onClick}
             >
-              {actionBanner.buttonLabel} →
+              {b.buttonLabel} →
             </button>
           </div>
-        )}
+        ))}
         {turns.length === 0 ? (
           <div className="copilot-empty">
             <p>{intro}</p>

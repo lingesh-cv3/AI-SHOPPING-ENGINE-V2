@@ -38,6 +38,14 @@ export function MerchantCopilot({
   const [pendingRecoveryCount, setPendingRecoveryCount] = useState<
     number | null
   >(null);
+  // The second (catalogue/inventory/unmet-demand) slice of the same
+  // read-only-twin gap - closed by a real, persisted MerchantTask record
+  // rather than a fake inventory-write action (see
+  // engine/db/models.py::MerchantTask). Fetched independently of asking
+  // the Copilot anything, from the same /api/tasks route the Tasks panel
+  // itself reads (and which itself triggers the deterministic sync), so
+  // this can never disagree with what that panel shows.
+  const [openTaskCount, setOpenTaskCount] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -54,10 +62,40 @@ export function MerchantCopilot({
         // No count is honest here - "0" would claim nothing is waiting,
         // which is a different and stronger claim than "couldn't check".
       });
+    console_api
+      .tasks("OPEN")
+      .then((r) => {
+        if (cancelled) return;
+        setOpenTaskCount(r.tasks_open_count);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, []);
+
+  const banners = [
+    pendingRecoveryCount
+      ? {
+          text:
+            pendingRecoveryCount === 1
+              ? "1 payment recovery case is waiting for your approval."
+              : `${pendingRecoveryCount} payment recovery cases are waiting for your approval.`,
+          buttonLabel: "Review in Payments & Checkout",
+          onClick: () => onNavigate("payments"),
+        }
+      : null,
+    openTaskCount
+      ? {
+          text:
+            openTaskCount === 1
+              ? "1 merchant task needs your attention."
+              : `${openTaskCount} merchant tasks need your attention.`,
+          buttonLabel: "Review Merchant Tasks",
+          onClick: () => onNavigate("tasks"),
+        }
+      : null,
+  ].filter((b): b is NonNullable<typeof b> => b !== null);
 
   return (
     <Copilot
@@ -67,18 +105,7 @@ export function MerchantCopilot({
       suggestions={SUGGESTED_QUESTIONS}
       placeholder="Ask a question about your store…"
       ask={console_api.askCopilot}
-      actionBanner={
-        pendingRecoveryCount
-          ? {
-              text:
-                pendingRecoveryCount === 1
-                  ? "1 payment recovery case is waiting for your approval."
-                  : `${pendingRecoveryCount} payment recovery cases are waiting for your approval.`,
-              buttonLabel: "Review in Payments & Checkout",
-              onClick: () => onNavigate("payments"),
-            }
-          : null
-      }
+      actionBanners={banners}
     />
   );
 }

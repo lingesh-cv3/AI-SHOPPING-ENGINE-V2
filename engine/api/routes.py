@@ -44,6 +44,7 @@ from .schemas import (
     ConnectionSummary,
     CopilotAnswer,
     CopilotQuestion,
+    MerchantTaskDecision,
     PolicyUpdate,
     RejectionView,
     RuleView,
@@ -947,6 +948,14 @@ async def merchant_copilot(
         capabilities = await _capabilities_dict(connection_id)
     except HTTPException:
         capabilities = None
+    catalog_alerts = await _catalog_alerts(connection_id)
+    unmet_demand = await db.unmet_demand(connection_id, days=30)
+    # Deterministic, model-free sync so a task exists whether a merchant
+    # opens the Tasks panel or just asks the Copilot a question - see
+    # `db.sync_merchant_tasks`'s own docstring.
+    await db.sync_merchant_tasks(
+        connection_id, catalog_alerts=catalog_alerts, unmet_demand=unmet_demand
+    )
     reply = await copilot.ask(
         connection_id,
         body.question,
@@ -954,13 +963,66 @@ async def merchant_copilot(
         policy=_policy_dict(connection_id),
         rules=[r.model_dump() for r in _rules_list()],
         actions=[a.model_dump() for a in _actions_list()],
-        catalog_alerts=await _catalog_alerts(connection_id),
-        unmet_demand=await db.unmet_demand(connection_id, days=30),
+        catalog_alerts=catalog_alerts,
+        unmet_demand=unmet_demand,
         product_performance=await db.product_performance(connection_id, days=30),
         sales_period_comparison=await db.sales_period_comparison(connection_id, days=7),
         checkout_conversion=await db.checkout_conversion(connection_id, days=30),
     )
     return CopilotAnswer(answer=reply.answer, used_model=reply.used_model)
+
+
+@app.get(f"{API}/tasks/{{connection_id}}")
+async def merchant_tasks_route(
+    connection_id: str,
+    state: str | None = None,
+    limit: int = 50,
+    _=Depends(merchant_scoped()),
+) -> dict:
+    """A merchant's real, persisted work items - flagged deterministically
+    from live catalogue/unmet-demand data, never by the model. Syncs on
+    every read (the same `db.sync_merchant_tasks` the Copilot route calls)
+    so opening this panel alone is enough to see current tasks, without
+    needing to have asked the Copilot anything first.
+
+    Read-only in the risk-gate sense: this never touches a cart, an order,
+    or merchant inventory. `state` filters to "OPEN"/"RESOLVED"/
+    "DISMISSED"; omitted, every task in the window is returned.
+    """
+    _adapter(connection_id)
+    catalog_alerts = await _catalog_alerts(connection_id)
+    unmet_demand = await db.unmet_demand(connection_id, days=30)
+    await db.sync_merchant_tasks(
+        connection_id, catalog_alerts=catalog_alerts, unmet_demand=unmet_demand
+    )
+    tasks = await db.list_merchant_tasks(connection_id, state=state, limit=limit)
+    counts = await db.merchant_task_counts(connection_id)
+    return {"tasks": tasks, **counts}
+
+
+@app.post(f"{API}/tasks/{{connection_id}}/{{task_id}}/decide")
+async def decide_merchant_task_route(
+    connection_id: str,
+    task_id: str,
+    body: MerchantTaskDecision,
+    _=Depends(merchant_scoped()),
+) -> dict:
+    """Resolve or dismiss one task. Never a commerce action, never reaches
+    the risk gate, never writes merchant inventory - a durable record that
+    a person handled the underlying problem themselves. Idempotent the
+    same way `decide_approval` is: re-deciding an already-decided task
+    returns `changed: False` rather than a second, conflicting decision.
+    """
+    _adapter(connection_id)
+    result = await db.decide_merchant_task(
+        connection_id,
+        task_id,
+        resolved=body.resolved,
+        decided_by=body.decided_by,
+    )
+    if result is None:
+        raise HTTPException(404, "no such task")
+    return result
 
 
 @app.post(f"{API}/admin/expire")
