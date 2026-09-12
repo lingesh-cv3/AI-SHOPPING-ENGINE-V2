@@ -857,8 +857,81 @@ async def checkout_conversion(
     return result
 
 
+async def _product_totals_window(
+    connection_id: str, start: datetime, end: datetime | None
+) -> dict[str, dict]:
+    """Per-product quantity/revenue/order-count for one arbitrary window
+    `[start, end)` (`end` of `None` means "through now"). Factored out of
+    `product_performance` so the identical aggregation can run twice -
+    current window and, when asked, the equal-length prior window - without
+    a second, independently-written implementation. Quantity and order count
+    are SQL-aggregated (`GROUP BY`/`func.sum`/`func.count`). Revenue is not:
+    `line_total` is stored as a string (arbitrary-precision money, not a SQL
+    numeric type), so it is fetched one row per order line within the window
+    and summed in Python with `Decimal`. That is bounded by how many lines
+    fall in the requested window, not by total catalogue size, but a wide
+    window with `compare=True` doubles it into two such fetches - worth
+    revisiting if window sizes grow much past what a dashboard needs.
+    """
+    conditions = [
+        OrderLine.connection_id == connection_id,
+        OrderLine.created_at >= start,
+    ]
+    if end is not None:
+        conditions.append(OrderLine.created_at < end)
+
+    async with session_scope() as db:
+        grouped = await db.execute(
+            select(
+                OrderLine.product_id,
+                OrderLine.product_name,
+                func.sum(OrderLine.quantity).label("quantity"),
+                func.count(func.distinct(OrderLine.order_id)).label("order_count"),
+            )
+            .where(*conditions)
+            .group_by(OrderLine.product_id, OrderLine.product_name)
+        )
+        grouped_rows = list(grouped.all())
+
+        revenue_rows = await db.execute(
+            select(OrderLine.product_id, OrderLine.line_total).where(*conditions)
+        )
+        revenue_pairs = list(revenue_rows.all())
+
+    revenue_by_product: dict[str, Decimal] = {}
+    for pid, line_total in revenue_pairs:
+        if line_total is None:
+            continue
+        try:
+            revenue_by_product[pid] = revenue_by_product.get(
+                pid, Decimal("0.00")
+            ) + Decimal(str(line_total))
+        except Exception:  # noqa: BLE001 - a malformed stored value must not crash the report
+            continue
+
+    totals: dict[str, dict] = {}
+    for product_id, product_name, quantity, order_count in grouped_rows:
+        totals[product_id] = {
+            "product_id": product_id,
+            "product_name": product_name,
+            "quantity": int(quantity or 0),
+            "revenue": revenue_by_product.get(product_id, Decimal("0.00")),
+            "order_count": int(order_count or 0),
+        }
+    return totals
+
+
+def _pct_change(current: Decimal, prior: Decimal) -> float | None:
+    """A real percentage change, or `None` when the prior value is zero -
+    never a divide-by-zero, and never a fabricated "infinite" or 0%. The
+    caller renders `None` as "new this period", not as unchanged."""
+    if prior == 0:
+        return None
+    return float(round((current - prior) / prior * 100, 1))
+
+
 async def product_performance(
-    connection_id: str, *, days: int = 30, limit: int = 10
+    connection_id: str, *, days: int = 30, limit: int = 10, compare: bool = False
 ) -> dict:
     """Product-level sales performance, sourced from `OrderLine` - one row per
     product per *completed* (paid) order, written from this schema change
@@ -882,69 +955,60 @@ async def product_performance(
     in the catalogue at all - callers must say so rather than imply this is
     a full slow-mover report.
 
-    Aggregation happens in SQL (`GROUP BY`/`func.sum`/`func.count`) so this
-    holds up at real order volume - it does not pull every row into Python
-    to sum by hand.
+    `compare=True` adds `revenue_prior`/`quantity_prior`/`revenue_change_pct`/
+    `quantity_change_pct` to every row in `top_by_quantity`/`top_by_revenue`,
+    computed against the equal-length window immediately before this one via
+    the identical `_product_totals_window` aggregation - a product with no
+    prior-window sales gets `revenue_prior: "0.00"` and a `None` change
+    percentage (not a fabricated 0% or an undefined division).
     """
     since = datetime.now(UTC) - timedelta(days=days)
-    async with session_scope() as db:
-        grouped = await db.execute(
-            select(
-                OrderLine.product_id,
-                OrderLine.product_name,
-                func.sum(OrderLine.quantity).label("quantity"),
-                func.count(func.distinct(OrderLine.order_id)).label("order_count"),
+    current = await _product_totals_window(connection_id, since, None)
+    prior = (
+        await _product_totals_window(connection_id, since - timedelta(days=days), since)
+        if compare
+        else {}
+    )
+
+    def _row(p: dict) -> dict:
+        out = {
+            "product_id": p["product_id"],
+            "product_name": p["product_name"],
+            "quantity": p["quantity"],
+            "revenue": f"{p['revenue']:.2f}",
+            "order_count": p["order_count"],
+        }
+        if compare:
+            prior_p = prior.get(p["product_id"])
+            prior_revenue = prior_p["revenue"] if prior_p else Decimal("0.00")
+            prior_quantity = prior_p["quantity"] if prior_p else 0
+            out["revenue_prior"] = f"{prior_revenue:.2f}"
+            out["quantity_prior"] = prior_quantity
+            out["revenue_change_pct"] = _pct_change(p["revenue"], prior_revenue)
+            out["quantity_change_pct"] = _pct_change(
+                Decimal(p["quantity"]), Decimal(prior_quantity)
             )
-            .where(
-                OrderLine.connection_id == connection_id,
-                OrderLine.created_at >= since,
-            )
-            .group_by(OrderLine.product_id, OrderLine.product_name)
-        )
-        grouped_rows = list(grouped.all())
+        return out
 
-        revenue_rows = await db.execute(
-            select(OrderLine.product_id, OrderLine.line_total).where(
-                OrderLine.connection_id == connection_id,
-                OrderLine.created_at >= since,
-            )
-        )
-        revenue_pairs = list(revenue_rows.all())
-
-    revenue_by_product: dict[str, Decimal] = {}
-    for pid, line_total in revenue_pairs:
-        if line_total is None:
-            continue
-        try:
-            revenue_by_product[pid] = revenue_by_product.get(
-                pid, Decimal("0.00")
-            ) + Decimal(str(line_total))
-        except Exception:  # noqa: BLE001 - a malformed stored value must not crash the report
-            continue
-
-    products = []
-    for product_id, product_name, quantity, order_count in grouped_rows:
-        products.append(
-            {
-                "product_id": product_id,
-                "product_name": product_name,
-                "quantity": int(quantity or 0),
-                "revenue": f"{revenue_by_product.get(product_id, Decimal('0.00')):.2f}",
-                "order_count": int(order_count or 0),
-            }
-        )
-
-    by_quantity = sorted(products, key=lambda p: -p["quantity"])[:limit]
-    by_revenue = sorted(products, key=lambda p: -Decimal(p["revenue"]))[:limit]
-    lowest_performers = sorted(
-        products, key=lambda p: (p["quantity"], Decimal(p["revenue"]))
-    )[:limit]
+    products = list(current.values())
+    by_quantity = [_row(p) for p in sorted(products, key=lambda p: -p["quantity"])[:limit]]
+    by_revenue = [_row(p) for p in sorted(products, key=lambda p: -p["revenue"])[:limit]]
+    lowest_performers = [
+        _row(p)
+        for p in sorted(products, key=lambda p: (p["quantity"], p["revenue"]))[:limit]
+    ]
+    # Every distinct product's revenue summed, not just the top N shown -
+    # so "what share of revenue comes from the top products" is a real
+    # ratio against the true total, not a self-referential one computed
+    # only from the list already being displayed.
+    total_revenue = sum((p["revenue"] for p in products), Decimal("0.00"))
 
     return {
         "days": days,
         "since": since.isoformat(),
         "has_data": bool(products),
         "distinct_products_sold": len(products),
+        "total_revenue": f"{total_revenue:.2f}",
         "top_by_quantity": by_quantity,
         "top_by_revenue": by_revenue,
         "lowest_performers": lowest_performers,

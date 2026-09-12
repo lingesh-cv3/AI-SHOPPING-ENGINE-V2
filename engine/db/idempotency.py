@@ -366,6 +366,18 @@ async def forget_payment(connection_id: str, cart_id: str) -> None:
     platform has just told us this id is fresh. Nothing about a payment can be
     racing a cart that has not been created yet, so there is no IN_FLIGHT row to
     protect here the way release_payment protects one.
+
+    Also clears any `OrderLine` rows a *previous* life of this same cart id
+    left behind - found by hand while verifying Product Performance's
+    authoritativeness: `OrderLine.row_id` is derived from this identical key
+    (`f"{key}:{i}"`), so without this, a cart id recycled after a restart
+    would have its brand new, genuinely paid order silently *merge into* the
+    old life's rows (an upsert-by-row_id, not a fresh insert) rather than
+    getting its own - correctly recording the new purchase's quantity/revenue,
+    but silently erasing whatever real product data the previous order under
+    this same recycled id had contributed. The payment ledger already solved
+    this exact "recycled id inherits stale state" problem for itself two
+    lines above; this closes the identical gap one table over.
     """
     key = cart_payment_key(connection_id, cart_id)
 
@@ -373,3 +385,9 @@ async def forget_payment(connection_id: str, cart_id: str) -> None:
         row = await db.get(ExecutionAttempt, key)
         if row is not None:
             await db.delete(row)
+
+        stale_lines = await db.execute(
+            select(OrderLine).where(OrderLine.row_id.like(f"{key}:%"))
+        )
+        for line in stale_lines.scalars():
+            await db.delete(line)

@@ -233,7 +233,9 @@ export function MerchantConsole() {
         {section === "orders" && (
           <OrdersConversion onNavigate={(s) => setSection(s as SectionId)} />
         )}
-        {section === "products" && <ProductPerformance />}
+        {section === "products" && (
+          <ProductPerformance onNavigate={(s) => setSection(s as SectionId)} />
+        )}
         {section === "customers" && <CustomerInsights />}
         {section === "inventory" && <InventoryPanel />}
         {section === "payments" && <PaymentsPanel />}

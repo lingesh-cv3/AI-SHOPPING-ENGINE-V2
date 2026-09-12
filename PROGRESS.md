@@ -404,14 +404,33 @@ these first:**
       instrumentation remains explicitly out of scope - re-confirmed, not
       re-decided; still a separate, larger project.
 
+      **Product Performance brought to the same tier in #45**, plus
+      per-product period comparison (`revenue_change_pct`/
+      `quantity_change_pct`, `None` rather than a fabricated 0% when a
+      product is new this period) and a real "top-5 revenue share"
+      figure (`total_revenue` - every distinct product summed, not just
+      the shown top-N). **Found and fixed a real, pre-existing product-
+      data-integrity bug while verifying this slice**:
+      `db.idempotency.forget_payment` cleared the payment-ledger row for
+      a recycled cart id (reissued after a merchant-backend restart) but
+      never touched `OrderLine`, whose `row_id` derives from the same
+      payment key - so a recycled cart id's new, genuine purchase
+      silently overwrote whatever `OrderLine` rows its previous life had
+      written instead of getting its own. Fixed to also purge those
+      stale rows; verified against the literal failure mode (forced a
+      real cart-id recycle, confirmed the stale row was purged at cart
+      creation and the aggregate correctly dropped by exactly the
+      earlier-corrupted amount).
+
       **Still fully open:** full page-by-page visual polish beyond
-      Overview, Sales & Revenue, and now Orders & Conversion. Product
-      Performance, Customer Insights, Inventory & Catalog, Payments &
+      Overview, Sales & Revenue, Orders & Conversion, and now Product
+      Performance. Customer Insights, Inventory & Catalog, Payments &
       Checkout, AI Commerce, Recovery, Holdout, Business Insights,
       Platform and Settings still use the plainer card/list treatment
       from #36 rather than the KPI-card/status-badge/trend-chart system
-      built for Overview in #37/#40/#41 and extended to Sales & Revenue in
-      #43 - a real UI-consistency gap, not a functional one.
+      built for Overview in #37/#40/#41 and extended to Sales & Revenue
+      (#43), Orders & Conversion (#44), and Product Performance (#45) -
+      a real UI-consistency gap, not a functional one.
 
 - [ ] AI Store Diagnosis
 - [ ] Recovery Opportunity Radar

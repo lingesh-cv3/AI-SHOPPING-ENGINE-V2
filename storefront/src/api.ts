@@ -917,9 +917,9 @@ export const console_api = {
   catalogAlerts: () =>
     merchantCall<CatalogAlerts>(`/api/catalog/${getConnection()}`),
 
-  productPerformance: (days = 30, limit = 10) =>
+  productPerformance: (days = 30, limit = 10, compare = false) =>
     merchantCall<ProductPerformance>(
-      `/api/products/${getConnection()}?days=${days}&limit=${limit}`,
+      `/api/products/${getConnection()}?days=${days}&limit=${limit}&compare=${compare}`,
     ),
 
   salesTrend: (days = 7) =>
@@ -982,12 +982,23 @@ interface ProductLine {
   quantity: number;
   revenue: string;
   order_count: number;
+  /** Present only when fetched with `compare: true` - the identical
+   *  figures for the equal-length window immediately before this one.
+   *  `*_change_pct` is `null` when the prior value was zero ("new this
+   *  period"), never a fabricated 0% or an undefined division. */
+  revenue_prior?: string;
+  quantity_prior?: number;
+  revenue_change_pct?: number | null;
+  quantity_change_pct?: number | null;
 }
 
 export interface ProductPerformance {
   days: number;
   has_data: boolean;
   distinct_products_sold: number;
+  /** Every distinct product's revenue summed - the true total, not just
+   *  the sum of whichever top-N list happens to be shown. */
+  total_revenue: string;
   top_by_quantity: ProductLine[];
   top_by_revenue: ProductLine[];
   lowest_performers: ProductLine[];

@@ -2449,3 +2449,117 @@ below; `npm run build` now exits 0.)
     Performance, Customer Insights, Inventory, Payments, AI Commerce,
     Recovery, Holdout, Business Insights, Platform, Settings all remain at
     the older #36 visual tier.
+
+45. **Brought Product Performance to Overview/Sales & Revenue/Orders &
+    Conversion's visual tier, added period-over-period comparison, and
+    found+fixed a real, pre-existing product-data-integrity bug while
+    verifying it end to end.** Audited first: `product_performance` was
+    already authoritative (`OrderLine`, written once per succeeded
+    checkout at the same call sites as the payment ledger, never for a
+    decline), already honestly scoped (`lowest_performers_note`/
+    `historical_note` state the real limitations rather than hide them),
+    and already the Copilot's own source (no second, independently-
+    written ranking). What was missing was purely visual (no header, no
+    date-range control, no KPI row) and one real functional gap: no way
+    to answer "what changed compared with the previous period" or "what
+    share of revenue comes from the top products".
+
+    **A real, previously-undiscovered bug found and fixed while verifying
+    this slice's own payment/order-integrity requirement, not assumed
+    correct from the code**: `db.idempotency.forget_payment` (called at
+    `create_cart` specifically to let a recycled cart id - reissued after
+    a merchant-backend restart, since the platform's own counter lives in
+    its memory - be legitimately re-charged) only ever deleted the stale
+    `ExecutionAttempt` payment-ledger row for that recycled id. It never
+    touched `OrderLine`, whose `row_id` is derived from the identical
+    payment key (`f"{key}:{i}"`). So a cart id's *second* real, paid life
+    silently **overwrote** whatever `OrderLine` rows its *first* life had
+    written - upserting by `row_id` rather than inserting fresh - instead
+    of getting its own rows. Caught by hand: bought 2x a real product,
+    the aggregate only moved by 1 unit / a fraction of the expected
+    revenue. Traced directly in `cv3.db` to a single `OrderLine` row whose
+    `created_at` was over a day stale, holding a mix of an old order's
+    identity and the new purchase's quantity/revenue - the old order's
+    real historical contribution had been silently destroyed. Fixed by
+    having `forget_payment` also delete any `OrderLine` rows matching that
+    same payment-key prefix, exactly mirroring how it already treats the
+    payment ledger. **Verified the fix against the literal failure mode**:
+    restarted the Kettle merchant backend to force the same cart id
+    (`BAG-0001`) to recycle again, confirmed the stale `OrderLine` row was
+    purged the moment the new cart was created (before any purchase),
+    completed a fresh purchase of a *different* product on it, and
+    confirmed the aggregate for the *original* product correctly dropped
+    by exactly the amount the corrupted row had wrongly contributed
+    (50/62500 from 52/65000 - the +2/+2500 this same bug injected earlier
+    in this session), while the new product's own figures were exactly
+    correct (order_count, quantity, revenue all consistent with one
+    genuine new order).
+
+    **New backend capability**: `product_performance` gained an optional
+    `compare: bool` parameter, refactored via a new `_product_totals_window`
+    (the identical per-product SQL aggregation, parameterized to an
+    arbitrary window) run twice - current and, when asked, the equal-
+    length prior window - under new `revenue_prior`/`quantity_prior`/
+    `revenue_change_pct`/`quantity_change_pct` fields per row. A product
+    with no prior-window sales gets a real `None` percentage ("new this
+    period"), never a fabricated 0% or a divide-by-zero. A new
+    `total_revenue` field (every distinct product's revenue summed, not
+    just the top-N shown) supports an honest "top-5 revenue share" ratio
+    against the true total. `compare` defaults to `False` and is additive
+    - the Copilot's own call and every other existing caller are
+    unaffected, confirmed directly (`'revenue_prior' not in` a default
+    response).
+
+    **New page**: header with a 7/30/90-day picker, a 4-KPI row (Distinct
+    products sold, Top seller by units, Top by revenue, Top-5 revenue
+    share), the existing three-tab ranked table (Best selling/By revenue/
+    Lowest selling) rebuilt as a real table with a live "vs. prior" column
+    (omitted for the Lowest-selling view, where a comparison isn't the
+    point), and the embedded Merchant Copilot.
+
+    **Payment/order-integrity, verified end to end for every required
+    case**: successful purchase → exactly one correct `OrderLine`
+    (quantity and revenue matched the real cart contents exactly).
+    Declined payment (test card `0002`) → zero `OrderLine` rows. Retry of
+    an already-paid cart → `already_paid: true`, the existing single row
+    unchanged (no duplicate). Payment recovery (approved through the real
+    risk-gated route) → exactly one paid `OrderLine` appeared only after
+    the recovery succeeded, correctly quantified. Duplicate approval on an
+    already-decided case → `changed: false`, `executed: null`, no
+    re-execution, no second row.
+
+    **Verified live on both merchants** via Playwright at 1600px: correct
+    per-merchant theming, real distinct rankings, the revenue-view table's
+    first row matching the "Top by revenue" KPI exactly (a genuine
+    ambiguous-selector false alarm caught and resolved during this same
+    verification - `page.click('text=By revenue')` was matching the KPI
+    card's own label text "Top **by revenue**" before reaching the actual
+    tab button; a scoped locator confirmed the app itself was correct all
+    along), the Lowest-selling view correctly omitting the comparison
+    column, zero JS console errors, tenant isolation re-verified directly
+    on the modified route (cross-merchant and no-key both refused with
+    401), zero-data (`days=0`) confirmed honest (`has_data: false`, empty
+    arrays, real notes, `total_revenue: "0.00"`).
+
+    **Merchant Copilot verified against the same authoritative data**, six
+    real questions: "selling best" correctly ranks by quantity (with
+    revenue shown inline, never conflated); "generate the most revenue"
+    correctly ranks by revenue; "sold the least" correctly ranks by
+    quantity ascending and explicitly labels itself "BY QUANTITY"; "which
+    products have no recorded sales" is answered honestly ("I cannot
+    confirm... the data does not provide that information") rather than
+    guessed - no second, independently-written ranking exists in the
+    Copilot's own prompt-building path.
+
+    **Verification.** `npm run build` (tsc) clean, `npm run lint`
+    identical 8-error baseline (0 new). `auditroutes.py` clean.
+    `healthcheck.py` 111/116 passed - 5 failures, all from classes already
+    diagnosed as model-wording-flaky or the funnel timing artifact earlier
+    this session, none touching product performance (the two dedicated
+    "Product performance" healthcheck assertions both passed). `fuzz.py`
+    clean (every invariant held).
+
+    **Not attempted this slice**: Customer/Shopping, Inventory & Catalog,
+    Payments & Checkout, AI Commerce, Recovery, Holdout, Business
+    Insights, Platform, Settings all remain at the older visual tier -
+    each needs its own slice.

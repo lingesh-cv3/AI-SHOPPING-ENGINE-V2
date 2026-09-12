@@ -697,16 +697,18 @@ async def product_performance_route(
     connection_id: str,
     days: int = 30,
     limit: int = 10,
+    compare: bool = False,
     _=Depends(merchant_scoped()),
 ) -> dict:
     """The full product-performance breakdown - quantity ranking, revenue
     ranking and lowest performers - that `/report` only ever embedded a
     5-item quantity slice of. The Copilot already reads this same repository
     function directly; this route is what lets the Product Performance UI
-    surface do the same, so the two can never disagree.
+    surface do the same, so the two can never disagree. `compare=true` adds
+    each row's equal-length-prior-window figures.
     """
     _adapter(connection_id)
-    return await db.product_performance(connection_id, days=days, limit=limit)
+    return await db.product_performance(connection_id, days=days, limit=limit, compare=compare)
 
 
 @app.get(f"{API}/sales-trend/{{connection_id}}")
