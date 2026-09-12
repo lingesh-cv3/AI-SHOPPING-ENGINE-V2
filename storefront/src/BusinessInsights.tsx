@@ -5,6 +5,7 @@ import {
   type Conversion,
   type MerchantReport as Report,
   type ProductPerformance as Performance,
+  type UnmetDemand,
 } from "./api";
 import { MerchantCopilot } from "./MerchantCopilotWidget";
 
@@ -38,9 +39,10 @@ export function BusinessInsights({
       console_api.catalogAlerts().catch(() => null),
       console_api.conversion().catch(() => null),
       console_api.productPerformance(30, 10).catch(() => null),
+      console_api.unmetDemand(30, 5).catch(() => null),
     ])
-      .then(([report, catalog, conversion, products]) => {
-        setInsights(buildInsights(report, catalog, conversion, products));
+      .then(([report, catalog, conversion, products, demand]) => {
+        setInsights(buildInsights(report, catalog, conversion, products, demand));
         setError(null);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Could not build insights."));
@@ -121,6 +123,7 @@ function buildInsights(
   catalog: CatalogAlerts | null,
   conversion: Conversion | null,
   products: Performance | null,
+  demand: UnmetDemand | null,
 ): Insight[] {
   const insights: Insight[] = [];
 
@@ -163,6 +166,16 @@ function buildInsights(
       insights.push({
         text: `Your best seller by volume isn't your top earner - "${topByQuantity.product_name}" sells the most units, but "${topByRevenue.product_name}" brings in the most revenue.`,
         evidence: `${topByQuantity.quantity} units vs ${topByRevenue.revenue} ${report.total_sales_currency}`,
+      });
+    }
+  }
+
+  if (demand && demand.queries.length > 0) {
+    const top = demand.queries[0];
+    if (top.times_asked >= 2) {
+      insights.push({
+        text: `Shoppers keep searching for "${top.query}" and finding nothing - a real gap in what you stock.`,
+        evidence: `asked ${top.times_asked} time${top.times_asked === 1 ? "" : "s"} in the last ${demand.days} days`,
       });
     }
   }

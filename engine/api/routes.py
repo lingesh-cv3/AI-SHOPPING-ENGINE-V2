@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from engine import copilot, db, expiry
 from engine import session as session_store
 from engine.decision import operation_for
+from engine.reasoning.prompts import PROPOSABLE
 from engine.risk import RULE_ORDER, AutomationMode, RiskPolicy, explain_rules
 from shared.models import (
     ACTION_RISK_PROPERTIES,
@@ -209,14 +210,28 @@ def get_rules() -> list[RuleView]:
 
 
 def _actions_list() -> list[ActionInfo]:
-    """Every action type and its fixed risk properties.
+    """Every action the engine can actually propose, with its fixed risk
+    properties.
 
-    can_ever_be_automatic lets the policy editor disable financial actions in the
-    UI, rather than letting a merchant tick a box the gate will silently override.
-    Better to explain up front than to surprise them later.
+    Restricted to `PROPOSABLE` (`engine.reasoning.prompts`) rather than every
+    `ActionType` member - a real, previously-undiscovered gap found during a
+    functional audit: `ISSUE_REFUND` and `CANCEL_ORDER` are declared types
+    with risk properties but are not in the model's proposable-action list
+    and no adapter implements either operation (see Returns.tsx's own
+    docstring for the same fact from the frontend side), so they can never
+    actually be executed regardless of a merchant's policy. Serving them
+    here made Settings show two "Always waits for you - moves money" toggle
+    rows for actions that can never happen, and would let the Copilot answer
+    "what actions can you take" by naming a capability that does not exist.
+    `NO_ACTION`/`ESCALATE_TO_HUMAN` were already filtered out on the
+    frontend (`StoreSettings.tsx`'s `meaningful` filter) for the same
+    not-a-real-toggle reason; this closes the identical gap at its source
+    so every caller (Settings, the Copilot's own action-list answer) sees
+    only actions that can genuinely occur, without each needing its own
+    filter.
     """
     out: list[ActionInfo] = []
-    for action_type in ActionType:
+    for action_type in PROPOSABLE:
         props = risk_properties_for(action_type)
         out.append(
             ActionInfo(

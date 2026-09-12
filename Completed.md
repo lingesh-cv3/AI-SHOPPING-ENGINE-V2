@@ -2679,3 +2679,144 @@ below; `npm run build` now exits 0.)
     mobile-optimized navigation shell (the left-nav sidebar itself does
     not collapse below ~720px - pre-existing from #36, not touched here,
     and no page's own content overflowed at 400px as a result).
+
+47. **System-level Merchant functional-completion audit** - independent of
+    #40-#46's visual work, tracing every Merchant area's full chain (UI →
+    API → repository → database → adapter → real commerce event →
+    Merchant metric → Copilot/Task/action → outcome) rather than trusting
+    that a page rendering or a prior slice's own tests meant the
+    underlying capability was genuinely complete.
+
+    **One real, previously-undiscovered bug found and fixed**:
+    `_actions_list()` (`engine/api/routes.py`, backing `/api/policy/actions`)
+    iterated every `ActionType` enum member, including `ISSUE_REFUND` and
+    `CANCEL_ORDER` - two types that carry risk properties but are not in
+    `PROPOSABLE` (`engine/reasoning/prompts.py`) and that no adapter
+    implements, so neither can ever actually be executed regardless of a
+    merchant's policy (the same fact `Returns.tsx` already states
+    honestly on the frontend). This made Settings show two "Always waits
+    for you - moves money" toggle rows for actions that can never happen,
+    and would let the Merchant Copilot answer "what actions can you take"
+    by naming a capability that does not exist. Fixed by restricting
+    `_actions_list()` to `PROPOSABLE`, the single source of truth every
+    consumer (Settings, the Copilot's action-list context) now shares -
+    `NO_ACTION`/`ESCALATE_TO_HUMAN` were already filtered on the frontend
+    for the identical reason, closing the gap at its root instead of
+    adding a third filter. Verified in the browser: Settings no longer
+    renders either phantom row on either merchant;
+    `/api/policy/actions` now returns exactly the 17 `PROPOSABLE` types.
+
+    **One real gap closed in Business Insights**: the page's deterministic
+    insight rules read `report`/`catalog`/`conversion`/`product_performance`
+    but never `unmet_demand`, despite unmet demand being exactly the kind
+    of real, evidence-backed signal ("shoppers keep searching for X and
+    finding nothing - a real gap in what you stock") this page exists to
+    surface. Added as a fifth rule (only fires above a real repeat-count
+    threshold, with the literal count and window as evidence, same
+    "no insight without a number" discipline as every existing rule).
+    Verified live on Northfield: correctly surfaces "trainers" (208 asks)
+    alongside the four pre-existing insight types.
+
+    **Full chain traced and confirmed already genuinely complete** for
+    every other area, not assumed from a page rendering:
+    - **Merchant Copilot**: reads the identical repository functions
+      (`merchant_report`, `product_performance`, `checkout_conversion`,
+      `sales_period_comparison`, catalog alerts, unmet demand,
+      capabilities/policy/rules/actions) every page itself renders from -
+      confirmed by direct comparison, not assumed: asked "how many
+      completed orders do we have, and what's our total revenue
+      recovered" against Kettle's live report, and "can I recover failed
+      payments... how many completed orders" against Northfield's -
+      both answers matched the concurrent `/api/report` figures exactly,
+      including Northfield's correct "no, this platform does not support
+      it" rather than a hedge.
+    - **Merchant Tasks**: `_upsert_task`'s unique
+      `(connection_id, kind, subject_key)` constraint genuinely prevents
+      duplicate rows for the same fact regardless of how many times
+      `sync_merchant_tasks` runs (Copilot route and Tasks route both call
+      it, confirmed identical); a decided (RESOLVED/DISMISSED) task is
+      never reopened even if the same catalogue fact is still true on a
+      later sync - read directly in `_upsert_task`, not inferred; `decide_
+      merchant_task` refuses to re-decide an already-decided task
+      (`changed: false`), the same idempotency guarantee `decide_approval`
+      gives financial decisions.
+    - **AI Commerce**: the page itself is correctly informational (an
+      observed-outcomes report, explicitly labelled "observed, not
+      causal" in its own copy) over a real reasoning → decision → risk →
+      execution → outcome chain that lives in the chat pipeline itself,
+      not in this page - confirmed real via `healthcheck.py`'s own
+      passing assertions for that exact chain ("asks which size instead
+      of guessing", "sold-out sizes are not offered", "a blocked
+      escalation still reaches a person", etc.), not re-derived from
+      scratch. Consistent with the value-bar precedent already
+      established for this page - it does not duplicate an action the
+      chat itself already owns.
+    - **Holdout / Experiment**: the full assignment → exposure → outcome
+      lifecycle (a session is assigned once and never reassigned, gets no
+      reasoning or proposal while in the holdout group, is still counted
+      correctly in the merchant report, and a holdout shopper who fixes
+      their own problem still counts as resolved) is independently
+      verified by nine passing `healthcheck.py` assertions under "The
+      holdout" - not something this audit re-verified from scratch, but
+      confirmed still passing.
+    - **Returns**: correctly classified as unsupported-by-platform, not a
+      gap. Re-confirmed directly rather than trusted from the earlier
+      docstring: `ISSUE_REFUND` is absent from `PROPOSABLE`, and no
+      adapter implements a return/refund operation - the same fact that
+      motivated this session's Settings fix above.
+    - **Payments & Checkout / Recovery**: a real Kettle purchase, a real
+      decline → simulate → recovery-approval, a duplicate-decision
+      redecide (`changed: false`), and a real Northfield purchase with
+      its decline correctly reaching a handover rather than a recovery
+      approval (no adapter-declared recovery capability, confirmed via
+      `/api/connections/conn_demo/capabilities`) were all driven for real
+      against the running engine and both merchant backends this
+      session (`scripts/verify_functional_audit.py`, gitignored) -
+      `completed_order_count`, conversion's `completed_orders`,
+      `recovery_count`, and product revenue all moved consistently for
+      the same transaction, and a retried checkout on an already-paid
+      cart with a *different* card created zero duplicate orders.
+
+    **A real, reproducible-but-unresolved intermittent issue documented,
+    not silently dropped or falsely claimed fixed**: `/api/report`'s
+    `completed_order_count` occasionally (roughly one call in four or
+    five) does not yet reflect the immediately-preceding successful
+    checkout, always correcting itself on a later call. Reproduced under
+    direct temporary instrumentation added to `total_sales()` and
+    `payment_settled()`: the write is confirmed correct and immediate
+    (the in-memory row shows `succeeded=True` and a valid `completed_at`
+    right before commit), and the very next read - through the *identical*
+    underlying DBAPI connection object, logged and compared by `id()` on
+    both sides - still misses it. Two candidate fixes (SQLite WAL mode,
+    `NullPool`) were tried and neither changed the behaviour; both were
+    reverted rather than shipped unproven. Never observed to lose or
+    duplicate data - `fuzz.py`'s invariant checks have never caught it
+    across many runs this session. Written up in full, with the exact
+    evidence, in `PROGRESS.md`'s Known Issues - specific to the SQLite
+    dev path (the connection string is the only Postgres-vs-SQLite
+    difference in this codebase), not the Postgres production target,
+    and likely needs either aiosqlite-specific expertise or a real
+    Postgres instance for local dev to actually resolve.
+
+    **Also confirmed, not just assumed**: `auditroutes.py` clean
+    (`/api/policy/actions`'s changed behaviour is still correctly locked
+    and merchant-scoped); `npm run build`/`npm run lint` clean (identical
+    8-error pre-existing baseline, 0 new); `fuzz.py` clean, every
+    invariant held. `healthcheck.py` run twice - once concurrently with
+    `fuzz.py` (112/116, three of the four failures traced directly to
+    that concurrency: two tests explicitly depend on being the *only*
+    activity touching a shared window - "shoppers_helped counts shoppers,
+    not cases" diffs a before/after friction count that a concurrently-
+    running `fuzz.py` was also writing into, and "handover offset pages
+    past the first page"'s own comment states "exactly one handover is
+    open here" as a precondition `fuzz.py`'s concurrent escalations could
+    violate; the webhook-pipeline failure is consistent with Groq-
+    throttle contention from two suites making model calls at once - and
+    once alone, isolating the true signal - confirmed correct: re-run
+    alone, all three of those failures disappeared and the suite passed
+    115/116, the one remaining failure ("a successful recovery still
+    explains what it did not do") being the same chat-reply-wording
+    class already diagnosed elsewhere in this file as model-variance
+    flaky. Neither `_actions_list()` nor Business Insights touch anything
+    those three tests exercise, so this is conclusive rather than merely
+    plausible: they were never real regressions.

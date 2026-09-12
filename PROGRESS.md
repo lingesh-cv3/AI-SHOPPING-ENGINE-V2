@@ -80,6 +80,39 @@ throttle, which slows down each attempt but is not why it remains unfixed -
 the bug itself is a frontend timing issue independent of which model, or
 whether one, is behind the chat.
 
+**An intermittent read-after-write lag on `/api/report`'s `completed_order_count`
+against the SQLite dev database** - found and reproduced under direct
+instrumentation during a Merchant functional-completion audit, not assumed
+from a guess. A real, successful checkout's `ExecutionAttempt` row is always
+written correctly and immediately (confirmed by reading it back from a
+second, independent process the instant after the HTTP response) - the bug
+is specifically that the *next* `/api/report` call, roughly one time in
+four or five, does not reflect it yet, then always reflects it correctly on
+a later call (never permanently lost, never double-counted, never seen by
+`fuzz.py`'s 1200 real-usage assertions across repeated runs). Chased with
+temporary debug logging added directly to `total_sales()` and
+`payment_settled()`: the in-memory ORM object is confirmed correctly
+mutated (`row.succeeded=True`, a valid `completed_at`) immediately before
+`session_scope()`'s commit, and the very next read - via the *identical*
+underlying DBAPI connection object (same `id()`, logged on both sides) -
+still misses it. Two candidate fixes were tried and both failed to change
+the behaviour: SQLite WAL mode, and `NullPool` (forcing a fresh connection
+per session, eliminating pooled-connection reuse as an explanation as far
+as it can be tested under this codebase's own sequential-request pattern,
+where only one connection is ever in play regardless of pool policy). Both
+changes were reverted rather than left in unproven. The remaining plausible
+explanation lives inside `aiosqlite`'s own background-thread/queue
+mechanics (a Future resolving before the underlying `sqlite3.Connection`
+call is fully visible to a subsequent call slightly later in the same
+thread's queue) - below what can be confirmed by reading this codebase
+alone. Not fixed. Worth attention only if it starts affecting local
+development or testing - the connection string is the only Postgres-vs-
+SQLite difference in this codebase (`engine/db/session.py`'s own docstring),
+and this is specifically the SQLite dev path, not the Postgres production
+target. A future session with aiosqlite-specific expertise, or a switch to
+a real Postgres instance for local dev, is the likelier fix than another
+attempt at pooling configuration.
+
 A case can get stuck in `DIAGNOSED` state with no path to resolution - needs a
 deliberate lifecycle-semantics decision before touching it. The code does
 close the case out via `record_outcome`, so it is not literally orphaned, but
@@ -430,6 +463,20 @@ these first:**
       now visually and functionally one coherent product across every
       section in its navigation, with the embedded Copilot present on
       every page.
+
+      **Independently audited for functional completion (not just visual
+      consistency) in #47** - traced every area's real chain (UI → API →
+      repository → database → adapter → commerce event → Merchant metric
+      → Copilot/Task/action → outcome) rather than trusting that a page
+      rendering meant the underlying capability was complete. Found and
+      fixed one real bug (Settings/Copilot were exposing `ISSUE_REFUND`/
+      `CANCEL_ORDER` as if they were real, toggleable actions, when
+      neither can ever actually execute) and one real gap (Business
+      Insights never surfaced unmet-demand as an insight). Every other
+      area's full chain was confirmed genuinely complete with direct
+      evidence, not assumed. See Completed.md #47 for the full audit
+      record, including a real, reproduced-but-unresolved intermittent
+      SQLite-dev-path read-after-write timing issue written up below.
 
 - [ ] AI Store Diagnosis
 - [ ] Recovery Opportunity Radar
