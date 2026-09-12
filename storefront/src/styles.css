@@ -3439,6 +3439,17 @@ select.card-picker {
   stroke-dasharray: 5 4;
 }
 
+.trend-chart-gridline {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.trend-chart-ytick {
+  font-family: var(--mono);
+  font-size: 10px;
+  fill: var(--ink-3);
+}
+
 .trend-chart-axis {
   display: flex;
   justify-content: space-between;

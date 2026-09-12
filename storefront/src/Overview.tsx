@@ -379,7 +379,7 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
                 <span className="eyebrow">Revenue trend</span>
               </div>
               <div className="panel-body">
-                <RevenueTrendChart series={series} />
+                <RevenueTrendChart series={series} currency={report.total_sales_currency} />
               </div>
             </section>
 

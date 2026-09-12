@@ -192,6 +192,43 @@ or moving local dev onto a real Postgres instance, where this class of
 async-driver interaction does not apply the same way; both are bigger than
 a targeted patch and were correctly not attempted here.
 
+**Follow-up, same investigation, a third time - which specific figure this
+actually affects, checked directly rather than assumed from the report
+route's shape.** Prompted by a live report of Sales & Revenue's headline
+Revenue appearing stuck across several real purchases: 36 real sequential
+purchases were driven across both merchants (25 straight through on
+Kettle, 3 on Northfield, plus 8 from the second investigation), each one
+checking `total_sales_amount`, `priced_order_count`, and per-product
+revenue (`/api/products`) against `completed_order_count` and
+`checkout_conversion`'s `completed_orders` in the same before/after pair.
+Result: **`total_sales_amount`, `priced_order_count`, and per-product
+revenue moved correctly on every single one of the 36 purchases - zero
+staleness.** `completed_order_count`/`checkout_conversion`'s
+`completed_orders` (a structurally different query - see
+`total_sales()`/`checkout_conversion()` in `engine/db/repository.py`) hit
+the already-documented transient lag on several of the 36, always self-
+correcting on a later read, exactly matching the shape already described
+above. A live-browser check (real navigation away and back, the same
+fresh-mount-refetch behaviour every page in this console already uses,
+since this console has no page that polls) confirmed the same thing:
+Sales & Revenue's Revenue figure updated correctly after two consecutive
+real purchases, each followed by navigating away and back.
+
+This does not contradict the verdict above - `total_sales()` computes
+`order_count = len(attempts)` and the revenue figures from the identical
+already-fetched `attempts` list in one function call, so nothing here
+implies two different code paths for the same number. It narrows *which*
+displayed figure a merchant is likely to actually notice lagging
+(`completed_order_count`, i.e. the "Orders" KPI, not "Revenue") if they
+happen to reload at the unlucky moment - useful for anyone chasing a
+future live report of this, so it is not re-investigated as a mystery
+each time. Revenue itself has not been observed to lag in 36 attempts
+across two investigations; a report of Revenue specifically appearing
+stuck warrants checking first whether the page was simply left open
+without navigating away and back (this console fetches once per mount,
+by design, on every page - not a bug, and not fixed by adding a poll,
+which the console deliberately does not do anywhere).
+
 A case can get stuck in `DIAGNOSED` state with no path to resolution - needs a
 deliberate lifecycle-semantics decision before touching it. The code does
 close the case out via `record_outcome`, so it is not literally orphaned, but

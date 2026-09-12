@@ -133,7 +133,7 @@ export function Holdout({
           <p className="note">
             {smallSample
               ? "This sample is small enough that the difference above should be treated as directional, not proof - a few more or fewer resolved cases would move it noticeably."
-              : "Large enough to treat the difference above as a real signal, though this is still one merchant's data, not a controlled study."}
+              : "Large enough that the difference above is unlikely to be pure noise - but this is still one merchant's data over one window, not a formal significance test, a multi-merchant study, or a claim about revenue or ROI."}
           </p>
           <p className="note">
             Revenue recovered is not split by holdout/assisted group - only

@@ -189,7 +189,7 @@ export function MerchantReport({
             </span>
           </div>
           <div className="panel-body">
-            <RevenueTrendChart series={series} />
+            <RevenueTrendChart series={series} currency={report.total_sales_currency} />
           </div>
         </section>
 

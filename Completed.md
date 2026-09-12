@@ -2820,3 +2820,133 @@ below; `npm run build` now exits 0.)
     flaky. Neither `_actions_list()` nor Business Insights touch anything
     those three tests exercise, so this is conclusive rather than merely
     plausible: they were never real regressions.
+
+48. **Merchant critical-functional-verification pass, prompted by a live
+    report that Sales & Revenue's Revenue figure stopped updating after
+    real purchases** - investigated from scratch rather than assumed to
+    be the already-known read-lag, plus six other observed conditions
+    checked against the real running application. One real bug fixed
+    (Business Insights missing an available signal was already closed in
+    #47 - this session's actual fix is the Revenue Trend chart's missing
+    Y-axis) and one wording overclaim corrected; every other reported
+    condition was traced to its real, honest explanation rather than
+    patched blind.
+
+    **Revenue staleness: not reproduced, after 36 real sequential
+    purchases across both merchants** (25 straight through on Kettle, 3
+    on Northfield's REST adapter, plus 8 more from the prior
+    investigation) checking `total_sales_amount`, `priced_order_count`
+    and per-product revenue after every single one - all 36 moved
+    correctly, zero staleness. A live-browser check (real navigation away
+    and back between purchases, the same fresh-mount-refetch pattern
+    every page in this console already uses) also showed Revenue
+    updating correctly across two consecutive real purchases. The
+    already-documented transient read lag (Completed.md #47) does
+    reproduce on this data, repeatedly, but specifically on
+    `completed_order_count`/`checkout_conversion`'s `completed_orders`
+    (the "Orders" figure) - never once on revenue across all 36 attempts.
+    Full detail, including why this doesn't contradict the prior
+    investigation's own code reading, is in `PROGRESS.md`'s Known Issues.
+    The likeliest explanation for the original report: the Sales &
+    Revenue tab was left open across purchases without navigating away
+    and back - this console fetches once per page mount everywhere, by
+    design, with no page anywhere that polls, so an already-open tab
+    never shows a number that changed after it loaded, on any page, not
+    just this one. Per this task's own explicit instruction, no polling,
+    sleep, or retry was added to paper over this - it is the existing,
+    correct architecture, not a bug.
+
+    **Revenue Trend Y-axis added** (`RevenueTrendChart.tsx`): four real
+    gridlines derived from the actual max value in the current window
+    (never a hard-coded scale), compact-formatted (K/L/Cr) with the
+    connection's real currency named in the legend rather than assumed.
+    Verified live across 7/30/90-day ranges on Kettle - the scale
+    correctly adapts to what's actually in each window.
+
+    **Revenue Change: already correct, verified rather than assumed.**
+    "Not enough data" / "no prior-period data yet" is the honest answer
+    for every range tested (7/30/90 days) on this data specifically
+    because this connection's real order history only goes back to
+    2026-09-06 - a 30- or 90-day comparison genuinely has no prior window
+    to compare against yet. Confirmed directly against the oldest
+    `ExecutionAttempt` row for this connection, not assumed from the UI's
+    own message. The code path (`sales_period_comparison`) was already
+    built to show a real percentage once genuine prior-period data
+    exists and an honest fallback until then - no fabrication found, no
+    change needed.
+
+    **501 (now 530) orders vs. 433 (now 471) priced orders: confirmed
+    historical, not ongoing.** Every one of the 59 currently-unpriced
+    `ExecutionAttempt` rows for Kettle dates to a single day, 2026-09-06,
+    from before `payment_settled` reliably stored `amount_paid` (see
+    Completed.md's own product-performance entries for when that
+    landed) - checked directly against the database, not assumed. Zero
+    unpriced rows exist among the hundreds of orders since. The existing
+    UI caveat ("Based on N of M orders with a recorded amount") already
+    states this honestly; confirmed the claim is true rather than just
+    present.
+
+    **"jkn nk," / "super" unmet-demand entries: traced to a real code
+    path, not fabricated or seeded.** `storefront/src/App.tsx`'s search
+    handler fires a real `DEAD_SEARCH` chat turn with the shopper's exact
+    typed query the moment a storefront search returns zero results -
+    confirmed by reading that handler directly. `"jkn nk,"` is recorded
+    once on Kettle, consistent with someone (a developer or the
+    merchant) testing the search box directly rather than a seeded or
+    synthetic row. No filter was added - per this task's own instruction,
+    this architecture genuinely has no way to distinguish a developer's
+    test keystrokes from a real shopper's from the query text alone, and
+    that limitation is stated, not hidden behind an invented filter.
+
+    **Holdout: full lifecycle re-verified, not rebuilt.** Configuration
+    already exists and is exposed - `Store > Settings`'s holdout-percent
+    field, wired through the existing `RiskPolicy`/`savePolicy` system
+    (no second mechanism). The complete assignment → suppression →
+    resolution → aggregation lifecycle is independently verified by nine
+    passing `healthcheck.py` assertions (unchanged, re-confirmed still
+    passing this session). One wording overclaim fixed: "large enough to
+    treat the difference above as a real signal" read as a stronger
+    statistical claim than a sample-size heuristic actually supports -
+    changed to name what it is ("unlikely to be pure noise") and
+    explicitly disclaim a formal significance test, a multi-merchant
+    study, or any revenue/ROI claim, none of which this feature computes.
+
+    **Merchant Copilot cross-checked directly against authoritative data,
+    live**: "what products generated the most revenue" against Kettle
+    matched `/api/products`' `top_by_revenue` exactly, including the
+    precise per-product revenue figures; "how much revenue recovered"
+    matched `/api/report`'s `revenue_recovered` to the rupee; Northfield's
+    "what can this platform do" correctly named payment recovery and
+    webhooks as unsupported. No discrepancy found - the Copilot reads the
+    identical repository functions every page renders from, confirmed
+    again rather than assumed.
+
+    **End-to-end real transaction sequence**, both merchants: successful
+    purchase → revenue/orders/product-quantity/product-revenue/
+    conversion all moved consistently; retried checkout on the same paid
+    cart with a different card → zero duplicate order, zero duplicate
+    revenue, same order id returned; decline → simulate → recovery
+    approval → `recovery_count` and `completed_order_count` both moved by
+    exactly one, revenue increased by the recovered amount; duplicate
+    approval on the same case → `changed: false`, no re-execution.
+    Tenant isolation re-confirmed directly: Kettle's key refused when
+    reading Northfield's report, and vice versa.
+
+    **Verification.** `npm run build`/`npm run lint` clean (identical
+    8-error baseline, 0 new). `auditroutes.py` clean. `fuzz.py` clean,
+    every invariant held. `healthcheck.py` run alone (not concurrently,
+    per the lesson from #47): 115/116, the one failure ("a successful
+    recovery still explains what it did not do") the same chat-reply-
+    wording class already diagnosed elsewhere in this file as model-
+    variance flaky. Live browser walkthrough of Sales & Revenue,
+    Customer & Shopping Insights, Holdout / Experiment, Product
+    Performance, Payments & Checkout, Merchant Tasks and Merchant
+    Copilot on both merchants - zero console errors, zero horizontal
+    overflow, all seven sections load real content on both connections.
+
+    **Not changed**: nothing about the payment ledger, `OrderLine`,
+    idempotency, or any repository function's own logic - every finding
+    this session was either already correct (verified rather than
+    assumed) or fixed at the specific point that was actually wrong (the
+    chart's missing axis, the holdout wording), never by touching
+    unrelated Merchant functionality.

@@ -12,7 +12,13 @@ import type { SalesSeries } from "./api";
  *  drawing a flat line at zero that could be mistaken for "zero revenue
  *  measured" instead of "nothing to chart yet".
  */
-export function RevenueTrendChart({ series }: { series: SalesSeries | null }) {
+export function RevenueTrendChart({
+  series,
+  currency,
+}: {
+  series: SalesSeries | null;
+  currency?: string;
+}) {
   if (!series || !series.has_data) {
     return (
       <p className="empty" style={{ margin: 0 }}>
@@ -24,7 +30,7 @@ export function RevenueTrendChart({ series }: { series: SalesSeries | null }) {
 
   const width = 640;
   const height = 300;
-  const padLeft = 8;
+  const padLeft = 56;
   const padRight = 8;
   const padTop = 12;
   const padBottom = 24;
@@ -59,6 +65,26 @@ export function RevenueTrendChart({ series }: { series: SalesSeries | null }) {
     Math.round((i / Math.max(1, labelCount - 1)) * (n - 1)),
   );
 
+  // Y-axis: four real gridlines derived from the actual max value in this
+  // window (0, 1/3, 2/3, max of whichever series - current or prior - runs
+  // higher) - never a hard-coded scale, so a quiet week and a record week
+  // each get their own honest range rather than one fixed axis that makes
+  // one of them unreadable. Formatted compactly (K/L/Cr suffixes) because
+  // the exact figure already has a dedicated KPI card above this chart;
+  // this axis exists to show shape and magnitude at a glance, not to be
+  // the source of the precise number.
+  const tickCount = 4;
+  const tickValues = Array.from({ length: tickCount }, (_, i) => (max * (tickCount - 1 - i)) / (tickCount - 1));
+
+  function formatCompact(value: number): string {
+    if (value === 0) return "0";
+    const abs = Math.abs(value);
+    if (abs >= 1_00_00_000) return `${(value / 1_00_00_000).toFixed(abs >= 10_00_00_000 ? 0 : 1)}Cr`;
+    if (abs >= 1_00_000) return `${(value / 1_00_000).toFixed(abs >= 10_00_000 ? 0 : 1)}L`;
+    if (abs >= 1_000) return `${(value / 1_000).toFixed(abs >= 10_000 ? 0 : 1)}K`;
+    return value.toFixed(0);
+  }
+
   return (
     <div className="trend-chart">
       <svg
@@ -69,6 +95,23 @@ export function RevenueTrendChart({ series }: { series: SalesSeries | null }) {
         role="img"
         aria-label="Revenue trend for this period compared to the previous period"
       >
+        {tickValues.map((v) => {
+          const y = yFor(v);
+          return (
+            <g key={v}>
+              <line
+                x1={padLeft}
+                x2={width - padRight}
+                y1={y.toFixed(1)}
+                y2={y.toFixed(1)}
+                className="trend-chart-gridline"
+              />
+              <text x={padLeft - 8} y={y + 3} className="trend-chart-ytick" textAnchor="end">
+                {formatCompact(v)}
+              </text>
+            </g>
+          );
+        })}
         {areaPath && <path d={areaPath} className="trend-chart-area" />}
         <polyline points={toPolyline(priorPoints)} className="trend-chart-line prior" />
         <polyline points={toPolyline(currentPoints)} className="trend-chart-line current" />
@@ -90,6 +133,7 @@ export function RevenueTrendChart({ series }: { series: SalesSeries | null }) {
         <span className="trend-chart-legend-item">
           <span className="trend-chart-swatch prior" /> Previous period
         </span>
+        {currency && <span className="trend-chart-legend-item">Y-axis in {currency}</span>}
       </div>
     </div>
   );
