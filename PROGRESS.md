@@ -80,38 +80,117 @@ throttle, which slows down each attempt but is not why it remains unfixed -
 the bug itself is a frontend timing issue independent of which model, or
 whether one, is behind the chat.
 
-**An intermittent read-after-write lag on `/api/report`'s `completed_order_count`
-against the SQLite dev database** - found and reproduced under direct
-instrumentation during a Merchant functional-completion audit, not assumed
-from a guess. A real, successful checkout's `ExecutionAttempt` row is always
-written correctly and immediately (confirmed by reading it back from a
-second, independent process the instant after the HTTP response) - the bug
-is specifically that the *next* `/api/report` call, roughly one time in
-four or five, does not reflect it yet, then always reflects it correctly on
-a later call (never permanently lost, never double-counted, never seen by
-`fuzz.py`'s 1200 real-usage assertions across repeated runs). Chased with
-temporary debug logging added directly to `total_sales()` and
-`payment_settled()`: the in-memory ORM object is confirmed correctly
-mutated (`row.succeeded=True`, a valid `completed_at`) immediately before
-`session_scope()`'s commit, and the very next read - via the *identical*
-underlying DBAPI connection object (same `id()`, logged on both sides) -
-still misses it. Two candidate fixes were tried and both failed to change
-the behaviour: SQLite WAL mode, and `NullPool` (forcing a fresh connection
-per session, eliminating pooled-connection reuse as an explanation as far
-as it can be tested under this codebase's own sequential-request pattern,
-where only one connection is ever in play regardless of pool policy). Both
-changes were reverted rather than left in unproven. The remaining plausible
-explanation lives inside `aiosqlite`'s own background-thread/queue
-mechanics (a Future resolving before the underlying `sqlite3.Connection`
-call is fully visible to a subsequent call slightly later in the same
-thread's queue) - below what can be confirmed by reading this codebase
-alone. Not fixed. Worth attention only if it starts affecting local
-development or testing - the connection string is the only Postgres-vs-
-SQLite difference in this codebase (`engine/db/session.py`'s own docstring),
-and this is specifically the SQLite dev path, not the Postgres production
-target. A future session with aiosqlite-specific expertise, or a switch to
-a real Postgres instance for local dev, is the likelier fix than another
-attempt at pooling configuration.
+**An intermittent read-after-write lag on aggregate reads (`total_sales()`'s
+`completed_order_count`, `checkout_conversion()`'s `carts_created`) against
+the SQLite dev database, precisely isolated to real adapter I/O - real
+issue, root cause narrowed but not fixed, independently re-investigated a
+second time with a full binary-search rather than trusted from the first
+pass's conclusion.**
+
+First pass (see the session that found this) reproduced it with direct
+instrumentation and tried two speculative fixes (SQLite WAL mode,
+`NullPool`), neither of which changed the behaviour; both were reverted.
+That pass guessed at pooling/aiosqlite-queue mechanics without confirming
+which part of the real request actually mattered.
+
+This second investigation instead built a binary search: a debug route was
+temporarily added that isolates the DB layer entirely from HTTP
+(`asyncio.run` calling `total_sales`/`payment_settled` directly, no
+FastAPI/uvicorn in the path at all) - **zero staleness in 30/30 rounds**.
+Then, progressively, real HTTP requests were added back one piece at a
+time, each tested 20-30 rounds:
+
+- single HTTP request doing write-then-read in one task - 0/30 stale
+- two separate HTTP requests, minimal write (`begin_payment`+
+  `payment_settled`, no `OrderLine` lines) - 0/30
+- the same, with real `OrderLine` lines written - 0/30
+- the same, with a 2-second `asyncio.sleep` between claim and settle
+  (mimicking real adapter latency) - 0/30
+- the same, with a *real* `httpx` GET to Kettle's own `/health` in that
+  gap (real network I/O, not a timer) - 0/30
+- the same, preceded by three separate real HTTP requests to Kettle's
+  `/health` (mimicking the request-count shape of create_cart/add_to_cart/
+  checkout, still with no DB-write complexity) - 0/30
+- a full synthetic replica of the checkout route's entire post-payment
+  sequence (`owners.take` for the order, `confirm_order`/
+  `record_sent_mail`, `resolve_unresolved_payment_cases_for_cart`) added
+  after a minimal write - 0/30
+
+None of these reproduced it. Only two things did, both confirmed on
+**two separate merchants and via two independent code paths**:
+
+1. The real `signup` → `create_cart` → `add_to_cart` → `checkout` sequence
+   through the actual `shop.py` routes - 4-6 stale rounds per 15 on Kettle
+   across repeated runs, and separately reproduced on Northfield (3/15) -
+   ruling out anything GraphQL-specific to Kettle's adapter.
+2. A debug route that called the **real adapter's own** `create_cart`/
+   `add_to_cart`/`checkout_with_card` methods directly - bypassing every
+   one of `shop.py`'s own dependencies (`Depends(visitor)`,
+   `Depends(shopper_scoped())`, cookies, `require_checkout_identity`)
+   entirely - reproduced it at **10/30**, if anything more reliably than
+   through the real routes. This conclusively rules out the auth/
+   dependency/cookie layer as a cause: the real adapter I/O is sufficient
+   and necessary by itself.
+
+Signing up once and reusing the session across many rounds (removing
+`signup` specifically from the loop) still reproduced it (5/15) - so it is
+not about account creation, specifically the repeated real adapter round
+trips (`PlatformClient`, `adapters/framework/http.py` - a **persistent**
+`httpx.AsyncClient` held per adapter instance, not a fresh one per call,
+unlike every synthetic reproduction attempt above) that are the necessary
+and sufficient ingredient. **A real, independent instance of the identical
+bug shape was found for free while regression-testing this second
+investigation**: `healthcheck.py`'s own "a real cart creation is counted in
+`carts_created`" assertion - unrelated repository function
+(`checkout_conversion`, not `total_sales`), unrelated test, unrelated code
+path - failed on one clean, isolated `healthcheck.py` run with the exact
+same shape (real cart+checkout, immediate read, transient miss). This is
+strong independent confirmation the phenomenon is general to "real adapter
+round trip immediately followed by an aggregate read," not particular to
+one function, one test script, or one merchant.
+
+**What this rules out, with direct evidence, not assumption:** a test-
+harness/script artifact (reproduces through a single, fully isolated
+script driving the real routes with no other concurrent activity, and
+separately inside the project's own `healthcheck.py`); the auth/dependency
+layer; the specific DB-write shape (`OrderLine` writes, multi-session_scope
+patterns, the post-payment notify/resolve-cases writes) in isolation;
+generic network I/O or timing delay in isolation (a plain sleep or a plain
+HTTP GET, even several in a row, never reproduced it); SQLite journal mode
+and connection pooling as configured (both changed, neither affected it).
+
+**What is now narrowed, not fixed:** the real adapter's own HTTP round
+trip - through its persistent, per-adapter-instance `httpx.AsyncClient`
+(`adapters/framework/http.py::PlatformClient`) - interacting with
+aiosqlite's own async execution model under uvicorn's event loop is the
+confirmed necessary ingredient. The exact mechanism inside that
+interaction (most plausibly something in how `httpx`'s and `aiosqlite`'s
+own async scheduling share one event loop, briefly reordering when a
+commit becomes visible to a query issued from a different task shortly
+after) is below what can be confirmed without instrumenting those two
+third-party libraries' own internals, which this investigation did not do
+- the user's own instruction for this investigation was explicitly not to
+make speculative architectural changes or add sleeps/retries to hide it,
+so none were attempted beyond the two (already reverted) tried in the
+first pass.
+
+**Verdict: C - a real issue remains**, precisely characterized rather than
+vaguely gestured at, with the exact conditions that reproduce and do not
+reproduce it now known. It has never been observed to lose, corrupt, or
+duplicate data in any reproduction across either investigation - every
+stale read is followed by a later read that is correct, and the underlying
+`ExecutionAttempt`/`OrderLine` rows are always written correctly and
+immediately regardless of when a report happens to observe them. `fuzz.py`
+(1200+ assertions across many runs, both investigations) has never caught
+a real invariant violation from it. Specific to the SQLite dev path - the
+connection string is the only Postgres-vs-SQLite difference in this
+codebase (`engine/db/session.py`'s own docstring) - not the Postgres
+production target. The likeliest paths to an actual fix are either deep
+`aiosqlite`-internals expertise (tracing exactly how its background-thread
+queue interacts with `httpx`'s own async I/O under one shared event loop)
+or moving local dev onto a real Postgres instance, where this class of
+async-driver interaction does not apply the same way; both are bigger than
+a targeted patch and were correctly not attempted here.
 
 A case can get stuck in `DIAGNOSED` state with no path to resolution - needs a
 deliberate lifecycle-semantics decision before touching it. The code does
