@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { console_api, type MerchantReport as Report } from "./api";
+import { MerchantCopilot } from "./MerchantCopilotWidget";
 
 function pct(rate: number | null): string {
   return rate === null ? "—" : `${Math.round(rate)}%`;
@@ -20,34 +21,69 @@ function pct(rate: number | null): string {
  * group, only resolution-rate. Showing a revenue number here would mean
  * inventing a comparison nothing computes.
  */
-export function Holdout() {
+export function Holdout({
+  onNavigate,
+}: {
+  onNavigate: (section: string) => void;
+}) {
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     console_api
       .report()
-      .then(setReport)
+      .then((r) => {
+        setReport(r);
+        setError(null);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : "Could not load holdout data."));
   }, []);
 
-  if (error) return <p className="empty">{error}</p>;
-  if (!report) return <p className="empty">Loading...</p>;
+  const header = (
+    <div className="overview-header">
+      <div>
+        <h2 style={{ margin: 0, fontSize: "var(--step-4)" }}>Holdout / Experiment</h2>
+        <p className="overview-subtitle">
+          The difference the assistant actually made, against a genuinely unassisted control group.
+        </p>
+      </div>
+    </div>
+  );
+
+  if (error) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {header}
+        <p className="empty">{error}</p>
+      </div>
+    );
+  }
+  if (!report) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {header}
+        <p className="empty">Loading...</p>
+      </div>
+    );
+  }
 
   if (!report.holdout) {
     return (
-      <section className="panel">
-        <div className="panel-head">
-          <span className="eyebrow">Holdout / experiment</span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {header}
+        <section className="panel">
+          <div className="panel-body">
+            <p className="empty">
+              No holdout sessions in this window. Turn on a holdout percentage
+              in Store &gt; Settings to start comparing assisted outcomes
+              against a genuinely unassisted control group.
+            </p>
+          </div>
+        </section>
+        <div className="overview-copilot-slot">
+          <MerchantCopilot onNavigate={onNavigate} />
         </div>
-        <div className="panel-body">
-          <p className="empty">
-            No holdout sessions in this window. Turn on a holdout percentage
-            in Store &gt; Settings to start comparing assisted outcomes
-            against a genuinely unassisted control group.
-          </p>
-        </div>
-      </section>
+      </div>
     );
   }
 
@@ -55,52 +91,61 @@ export function Holdout() {
   const smallSample = h.holdout_cases < 20 || h.assisted_cases < 20;
 
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <span className="eyebrow">Holdout / experiment</span>
-        <span className="eyebrow">last {report.days} days</span>
-      </div>
-      <div className="panel-body">
-        <p className="note" style={{ marginTop: 0 }}>
-          A slice of your shoppers get no help at all, so this comparison is
-          the difference the assistant actually made - not a number that
-          includes sales that would have happened anyway.
-        </p>
-        <div className="figures">
-          <Figure
-            value={pct(h.assisted_resolution_rate)}
-            label="Resolved, assisted"
-            title={`${h.assisted_resolved} of ${h.assisted_cases}`}
-          />
-          <Figure
-            value={pct(h.holdout_resolution_rate)}
-            label="Resolved, holdout"
-            title={`${h.holdout_resolved} of ${h.holdout_cases} - no assistance given`}
-          />
-        </div>
-        <p className="note" style={{ marginTop: 14 }}>
-          Sample size: {h.holdout_cases} holdout case
-          {h.holdout_cases === 1 ? "" : "s"}, {h.assisted_cases} assisted
-          case{h.assisted_cases === 1 ? "" : "s"}.
-          {smallSample
-            ? " This is small enough that the difference above should be treated as directional, not proof - a few more or fewer resolved cases would move it noticeably."
-            : " Large enough to treat the difference above as a real signal, though this is still one merchant's data, not a controlled study."}
-        </p>
-        <p className="note">
-          Revenue recovered is not split by holdout/assisted group - only
-          resolution rate is compared here, because that is the only
-          per-group figure this engine actually computes.
-        </p>
-      </div>
-    </section>
-  );
-}
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {header}
 
-function Figure({ value, label, title }: { value: string; label: string; title: string }) {
-  return (
-    <div title={title}>
-      <div className="figure num">{value}</div>
-      <div className="eyebrow">{label}</div>
+      <div className="kpi-row">
+        <div className="kpi-card">
+          <div className="eyebrow">Resolved, assisted</div>
+          <div className="kpi-value">{pct(h.assisted_resolution_rate)}</div>
+          <p className="note" style={{ margin: "4px 0 0" }}>
+            {h.assisted_resolved} of {h.assisted_cases}
+          </p>
+        </div>
+        <div className="kpi-card">
+          <div className="eyebrow">Resolved, holdout</div>
+          <div className="kpi-value">{pct(h.holdout_resolution_rate)}</div>
+          <p className="note" style={{ margin: "4px 0 0" }}>
+            {h.holdout_resolved} of {h.holdout_cases}, no assistance given
+          </p>
+        </div>
+        <div className="kpi-card">
+          <div className="eyebrow">Holdout cases</div>
+          <div className="kpi-value">{h.holdout_cases}</div>
+        </div>
+        <div className="kpi-card">
+          <div className="eyebrow">Assisted cases</div>
+          <div className="kpi-value">{h.assisted_cases}</div>
+        </div>
+      </div>
+
+      <section className="panel">
+        <div className="panel-head">
+          <span className="eyebrow">Holdout / experiment</span>
+          <span className="eyebrow">last {report.days} days</span>
+        </div>
+        <div className="panel-body">
+          <p className="note" style={{ marginTop: 0 }}>
+            A slice of your shoppers get no help at all, so this comparison is
+            the difference the assistant actually made - not a number that
+            includes sales that would have happened anyway.
+          </p>
+          <p className="note">
+            {smallSample
+              ? "This sample is small enough that the difference above should be treated as directional, not proof - a few more or fewer resolved cases would move it noticeably."
+              : "Large enough to treat the difference above as a real signal, though this is still one merchant's data, not a controlled study."}
+          </p>
+          <p className="note">
+            Revenue recovered is not split by holdout/assisted group - only
+            resolution rate is compared here, because that is the only
+            per-group figure this engine actually computes.
+          </p>
+        </div>
+      </section>
+
+      <div className="overview-copilot-slot">
+        <MerchantCopilot onNavigate={onNavigate} />
+      </div>
     </div>
   );
 }

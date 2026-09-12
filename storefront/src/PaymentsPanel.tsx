@@ -7,8 +7,13 @@ import {
   type MerchantReport as Report,
   type QueueItem,
 } from "./api";
+import { MerchantCopilot } from "./MerchantCopilotWidget";
 
-export function PaymentsPanel() {
+export function PaymentsPanel({
+  onNavigate,
+}: {
+  onNavigate: (section: string) => void;
+}) {
   const [report, setReport] = useState<Report | null>(null);
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [queue, setQueue] = useState<QueueItem[] | null>(null);
@@ -49,29 +54,32 @@ export function PaymentsPanel() {
     }
   }
 
+  const header = (
+    <div className="overview-header">
+      <div>
+        <h2 style={{ margin: 0, fontSize: "var(--step-4)" }}>Payments &amp; Checkout</h2>
+        <p className="overview-subtitle">
+          Completed orders, declines, and any recovery actions waiting on you.
+        </p>
+      </div>
+    </div>
+  );
+
   if (error) {
     return (
-      <section className="panel">
-        <div className="panel-head">
-          <span className="eyebrow">Payments &amp; checkout</span>
-        </div>
-        <div className="panel-body">
-          <p className="empty">{error}</p>
-        </div>
-      </section>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {header}
+        <p className="empty">{error}</p>
+      </div>
     );
   }
 
   if (!report || !caps || !queue) {
     return (
-      <section className="panel">
-        <div className="panel-head">
-          <span className="eyebrow">Payments &amp; checkout</span>
-        </div>
-        <div className="panel-body">
-          <p className="empty">Loading...</p>
-        </div>
-      </section>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {header}
+        <p className="empty">Loading...</p>
+      </div>
     );
   }
 
@@ -85,178 +93,159 @@ export function PaymentsPanel() {
   );
 
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <span className="eyebrow">Payments &amp; checkout</span>
-        <span className="eyebrow">last {report.days} days</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {header}
+
+      <div className="kpi-row">
+        <div className="kpi-card">
+          <div className="eyebrow">Completed orders</div>
+          <div className="kpi-value">{report.completed_order_count}</div>
+          <p className="note" style={{ margin: "4px 0 0" }}>
+            {report.total_sales_amount} {report.total_sales_currency} total
+          </p>
+        </div>
+        <div className="kpi-card">
+          <div className="eyebrow">Payment failures</div>
+          <div className="kpi-value" style={declines > 0 ? { color: "var(--friction)" } : undefined}>
+            {declines}
+          </div>
+        </div>
+        {recoverySupported ? (
+          <>
+            <div className="kpi-card">
+              <div className="eyebrow">Pending recovery</div>
+              <div className="kpi-value" style={recoveryQueue.length > 0 ? { color: "var(--friction)" } : undefined}>
+                {recoveryQueue.length}
+              </div>
+            </div>
+            <div className="kpi-card">
+              <div className="eyebrow">Revenue recovered</div>
+              <div className="kpi-value">
+                {report.revenue_recovered}
+                <span className="kpi-value-unit">{report.currency}</span>
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="kpi-card" style={{ gridColumn: "span 2" }}>
+            <div className="eyebrow">Payment recovery</div>
+            <div className="kpi-value" style={{ fontSize: 16 }}>Not supported</div>
+            <p className="note" style={{ margin: "4px 0 0" }}>this platform&rsquo;s adapter</p>
+          </div>
+        )}
       </div>
-      <div className="panel-body">
-        <div className="figures">
-          <Figure
-            value={report.completed_order_count}
-            label="Completed orders"
-            title={`${report.total_sales_amount} ${report.total_sales_currency} total`}
-          />
-          <Figure
-            value={declines}
-            label="Payment failures"
-            warn={declines > 0}
-          />
-          {recoverySupported && (
+
+      <section className="panel">
+        <div className="panel-head">
+          <span className="eyebrow">Payments &amp; checkout</span>
+          <span className="eyebrow">last {report.days} days</span>
+        </div>
+        <div className="panel-body">
+          {!recoverySupported ? (
+            <p className="empty">
+              Payment recovery is not supported on this platform. The
+              adapter does not declare a recovery method, so no recovery cases
+              can exist here. A declined payment on this platform is handed to
+              a person as an escalation instead.
+            </p>
+          ) : (
             <>
-              <Figure
-                value={report.recovery_opportunities}
-                label="Recovery opportunities"
-                title="Declines where a recovery action was proposed - not every decline gets one."
-              />
-              <Figure
-                value={recoveryQueue.length}
-                label="Pending recovery"
-                warn={recoveryQueue.length > 0}
-              />
-              <Figure
-                value={report.recovery_count}
-                label="Recoveries completed"
-              />
+              <div className="gate-label" style={{ marginBottom: 6 }}>
+                Waiting for your decision ({recoveryQueue.length})
+              </div>
+              {recoveryQueue.length === 0 ? (
+                <p className="note" style={{ marginTop: 0 }}>
+                  Nothing waiting right now. A recovery opportunity from a
+                  declined payment will appear here.
+                </p>
+              ) : (
+                recoveryQueue.map((item) => {
+                  const result = results[item.approval_id];
+                  return (
+                    <article key={item.approval_id} className="qcard">
+                      <div className="qhead">
+                        <div>
+                          <span className="eyebrow">
+                            {item.friction_type?.replace(/_/g, " ") ?? "payment issue"}
+                          </span>
+                          <h3 className="qaction">
+                            {item.action_type.replace(/_/g, " ").toLowerCase()}
+                          </h3>
+                        </div>
+                        <div className="qmeta">
+                          <span className="tag money">moves money</span>
+                          {item.order_id && (
+                            <span className="eyebrow">order {item.order_id}</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {item.diagnosis && (
+                        <>
+                          <div className="gate-label">Why</div>
+                          <p className="qdiag">{item.diagnosis}</p>
+                        </>
+                      )}
+
+                      {item.shopper_reply && (
+                        <>
+                          <div className="gate-label">The shopper was told</div>
+                          <p className="said">{item.shopper_reply}</p>
+                        </>
+                      )}
+
+                      {result ? (
+                        <div
+                          className={
+                            result.executed?.succeeded ? "qresult ok" : "qresult bad"
+                          }
+                        >
+                          <div className="gate-label">
+                            {result.state === "APPROVED" ? "Approved" : "Rejected"}
+                          </div>
+                          {result.executed ? (
+                            <>
+                              <p className="qsummary">{result.executed.summary}</p>
+                              <div className="gate-note num">
+                                {result.executed.final_state}
+                              </div>
+                            </>
+                          ) : (
+                            <p className="qsummary">
+                              {result.reason ?? "Recorded. Nothing was executed."}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="qbuttons">
+                          <button
+                            className="add"
+                            disabled={busy === item.approval_id}
+                            onClick={() => decide(item.approval_id, true)}
+                          >
+                            {busy === item.approval_id ? "Working..." : "Approve"}
+                          </button>
+                          <button
+                            className="reject"
+                            disabled={busy === item.approval_id}
+                            onClick={() => decide(item.approval_id, false)}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })
+              )}
             </>
           )}
         </div>
+      </section>
 
-        {recoverySupported && (
-          <div className="headline-figure" style={{ marginTop: 14 }}>
-            <div className="eyebrow">Revenue recovered</div>
-            <div className="bignum num">
-              {report.revenue_recovered} {report.currency}
-            </div>
-            <p className="note" style={{ margin: "4px 0 0" }}>
-              Money actually captured from a declined payment, never a
-              projection - never counted until the payment genuinely went
-              through.
-            </p>
-          </div>
-        )}
-
-        {!recoverySupported ? (
-          <p className="empty" style={{ marginTop: 14 }}>
-            Payment recovery is not supported on this platform. The
-            adapter does not declare a recovery method, so no recovery cases
-            can exist here. A declined payment on this platform is handed to
-            a person as an escalation instead.
-          </p>
-        ) : (
-          <>
-            <div className="gate-label" style={{ margin: "18px 0 6px" }}>
-              Waiting for your decision ({recoveryQueue.length})
-            </div>
-            {recoveryQueue.length === 0 ? (
-              <p className="note" style={{ marginTop: 0 }}>
-                Nothing waiting right now. A recovery opportunity from a
-                declined payment will appear here.
-              </p>
-            ) : (
-              recoveryQueue.map((item) => {
-                const result = results[item.approval_id];
-                return (
-                  <article key={item.approval_id} className="qcard">
-                    <div className="qhead">
-                      <div>
-                        <span className="eyebrow">
-                          {item.friction_type?.replace(/_/g, " ") ?? "payment issue"}
-                        </span>
-                        <h3 className="qaction">
-                          {item.action_type.replace(/_/g, " ").toLowerCase()}
-                        </h3>
-                      </div>
-                      <div className="qmeta">
-                        <span className="tag money">moves money</span>
-                        {item.order_id && (
-                          <span className="eyebrow">order {item.order_id}</span>
-                        )}
-                      </div>
-                    </div>
-
-                    {item.diagnosis && (
-                      <>
-                        <div className="gate-label">Why</div>
-                        <p className="qdiag">{item.diagnosis}</p>
-                      </>
-                    )}
-
-                    {item.shopper_reply && (
-                      <>
-                        <div className="gate-label">The shopper was told</div>
-                        <p className="said">{item.shopper_reply}</p>
-                      </>
-                    )}
-
-                    {result ? (
-                      <div
-                        className={
-                          result.executed?.succeeded ? "qresult ok" : "qresult bad"
-                        }
-                      >
-                        <div className="gate-label">
-                          {result.state === "APPROVED" ? "Approved" : "Rejected"}
-                        </div>
-                        {result.executed ? (
-                          <>
-                            <p className="qsummary">{result.executed.summary}</p>
-                            <div className="gate-note num">
-                              {result.executed.final_state}
-                            </div>
-                          </>
-                        ) : (
-                          <p className="qsummary">
-                            {result.reason ?? "Recorded. Nothing was executed."}
-                          </p>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="qbuttons">
-                        <button
-                          className="add"
-                          disabled={busy === item.approval_id}
-                          onClick={() => decide(item.approval_id, true)}
-                        >
-                          {busy === item.approval_id ? "Working..." : "Approve"}
-                        </button>
-                        <button
-                          className="reject"
-                          disabled={busy === item.approval_id}
-                          onClick={() => decide(item.approval_id, false)}
-                        >
-                          Reject
-                        </button>
-                      </div>
-                    )}
-                  </article>
-                );
-              })
-            )}
-          </>
-        )}
+      <div className="overview-copilot-slot">
+        <MerchantCopilot onNavigate={onNavigate} />
       </div>
-    </section>
-  );
-}
-
-function Figure({
-  value,
-  label,
-  warn,
-  title,
-}: {
-  value: number;
-  label: string;
-  warn?: boolean;
-  title?: string;
-}) {
-  return (
-    <div title={title}>
-      <div className={warn && value > 0 ? "figure num warn" : "figure num"}>
-        {value}
-      </div>
-      <div className="eyebrow">{label}</div>
     </div>
   );
 }

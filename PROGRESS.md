@@ -422,15 +422,14 @@ these first:**
       creation and the aggregate correctly dropped by exactly the
       earlier-corrupted amount).
 
-      **Still fully open:** full page-by-page visual polish beyond
-      Overview, Sales & Revenue, Orders & Conversion, and now Product
-      Performance. Customer Insights, Inventory & Catalog, Payments &
-      Checkout, AI Commerce, Recovery, Holdout, Business Insights,
-      Platform and Settings still use the plainer card/list treatment
-      from #36 rather than the KPI-card/status-badge/trend-chart system
-      built for Overview in #37/#40/#41 and extended to Sales & Revenue
-      (#43), Orders & Conversion (#44), and Product Performance (#45) -
-      a real UI-consistency gap, not a functional one.
+      **All remaining Merchant areas brought to the same visual tier in
+      #46** (Customer & Shopping Insights, Inventory & Catalog, Payments
+      & Checkout, Returns, AI Commerce, Recovery, Holdout, Business
+      Insights, Platform & Capabilities, Settings, Merchant Tasks) - see
+      Completed.md #46 for the full verification. The Merchant tab is
+      now visually and functionally one coherent product across every
+      section in its navigation, with the embedded Copilot present on
+      every page.
 
 - [ ] AI Store Diagnosis
 - [ ] Recovery Opportunity Radar

@@ -6,6 +6,7 @@ import {
   type MerchantReport as Report,
   type ProductPerformance as Performance,
 } from "./api";
+import { MerchantCopilot } from "./MerchantCopilotWidget";
 
 interface Insight {
   text: string;
@@ -23,7 +24,11 @@ interface Insight {
  * evidence for it - an empty list here is the honest answer for a quiet
  * store, not a reason to invent generic advice.
  */
-export function BusinessInsights() {
+export function BusinessInsights({
+  onNavigate,
+}: {
+  onNavigate: (section: string) => void;
+}) {
   const [insights, setInsights] = useState<Insight[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,36 +41,78 @@ export function BusinessInsights() {
     ])
       .then(([report, catalog, conversion, products]) => {
         setInsights(buildInsights(report, catalog, conversion, products));
+        setError(null);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Could not build insights."));
   }, []);
 
-  if (error) return <p className="empty">{error}</p>;
-  if (!insights) return <p className="empty">Loading...</p>;
+  const header = (
+    <div className="overview-header">
+      <div>
+        <h2 style={{ margin: 0, fontSize: "var(--step-4)" }}>Business Insights</h2>
+        <p className="overview-subtitle">
+          Deterministic, evidence-backed observations - no insight without a real figure behind it.
+        </p>
+      </div>
+    </div>
+  );
+
+  if (error) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {header}
+        <p className="empty">{error}</p>
+      </div>
+    );
+  }
+  if (!insights) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {header}
+        <p className="empty">Loading...</p>
+      </div>
+    );
+  }
 
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <span className="eyebrow">Business insights</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {header}
+
+      <div className="kpi-row">
+        <div className="kpi-card" style={{ gridColumn: "span 4" }}>
+          <div className="eyebrow">Insights surfaced</div>
+          <div className="kpi-value">{insights.length}</div>
+          <p className="note" style={{ margin: "4px 0 0" }}>each backed by a real figure below</p>
+        </div>
       </div>
-      <div className="panel-body">
-        {insights.length === 0 ? (
-          <p className="empty">
-            Nothing stands out in this window - no insight is shown unless
-            there is a real figure behind it.
-          </p>
-        ) : (
-          insights.map((i) => (
-            <div key={i.text} className="frictionrow" style={{ alignItems: "flex-start" }}>
-              <span>{i.text}</span>
-              <span className="note" style={{ margin: 0, textAlign: "right" }}>
-                {i.evidence}
-              </span>
-            </div>
-          ))
-        )}
+
+      <section className="panel">
+        <div className="panel-head">
+          <span className="eyebrow">Business insights</span>
+        </div>
+        <div className="panel-body">
+          {insights.length === 0 ? (
+            <p className="empty">
+              Nothing stands out in this window - no insight is shown unless
+              there is a real figure behind it.
+            </p>
+          ) : (
+            insights.map((i) => (
+              <div key={i.text} className="frictionrow" style={{ alignItems: "flex-start" }}>
+                <span>{i.text}</span>
+                <span className="note" style={{ margin: 0, textAlign: "right" }}>
+                  {i.evidence}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
+      <div className="overview-copilot-slot">
+        <MerchantCopilot onNavigate={onNavigate} />
       </div>
-    </section>
+    </div>
   );
 }
 

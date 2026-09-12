@@ -2563,3 +2563,119 @@ below; `npm run build` now exits 0.)
     Payments & Checkout, AI Commerce, Recovery, Holdout, Business
     Insights, Platform, Settings all remain at the older visual tier -
     each needs its own slice.
+
+46. **Brought every remaining Merchant area to Overview/Sales & Revenue/
+    Orders & Conversion/Product Performance's visual tier in one sprint:
+    Customer & Shopping Insights, Inventory & Catalog, Payments &
+    Checkout, Returns, AI Commerce, Recovery, Holdout, Business Insights,
+    Platform & Capabilities, Settings, and Merchant Tasks.** This closes
+    the last open item from #45 - every section in the Merchant
+    navigation now shares the same header/KPI-row/panel/embedded-Copilot
+    system, rather than eleven pages at the older #36 plain-card tier
+    and four at the newer one.
+
+    **Audited before changing anything**: every one of these eleven
+    pages already read from real, authoritative data with honest zero-
+    data/unsupported-platform handling (Returns' and Payments &
+    Checkout's "not supported on this platform" states, Holdout's "no
+    holdout sessions yet", Inventory's reachable/complete/truncated
+    honesty fields) - none needed new backend work or a data-model
+    change. The gap was purely visual (no header, no KPI row, the older
+    `.panel`/`.figures`/`.frictionrow` treatment) and one piece of
+    missing wiring: none of the eleven had the Merchant Copilot embedded
+    on the page itself, unlike every one of the four already-finished
+    areas.
+
+    **What changed, per page**: added `.overview-header` + subtitle,
+    a `.kpi-row` of real figures (no new numbers invented - each KPI is
+    an existing field from the same API call the page already made,
+    surfaced instead of buried in a `.figures` strip), kept each page's
+    existing panel content and its own honest empty/unsupported states
+    verbatim, and added `<MerchantCopilot onNavigate={...} />` in an
+    `.overview-copilot-slot` at the foot of every page. `MerchantConsole.tsx`
+    now threads `onNavigate` through to all eleven components
+    (previously only Overview/Sales/Orders/Products/Recovery had it).
+    `TasksPanel` additionally got its filter tabs moved into the new
+    header row instead of the panel head.
+
+    **Real transaction / cross-page-consistency verification**, per
+    this sprint's explicit priority ("the same real transaction must
+    produce consistent results throughout Merchant" - CLAUDE.md's cross-
+    page-consistency requirement): a scratch script
+    (`scripts/verify_merchant_final.py`, gitignored) drove, against the
+    live engine and both live merchant backends:
+    - a real Kettle guest→signup→cart→checkout purchase with a
+      succeeding card, confirming `completed_order_count` (report),
+      `completed_orders` (conversion), and the purchased product's
+      revenue (product performance) all moved by exactly the expected
+      amount from the same transaction;
+    - an idempotent retry of the same checkout on the now-paid cart with
+      a *different* card, confirming zero new orders and zero revenue
+      movement (the existing cart-keyed ledger held, unmodified by this
+      sprint);
+    - a real decline (test card `0002`) → simulate → recovery-approval
+      flow, confirming `recovery_count` and `completed_order_count` both
+      moved by exactly one, and a *second* decline's recovery *rejected*
+      confirming neither figure moved;
+    - a real Northfield purchase, confirming its `completed_order_count`
+      moved correctly while `recoverPayment` stayed reported as
+      unsupported and no recovery UI was exposed for that platform.
+    All of the above passed clean on a final isolated run (`NO ISSUES
+    FOUND`).
+
+    **A red herring investigated and ruled out, not shipped**: several
+    earlier runs of the same script, interleaved with other scratch
+    diagnostic scripts hitting the same shared demo database in rapid
+    succession, appeared to show `completed_order_count` failing to
+    move immediately after a genuine, confirmed-in-the-database
+    successful checkout. Chased directly: confirmed the write itself
+    was always correct and immediate (raw queries against
+    `ExecutionAttempt` from a fresh process always showed the true,
+    current count); tried enabling SQLite WAL mode and, separately,
+    forcing `NullPool` (no connection reuse) in `engine/db/session.py`
+    as candidate fixes for a suspected pooled-connection-snapshot
+    staleness - neither changed the behavior, and clean isolated re-runs
+    afterward (and on the original, unmodified code) reproduced the
+    correct figure immediately every time. Concluded this was noise from
+    running many overlapping scratch scripts against one shared SQLite
+    file within the same few seconds, not a real defect - both
+    speculative `session.py` changes were reverted before committing,
+    leaving the module exactly as it was. Flagged here rather than
+    silently dropped, in case a future session sees the same symptom
+    under similarly heavy concurrent local script load.
+
+    **Verified live on both merchants** via Playwright at 1400px and at
+    400px (narrow) for a sample of the changed pages: all sixteen
+    Merchant nav sections load with zero console/page errors and non-
+    empty content for both `conn_demo` and `conn_kettle`; no horizontal
+    overflow at 400px on the checked pages (Payments & Checkout,
+    Business Insights, Platform & Capabilities, Merchant Tasks, Customer
+    & Shopping Insights - the pages using a `gridColumn: span` KPI
+    card); Northfield's Platform & Capabilities correctly shows
+    `recoverPayment` unsupported with its adapter-supplied reason;
+    Merchant Tasks' Resolve/Dismiss actions and Settings' holdout/
+    approval-timeout saves re-confirmed still working through the new
+    header layout.
+
+    **Verification.** `npm run build` (tsc) clean. `npm run lint`
+    identical 8-error baseline, 0 new (the two touched files that
+    already carried the pre-existing "setState in effect" pattern,
+    `PaymentsPanel.tsx` and `TasksPanel.tsx`, were not modified in that
+    respect). `auditroutes.py` clean (every locked route, shopper-
+    scoping, and public-route check passed - no route surface changed
+    this slice). `fuzz.py` clean, 1200 assertions across 20 sequences,
+    every invariant held. `healthcheck.py` 113/116 passed - the 3
+    failures ("escalates when the platform cannot help", "the over-
+    promise is replaced", "a successful recovery still explains what it
+    did not do") are all chat-reply-wording checks against the model's
+    output, the class already diagnosed elsewhere in this file as
+    Groq-throttle/model-variance flaky - none touch a Merchant-console
+    route or figure this slice changed.
+
+    **Not attempted this sprint**: a true visitor/session funnel stage
+    (still explicitly out of scope, per #44); deep customer analytics
+    (CLV, cohorts, segments - still no schema to support them honestly,
+    per #36); real Returns capability (no adapter declares one); a
+    mobile-optimized navigation shell (the left-nav sidebar itself does
+    not collapse below ~720px - pre-existing from #36, not touched here,
+    and no page's own content overflowed at 400px as a result).

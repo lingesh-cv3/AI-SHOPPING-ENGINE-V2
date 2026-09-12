@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { ActionInfo, Pipeline, Policy } from "./api";
 import { Gates } from "./Gates";
+import { MerchantCopilot } from "./MerchantCopilotWidget";
 
 /**
  * Store > Settings. Extracted from `MerchantConsole.tsx`'s former sidebar,
@@ -24,6 +25,7 @@ export function StoreSettings({
   onBlock,
   onHoldout,
   onApprovalTimeout,
+  onNavigate,
 }: {
   policy: Policy;
   actions: ActionInfo[];
@@ -33,9 +35,19 @@ export function StoreSettings({
   onBlock: (actionType: string, blocked: boolean) => void;
   onHoldout: (percent: number) => void;
   onApprovalTimeout: (minutes: number) => void;
+  onNavigate: (section: string) => void;
 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div className="overview-header">
+        <div>
+          <h2 style={{ margin: 0, fontSize: "var(--step-4)" }}>Settings</h2>
+          <p className="overview-subtitle">
+            What runs on its own, what always waits for you, and holdout/approval timing.
+          </p>
+        </div>
+      </div>
+
       <PolicyEditor
         policy={policy}
         actions={actions}
@@ -56,6 +68,10 @@ export function StoreSettings({
           </div>
         </section>
       )}
+
+      <div className="overview-copilot-slot">
+        <MerchantCopilot onNavigate={onNavigate} />
+      </div>
     </div>
   );
 }

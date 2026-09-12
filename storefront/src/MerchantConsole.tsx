@@ -236,17 +236,37 @@ export function MerchantConsole() {
         {section === "products" && (
           <ProductPerformance onNavigate={(s) => setSection(s as SectionId)} />
         )}
-        {section === "customers" && <CustomerInsights />}
-        {section === "inventory" && <InventoryPanel />}
-        {section === "payments" && <PaymentsPanel />}
-        {section === "returns" && <Returns />}
-        {section === "ai-commerce" && <AICommerce />}
+        {section === "customers" && (
+          <CustomerInsights onNavigate={(s) => setSection(s as SectionId)} />
+        )}
+        {section === "inventory" && (
+          <InventoryPanel onNavigate={(s) => setSection(s as SectionId)} />
+        )}
+        {section === "payments" && (
+          <PaymentsPanel onNavigate={(s) => setSection(s as SectionId)} />
+        )}
+        {section === "returns" && (
+          <Returns onNavigate={(s) => setSection(s as SectionId)} />
+        )}
+        {section === "ai-commerce" && (
+          <AICommerce onNavigate={(s) => setSection(s as SectionId)} />
+        )}
         {section === "recovery" && (
           <Recovery onNavigate={(s) => setSection(s as SectionId)} />
         )}
-        {section === "holdout" && <Holdout />}
-        {section === "insights" && <BusinessInsights />}
-        {section === "platform" && <PlatformCapabilities caps={caps} rules={rules} />}
+        {section === "holdout" && (
+          <Holdout onNavigate={(s) => setSection(s as SectionId)} />
+        )}
+        {section === "insights" && (
+          <BusinessInsights onNavigate={(s) => setSection(s as SectionId)} />
+        )}
+        {section === "platform" && (
+          <PlatformCapabilities
+            caps={caps}
+            rules={rules}
+            onNavigate={(s) => setSection(s as SectionId)}
+          />
+        )}
         {section === "settings" && (
           <StoreSettings
             policy={policy}
@@ -257,12 +277,15 @@ export function MerchantConsole() {
             onBlock={onBlock}
             onHoldout={onHoldout}
             onApprovalTimeout={onApprovalTimeout}
+            onNavigate={(s) => setSection(s as SectionId)}
           />
         )}
         {section === "copilot" && (
           <MerchantCopilot onNavigate={(s) => setSection(s as SectionId)} />
         )}
-        {section === "tasks" && <TasksPanel />}
+        {section === "tasks" && (
+          <TasksPanel onNavigate={(s) => setSection(s as SectionId)} />
+        )}
       </main>
     </div>
   );
