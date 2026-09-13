@@ -231,9 +231,17 @@ class LLMClient:
                 # Open models do occasionally emit malformed JSON. Skip the call
                 # rather than crashing the turn - a proposal we cannot parse is
                 # simply a proposal we did not receive.
+                # `extra={"name": ...}` collides with LogRecord's own
+                # reserved `name` attribute and raises `KeyError: "Attempt
+                # to overwrite 'name' in LogRecord"` - turning this
+                # designed-to-be-recoverable "skip the bad call" path into
+                # an unhandled 500 for the whole turn. Pre-existing bug,
+                # found and fixed in the Shopper hardening pass (see
+                # PROGRESS.md); `tool_call_name` carries the same
+                # information without the collision.
                 logger.warning(
                     "discarded unparseable tool call",
-                    extra={"name": call.function.name},
+                    extra={"tool_call_name": call.function.name},
                 )
                 continue
             calls.append({"name": call.function.name, "arguments": arguments})

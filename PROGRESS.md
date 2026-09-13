@@ -302,20 +302,14 @@ literal "coffee" keyword match against varietal-named products like
 keyword overlap, not attempted here to avoid re-introducing the same
 regression.
 
-**A pre-existing, previously-undiscovered logging bug in
-`engine/reasoning/llm.py`, found (not introduced) during Phase 2 smoke
-testing.** The "discarded unparseable tool call" warning path does
-`logger.warning(..., extra={"name": call.function.name})`, colliding with
-Python logging's own reserved `name` LogRecord attribute and raising
-`KeyError: "Attempt to overwrite 'name' in LogRecord"` — turning a soft
-warning into an unhandled 500 to the caller. Reproduced once, immediately
-after a clean engine restart, on a bare "hello"; not reproducible on
-immediate retry (three retries of the identical request all succeeded), so
-it fires only when the model provider returns a malformed/unparseable tool
-call — rare, not deterministic. `git diff engine/reasoning/llm.py` is empty,
-confirming this is not something this session's own diff caused. A one-line
-fix (rename the `extra` key, e.g. to `tool_name`) would close it; not
-attempted, out of scope for this phase.
+**The `engine/reasoning/llm.py` logging crash found during Phase 2 smoke
+testing is now fixed, as part of the hardening pass** (see item 0 above for
+the full account): `extra={"name": ...}` renamed to `extra={"tool_call_name":
+...}`, with a new tracked regression script,
+`scripts/regression_llm_malformed_tool_call.py`, reproducing the exact crash
+shape and confirming it no longer raises. Not moved to Completed.md on its
+own — it is one fix inside the still-THIN hardening pass, and this project's
+practice is not to split one session's work across both files.
 
 ### Why the tests did not used to catch these
 
@@ -601,6 +595,215 @@ should extend the Playwright suite to them rather than reach for
 
    This Phase 2 work is uncommitted on `main` at the time of writing.
 
+   **A hardening pass followed, on top of this Phase 2 work (also
+   uncommitted on `main` at time of writing), responding to an independent
+   `value-auditor` pass on Phase 1+2 that returned THIN and named concrete
+   defects.** Ten fixes went in. Nothing from this pass moves to
+   Completed.md — see the fresh `value-auditor` verdict at the end of this
+   entry.
+
+   - **`engine/execution/mission_ranking.py`:** fixed hyphenated/compound-
+     word matching — a shopper saying "ultra-lightweight" now matches
+     merchant prose like "Lightweight daily trainer" via hyphen-as-space
+     tokenization (`_tokenize`) plus a small explicit intensifier-prefix
+     list (`_INTENSIFIER_PREFIXES` — "ultra"/"super"/"max"/etc, dropped from
+     the required-match set rather than demanded literally). Added a small,
+     explicit "related-but-not-equivalent" table (`_RELATED_NOT_EQUIVALENT`)
+     so a shopper excluding "waterproof" no longer sees a product described
+     only as "water-resistant" silently pass as compliant — such a product
+     is now excluded from the confident shortlist as uncertain (`_uncertain`)
+     rather than falsely confirmed. Added a stock/availability hard filter
+     (`OUT_OF_STOCK` products can no longer be shortlisted; missing/unknown
+     availability stays neutral, never penalized or fabricated). The
+     previously dead `constraints` field (captured by the model, never read
+     by ranking) is now scored the same as must-haves.
+
+   - **New `engine/reasoning/explicit_extraction.py`:** a narrow,
+     deterministic regex-based supplement (explicitly not a second general
+     NLP system, per its own docstring) that recognizes explicit trigger
+     phrases ("prioritize X", "I only care about X", "X matters most",
+     "X must be true", "budget doesn't matter anymore") and unions its
+     findings into the model's own structured-state output — never
+     replacing what the model already captured. Built because the hardening
+     pass found the model's own extraction missing an explicit, unambiguous
+     priority statement on roughly half of fresh test turns (see the test
+     matrix below for the exact, honestly-mixed numbers).
+
+   - **`engine/db/shopping_state.py`:** added `clear_fields` so scalar
+     mission fields (`goal`/`budget_amount`/`budget_currency`/
+     `mission_status`) can finally be explicitly retracted — previously
+     could only ever be set, never cleared, so "budget doesn't matter now"
+     left the old figure silently active for the rest of the session.
+     Includes a precedence rule found necessary by a real bug caught during
+     this session's own live testing: a same-turn "new value" from the
+     model only overrides a clear if it's genuinely different from what was
+     already stored — otherwise the model was found to be echoing stale
+     context back (fed to it by the Context Builder) in the same turn as a
+     genuine clear, which silently undid the clear before this refinement.
+     Also added a per-`(session_id, connection_id)` `asyncio.Lock`
+     serializing the whole read-modify-write in `merge()` — fixes a real,
+     reproduced data-integrity bug (10 concurrent `merge()` calls to the
+     same session used to drop 8 of 10 updates; now live-verified 10/10 and
+     15/15 preserved across multiple trials, including through the real
+     HTTP/chat pipeline with a real signed-in shopper, not just at the
+     repository level).
+
+   - **`engine/api/chat.py` — the central fix, with a real iteration, both
+     versions described honestly, in order:**
+     - First version: `_honest_synthesis()` used a regex blocklist
+       (`_PRIORITY_CLAIM_PATTERN`) to detect phrases like "since you
+       prioritized X" and discard them when `shopping_state` had nothing to
+       back them.
+     - A dedicated `value-auditor` pass on this session's own work directly
+       falsified that as a general fix: it constructed three ordinary
+       rephrasings of the identical defect not covered by the regex ("You
+       mentioned lightness matters a lot, so the Trailblazer fits
+       perfectly", "Because comfort is what you need most, I picked the
+       Trailblazer for you", "I picked this because it best matches your
+       stated requirement") and confirmed all three passed through
+       unmodified, still reaching the shopper as false personalization
+       claims. The auditor's own words: "A blocklist of an LLM's own
+       free-text phrasing cannot be complete — the space of ways to say 'I
+       chose this for your stated reason' is not enumerable," and
+       recommended gating structurally on `has_stated_priority()` for every
+       synthesized reply rather than only ones matching an enumerated
+       pattern.
+     - Acted on immediately, same session: `_honest_synthesis()` was
+       rewritten to remove the regex entirely — confirmed by reading the
+       current function directly, there is no pattern list left in it. It
+       now asks only one question — does `shopping_state` have anything
+       (`priorities`/`must_have`/`constraints`, via
+       `mission_ranking.has_stated_priority`) that could justify ANY
+       personalization claim this turn? If not, the synthesized text is not
+       trusted at all, whatever it says — not just discarded when it
+       happens to match a known phrasing. Real, acknowledged trade-off: an
+       ungrounded turn now always gets the plain, engine-written fallback
+       sentence, even on the rare occasion the model's free text would have
+       been a perfectly neutral, non-personalized, accurate one.
+       Live-verified directly against the exact three bypass phrasings the
+       auditor found (all three now correctly blocked) plus the original
+       enumerated case, and live-verified end-to-end that a genuinely
+       grounded turn (a real stated priority) still gets its real, specific
+       narrative while an ungrounded comparison correctly degrades to
+       "Here's how they compare." with no invented claim.
+     - **This second, structural version has not yet had its own dedicated
+       fresh `value-auditor` pass** — only the isolated unit-level bypass
+       tests and one live smoke test were run against it this session (both
+       passing), not a full independent audit repeat. Do not treat the
+       earlier THIN verdict (rendered against the first, regex version) as
+       re-confirmed resolved by a fresh audit of the second version — it
+       has not been re-audited.
+     - Also in `chat.py`: a new `_unconfirmed_compare_items()` — when a
+       shopper asks to compare a real product against one that doesn't
+       exist in the catalog, the system previously silently substituted a
+       different real product with no disclosure; it now prepends an
+       honest "I couldn't find an exact match for everything you
+       mentioned..." note. Live-verified against existing+nonexistent,
+       both-named-correctly, typo-like (correctly not triggering false
+       disclosure), and nonexistent+nonexistent cases.
+
+   - **`engine/reasoning/llm.py`:** fixed a pre-existing (not introduced by
+     Phase 1 or Phase 2, confirmed `git diff` was empty for this file before
+     this session), previously-flagged-but-unfixed logging crash —
+     `logger.warning(..., extra={"name": ...})` collided with Python
+     logging's own reserved `LogRecord.name` attribute, raising `KeyError:
+     "Attempt to overwrite 'name' in LogRecord"` on the "discarded
+     unparseable tool call" path, turning a designed-to-be-recoverable path
+     into an unhandled 500. Fixed by renaming the key to `tool_call_name`.
+     A genuine regression test was added and left tracked (not gitignored
+     scratch): `scripts/regression_llm_malformed_tool_call.py` — reproduces
+     the exact crash shape against the real `LLMClient.complete()` code path
+     (mocking only the provider's HTTP response, not the parsing logic) and
+     confirms it no longer raises. This project's three standing suites
+     (healthcheck/fuzz/auditroutes) are deliberately HTTP-only per their own
+     design and don't unit-test individual functions, which is why this
+     regression lives as a separate tracked script rather than folded into
+     one of them.
+
+   - **`engine/execution/events.py`:** `shortlist_engagement()` now requires
+     the add-to-cart event to be causally after the impression event for the
+     same `(session, product)` pair — previously just co-occurrence with no
+     ordering check at all, so an add that happened before a product was
+     ever shown on a shortlist could count as "converted." Live-verified
+     with a constructed pathological case (add-before-impression correctly
+     excluded, impression-then-later-add correctly counted). The function's
+     own docstring is explicit this is instrumentation, not business-value
+     evidence — no baseline exists — and the dedicated `value-auditor` pass
+     on this whole hardening effort separately confirmed this metric still
+     cannot support any product-value claim.
+
+   - **`engine/reasoning/context.py`:** a documented boundary was found and
+     written down, not fixed (there is nothing to fix — it is a real,
+     accepted property of the architecture): durable memory
+     (`memory_facts`) is fed to the model in the prompt but never to
+     `mission_ranking.rank_and_filter`. The model can still fold a durable
+     fact into its own `shopping_state` structured output on a later, fully
+     generic message — and that structured output IS read by ranking, so a
+     durable fact can end up influencing the shortlist indirectly through
+     the model's own extraction habit, not through any code path that
+     treats it as a ranking input. Not an engineered dependency — nothing
+     relies on it happening, nothing asserts it happens, and a prompt or
+     model change could stop it with nothing to catch the regression.
+     Documented in the module's own docstring so a future session doesn't
+     mistake this side effect for a guaranteed feature.
+
+   **Fresh test matrix run this session (not reusing the same cherry-picked
+   examples from prior sessions) — reporting both favorable and unfavorable
+   numbers rather than only the better one:**
+   - 10 fresh mission-extraction phrasings tested live: 10/10 captured
+     *something* into structured state after all fixes (up from a
+     session-measured baseline closer to 50% the independent audit found).
+     But the dedicated `value-auditor` pass, testing its *own* 10 fresh
+     phrasings independently, measured only 8/10 landing something
+     ranking-usable and 2/10 capturing nothing at all — both numbers are
+     reported here rather than only the first.
+   - 5 independent trade-off A→B/B→A pairs: 2 showed a visible ranking
+     change, 3 did not — not a failure, a property of a small demo catalog
+     where the top-scoring product for the tested priority pairs happened
+     to already satisfy both priorities simultaneously.
+   - Exclusions (exact/hyphenated/compound) all verified.
+   - Budget set→change→clear all verified working correctly after the
+     precedence-rule fix.
+   - Comparison honesty verified (4 cases, listed above under
+     `_unconfirmed_compare_items`).
+   - Concurrency verified live end-to-end (10/10 and 15/15 preserved across
+     trials).
+   - Zero-data, platform-capability-limit, and both merchants (Northfield +
+     Kettle) all reconfirmed unaffected by this pass.
+
+   **Automated suites:** `invariant-guard` SAFE on the hardening-pass diff
+   (checked *before* the final structural `_honest_synthesis` rewrite — note
+   this ordering explicitly); `fuzz.py` (20/20, every invariant held) was
+   re-run *after* the structural rewrite and held. `healthcheck.py` showed
+   113 passed / 3 FAILED across two runs, with *different* failing checks
+   each time, all in code paths this diff never touched (escalation/
+   simulate/webhook/conversion-reporting), plus one repeatable known
+   pre-existing Kettle recovery `why()` flake — consistent with the
+   already-documented Groq-throttle variance (see CLAUDE.md's "The
+   constraint"), not a regression, since every comparison/discovery-specific
+   check passed cleanly both times. `auditroutes.py` fully clean both times.
+
+   **`value-auditor` verdict on the hardening pass as a whole: THIN** (not
+   VALUABLE, not NOT VALUABLE) — explicitly because the *first* version of
+   the central response-honesty fix was found bypassable by ordinary
+   rephrasing (see above), and because `shortlist_engagement` still cannot
+   support any product-value claim. The individual narrow fixes
+   (concurrency, stock filter, waterproof/water-resistant uncertainty, dead
+   constraints field, the `llm.py` crash, hyphen/intensifier tokenization)
+   were each independently verified and are real — worth stating plainly,
+   not underselling what did work. **Nothing from this session moves to
+   Completed.md.** The structural rewrite of `_honest_synthesis` addresses
+   the auditor's specific recommendation directly, but has not yet been
+   re-audited fresh — the next session picking this up should run a *new*
+   `value-auditor` pass specifically re-testing the rewritten, structural
+   version (try harder to find a third bypass phrasing, since the auditor
+   found the first two attempts insufficient in successive rounds) before
+   concluding this is closed.
+
+   This hardening pass is uncommitted on `main` at the time of writing, on
+   top of the also-uncommitted Phase 1 (`ee21d53`) and Phase 2 (`962c946`)
+   commits it builds on.
+
 1. **Guest handover / session behaviour:** still open. Guests no longer pay,
    but can still chat and get escalated, and the shop now prompts for an email
    where it used to finish a sale. Whether this nudges merchant conversion is
@@ -653,7 +856,10 @@ these first:**
       reusable deterministic building block for it now exists and is
       live-verified: `engine/execution/mission_ranking.py::rank_and_filter`,
       wired into `RECOMMEND_PRODUCTS` (see item 0 above, the Phase 2
-      addition) narrows an unranked catalog slice into a small,
+      addition, further hardened - hyphen/intensifier matching, waterproof/
+      water-resistant uncertainty, stock filter, dead `constraints` field -
+      by the uncommitted hardening pass also described under item 0) narrows
+      an unranked catalog slice into a small,
       evidence-backed shortlist against the shopper's stated mission,
       with grounded `fit` reasons per product. This is the shortlisting
       half of discovery, not the "a shopper describing what they need in

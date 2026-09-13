@@ -61,60 +61,86 @@ async def record(
 async def shortlist_engagement(
     connection_id: str, *, days: int = 30
 ) -> dict[str, int | float | None]:
-    """The one real, directional figure this instrumentation makes possible:
-    of the products actually shown on a mission-aware shortlist
-    (`product_impression`), how many were then added to cart in the same
-    session.
+    """A raw instrumentation figure over the mission-aware shortlist
+    mechanism - **not evidence of business value**, and not to be cited as
+    one. See PROGRESS.md's hardening-pass entry for the full account of why:
+    no baseline/control exists (there is nothing to compare this rate
+    against - an unranked shortlist's own rate is not measured), sample
+    sizes seen in practice are far too small to support any statistical
+    claim, and most of the traffic behind any number this returns during
+    development is test traffic, not real shopper behaviour. Keep this as
+    instrumentation groundwork for a future, properly designed evaluation
+    (a real baseline, a real sample size, a real read of the numbers by
+    someone who acts on them) - do not read a rate out of this function and
+    call it proof of anything.
+
+    Definition, precisely: of the products actually shown on a mission-aware
+    shortlist (`product_impression`), how many were *later* added to cart in
+    the same session - "later" is enforced by timestamp, not mere
+    co-occurrence. A hardening-pass fix: the earlier version counted a pair
+    as "converted" whenever both event types existed for it anywhere in the
+    window, with no ordering check at all - an add-to-cart that happened
+    *before* the product was ever shown on a shortlist (e.g. added from a
+    product page, then coincidentally shown again in an unrelated shortlist
+    later) would have counted as if the shortlist caused it. Only the
+    earliest impression and earliest add per (session, product) pair are
+    compared, and only a genuinely later add counts.
 
     Deliberately not wired into any Merchant/Operations surface this phase -
     that would be a Merchant-facing change this phase's own operating rules
-    scope out. This exists so the question "did the shortlist mechanism do
-    anything?" has a real, queryable answer instead of a write-only log
-    nobody ever reads - see PROGRESS.md for how this was actually run and
-    read, and by whom.
+    scope out.
     """
     since = datetime.now(UTC) - timedelta(days=days)
     async with session_scope() as db:
-        impressions = (
-            (
-                await db.execute(
-                    select(ShopperEvent.session_id, ShopperEvent.product_id).where(
-                        ShopperEvent.connection_id == connection_id,
-                        ShopperEvent.event_type == EventType.PRODUCT_IMPRESSION,
-                        ShopperEvent.created_at >= since,
-                    )
+        impression_rows = (
+            await db.execute(
+                select(
+                    ShopperEvent.session_id,
+                    ShopperEvent.product_id,
+                    ShopperEvent.created_at,
+                ).where(
+                    ShopperEvent.connection_id == connection_id,
+                    ShopperEvent.event_type == EventType.PRODUCT_IMPRESSION,
+                    ShopperEvent.created_at >= since,
                 )
             )
-            .all()
-        )
-        if not impressions:
+        ).all()
+        if not impression_rows:
             return {"impressions": 0, "converted": 0, "rate": None}
 
-        adds = (
-            (
-                await db.execute(
-                    select(ShopperEvent.session_id, ShopperEvent.product_id).where(
-                        ShopperEvent.connection_id == connection_id,
-                        ShopperEvent.event_type == EventType.ADD_TO_CART,
-                        ShopperEvent.created_at >= since,
-                    )
+        add_rows = (
+            await db.execute(
+                select(
+                    ShopperEvent.session_id,
+                    ShopperEvent.product_id,
+                    ShopperEvent.created_at,
+                ).where(
+                    ShopperEvent.connection_id == connection_id,
+                    ShopperEvent.event_type == EventType.ADD_TO_CART,
+                    ShopperEvent.created_at >= since,
                 )
             )
-            .all()
-        )
-        added_pairs = {(row.session_id, row.product_id) for row in adds}
+        ).all()
 
-        seen: set[tuple[str, str]] = set()
-        converted = 0
-        for row in impressions:
+        earliest_impression: dict[tuple[str, str], object] = {}
+        for row in impression_rows:
             key = (row.session_id, row.product_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            if key in added_pairs:
-                converted += 1
+            if key not in earliest_impression or row.created_at < earliest_impression[key]:
+                earliest_impression[key] = row.created_at
 
-    total = len(seen)
+        earliest_add: dict[tuple[str, str], object] = {}
+        for row in add_rows:
+            key = (row.session_id, row.product_id)
+            if key not in earliest_add or row.created_at < earliest_add[key]:
+                earliest_add[key] = row.created_at
+
+        converted = sum(
+            1
+            for key, impressed_at in earliest_impression.items()
+            if key in earliest_add and earliest_add[key] > impressed_at
+        )
+
+    total = len(earliest_impression)
     return {
         "impressions": total,
         "converted": converted,

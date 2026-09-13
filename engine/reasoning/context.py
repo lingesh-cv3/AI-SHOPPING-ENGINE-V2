@@ -97,6 +97,25 @@ def build_context(
     # Durable facts about this shopper, from a previous visit - never from
     # this conversation's own history, which is already covered below.
     # Authenticated shoppers only; see engine/db/memory_facts.py.
+    #
+    # A documented boundary, not an oversight (see PROGRESS.md's hardening-
+    # pass entry for the full audit finding): this is the ONLY place
+    # durable memory reaches the model. `engine/execution/mission_ranking.py`
+    # never receives `memory_facts` at all, by design, so the deterministic
+    # shortlist/ranking can never be driven by a stored preference. What
+    # the audit found is that the model can still fold a fact handed to it
+    # here into its own `shopping_state` structured output on a later,
+    # fully generic message - and *that* structured output IS read by
+    # ranking, so a durable fact can end up influencing the shortlist
+    # indirectly, through the model's own extraction habit rather than
+    # through any code path that treats it as an input to ranking. This is
+    # real, observed behaviour - and explicitly NOT an engineered
+    # dependency: nothing here is written to rely on it happening, nothing
+    # asserts it happens, and it could stop with a prompt or model change
+    # and nothing would catch the regression. Do not build on this
+    # assuming it is guaranteed; if durable-memory-driven ranking is wanted
+    # as a real feature, it needs an explicit, tested code path, not this
+    # side effect.
     if memory_facts:
         parts.append(
             "WHAT WE ALREADY KNOW ABOUT THIS SHOPPER FROM BEFORE (stated by "

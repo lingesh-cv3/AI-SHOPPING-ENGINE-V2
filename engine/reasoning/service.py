@@ -306,6 +306,12 @@ class ReasoningService:
         status = raw.get("mission_status")
         if status in ("exploring", "comparing", "deciding", "done"):
             out["mission_status"] = status
+        clears = raw.get("clear_fields")
+        if isinstance(clears, list):
+            valid = {"goal", "budget_amount", "budget_currency", "mission_status"}
+            cleaned = [c for c in clears if c in valid]
+            if cleaned:
+                out["clear_fields"] = cleaned
         return out or None
 
     def _parse_durable_facts(self, raw: object) -> list[dict] | None:

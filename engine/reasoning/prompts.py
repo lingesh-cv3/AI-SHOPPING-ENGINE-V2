@@ -138,7 +138,19 @@ def propose_tool() -> dict[str, Any]:
                             "constraints_add": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "New hard constraints stated this message (e.g. 'not waterproof').",
+                                "description": (
+                                    "Only for a real requirement that is "
+                                    "neither clearly wanted nor clearly "
+                                    "unwanted (e.g. 'must fit in a carry-on', "
+                                    "'needs to arrive by Friday'). If the "
+                                    "shopper clearly WANTS something, use "
+                                    "must_have_add instead. If they clearly "
+                                    "do NOT want something, use "
+                                    "exclusions_add instead. Do not put a "
+                                    "mix of wanted and unwanted things in "
+                                    "this one list - split them into the "
+                                    "right field each."
+                                ),
                             },
                             "constraints_remove": {
                                 "type": "array",
@@ -191,6 +203,26 @@ def propose_tool() -> dict[str, Any]:
                                     "comparing (weighing specific options), "
                                     "deciding (close to choosing), done "
                                     "(bought or dropped it). Omit if unclear."
+                                ),
+                            },
+                            "clear_fields": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "enum": ["goal", "budget_amount", "budget_currency", "mission_status"],
+                                },
+                                "description": (
+                                    "Fields to explicitly RETRACT this turn - "
+                                    "only when the shopper says something like "
+                                    "'budget doesn't matter anymore' or 'forget "
+                                    "what I said about X' or 'never mind the "
+                                    "goal, show me something different'. This "
+                                    "actually clears the stored value, so use "
+                                    "it only for a genuine retraction, never a "
+                                    "guess. If they are simply stating a NEW "
+                                    "value instead (a different budget), just "
+                                    "fill that field normally - do not clear it "
+                                    "first."
                                 ),
                             },
                         },

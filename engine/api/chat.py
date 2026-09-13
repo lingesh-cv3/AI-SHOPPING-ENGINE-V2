@@ -37,6 +37,7 @@ from engine import db
 from engine import session as session_store
 from engine.execution import events as shopper_events
 from engine.execution import mission_ranking
+from engine.reasoning import explicit_extraction
 from engine.notify import confirm_order
 from shared.models import CommerceError
 
@@ -145,6 +146,79 @@ def _second_item_note(
                 "for the other one next and I'll add that too."
             )
     return ""
+
+
+def _honest_synthesis(text: str | None, shopping_state: dict | None, fallback: str) -> str:
+    """The central hardening-pass fix, in one place - and, after a
+    `value-auditor` pass caught a real gap in this function's first version,
+    now a structural gate rather than a phrase blocklist.
+
+    The first version of this function only discarded a synthesized reply
+    when it matched an enumerated regex of "priority claim" phrasings
+    ("since you prioritized X", "your priority", ...). `value-auditor`
+    directly falsified that as a general fix: ordinary rephrasings the
+    regex never anticipated ("you mentioned lightness matters a lot, so the
+    Trailblazer fits perfectly", "because comfort is what you need most,
+    I picked this for you") passed through untouched, still making an
+    ungrounded personalization claim. A blocklist of an LLM's own free-text
+    phrasing cannot be complete - the space of ways to say "I chose this
+    for your stated reason" is not enumerable.
+
+    So this function no longer tries to detect the claim in the text at
+    all. It asks a simpler, structurally answerable question instead: did
+    `shopping_state` actually capture anything (`priorities`/`must_have`/
+    `constraints`) that could make ANY personalization claim true this
+    turn? If not, the model's synthesized text is not trusted AT ALL,
+    whatever it says - not because every ungrounded synthesis is
+    necessarily false, but because there is no way to verify from the text
+    alone which parts are grounded and which are the model narrating from
+    the raw message it was never supposed to reason from directly. The
+    `fallback` (a plain, engine-written, fact-only sentence) is used
+    instead. This trades away some legitimate neutral narrative quality on
+    ungrounded turns for a guarantee that actually holds: no synthesized
+    reply reaches a shopper as a personalization claim unless
+    `shopping_state` genuinely has something to justify it.
+    """
+    if not text:
+        return fallback
+    if not mission_ranking.has_stated_priority(shopping_state):
+        logger.info(
+            "no captured mission state this turn; using the plain "
+            "deterministic reply rather than trusting synthesized text "
+            "that cannot be verified as grounded"
+        )
+        return fallback
+    return text
+
+
+def _unconfirmed_compare_items(message: str | None, comparison: list[dict]) -> list[str]:
+    """Which of the (always exactly two) compared products the shopper's own
+    message never actually named - a deterministic, grounded check, not a
+    model judgement. Hardening-pass fix: asking to compare a real product
+    against a nonexistent one used to succeed silently, substituting a
+    different real product with no indication anything was swapped - the
+    shopper never learns their named item wasn't found. A product whose
+    title shares no distinctive word with the raw message is reported here
+    so the reply can disclose the substitution honestly instead of
+    proceeding as if the shopper had actually named it."""
+    if not message:
+        return []
+    said = message.lower()
+    unconfirmed = []
+    for item in comparison:
+        # The first distinctive word of a title is almost always the actual
+        # product/model name on this catalog ("Trailblazer", "Marathon",
+        # "Ethiopia") - a trailing generic category word ("Shoe", "Coffee")
+        # is shared across many products and checking it alone would miss
+        # a real substitution whenever both compared items happen to share
+        # that generic word, which is common (two shoes, two coffees).
+        title_words = [w for w in str(item.get("title", "")).lower().split() if len(w) > 3]
+        if not title_words:
+            continue
+        identifying = title_words[0]
+        if identifying not in said:
+            unconfirmed.append(item.get("title", "that item"))
+    return unconfirmed
 
 
 def _diversify_by_category(products: list, limit: int) -> list:
@@ -577,13 +651,37 @@ async def _process_turn(
 
     # Fold this turn's structured output into stored memory - never a second
     # model call, just parsing what the same call already returned.
+    #
+    # Hardening-pass fix, folded in here rather than as a separate pass:
+    # the model's own extraction misses an obvious, explicit priority/
+    # must-have statement on a real fraction of turns - independently
+    # reproduced repeatedly, including on phrasing as unambiguous as "I
+    # only care about being as lightweight as physically possible, nothing
+    # else matters." `explicit_extraction` is a narrow, deterministic
+    # supplement (not a second general-purpose NLP system - see its own
+    # module docstring) that recognises a small set of unambiguous trigger
+    # phrases and UNIONS its findings into the model's own output, never
+    # replacing it. A message that matches nothing here contributes
+    # nothing - the model's extraction remains the primary source.
+    explicit_found = explicit_extraction.extract(req.message)
+    explicit_clears = explicit_extraction.extract_clears(req.message)
+    combined_state: dict = dict(reasoning.shopping_state or {})
+    for field, values in explicit_found.items():
+        combined_state[field] = list(
+            dict.fromkeys((combined_state.get(field) or []) + values)
+        )
+    if explicit_clears:
+        combined_state["clear_fields"] = list(
+            dict.fromkeys((combined_state.get("clear_fields") or []) + explicit_clears)
+        )
+
     # Best-effort: losing a memory update is a worse outcome to fail the
     # whole turn over than to log and move on, the same standard as every
     # other non-critical write in this function (record_case, add_turn).
     try:
-        if reasoning.shopping_state:
+        if combined_state:
             await db.shopping_state.merge(
-                req.session_id, req.connection_id, **reasoning.shopping_state
+                req.session_id, req.connection_id, **combined_state
             )
         if shopper_id and reasoning.durable_facts:
             for fact in reasoning.durable_facts:
@@ -603,8 +701,9 @@ async def _process_turn(
         # exclusion for the first time in THIS message would otherwise have it
         # persisted correctly but not actually used by this same turn's
         # mission-aware ranking/synthesis below, which read the stale variable.
-        # Only worth the extra read when something was actually written.
-        if reasoning.shopping_state:
+        # Only worth the extra read when something was actually written -
+        # including by the deterministic supplement above, not just the model.
+        if combined_state:
             try:
                 shopping_state = await db.shopping_state.get(
                     req.session_id, req.connection_id
@@ -972,9 +1071,22 @@ async def _process_turn(
                     items=comparison,
                     shopping_state=shopping_state,
                 )
-                reply = synth.text or "Here's how they compare."
+                reply = _honest_synthesis(
+                    synth.text, shopping_state, "Here's how they compare."
+                )
             else:
                 reply = "Here's how they compare."
+            # Honest-substitution check, deterministic and grounded - not a
+            # model judgement. See `_unconfirmed_compare_items`'s own
+            # docstring for the bug this closes.
+            unconfirmed = _unconfirmed_compare_items(req.message, comparison)
+            if unconfirmed:
+                names = " and ".join(unconfirmed)
+                reply = (
+                    f"I couldn't find an exact match for everything you "
+                    f"mentioned, so this compares the closest real products "
+                    f"I could find, including {names}. "
+                ) + reply
             try:
                 await db.shopping_state.merge(
                     req.session_id,
@@ -1133,8 +1245,7 @@ async def _process_turn(
                         items=products,
                         shopping_state=shopping_state,
                     )
-                    if synth.text:
-                        reply = synth.text
+                    reply = _honest_synthesis(synth.text, shopping_state, reply)
                 try:
                     await db.shopping_state.merge(
                         req.session_id,
