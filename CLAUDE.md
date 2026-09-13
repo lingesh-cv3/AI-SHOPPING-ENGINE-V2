@@ -673,6 +673,64 @@ file or any change to `.env.local` or `vite.config.ts`.
 `python patch_auth_4c.py` copies the publishable ones into `storefront/.env.local`.
 Deleting `cv3.db` destroys the hashes, so both must be re-run.
 
+### Database and process safety
+
+`cv3.db` is one SQLite file with exactly one owner: whichever single engine
+process the four-process setup above starts. It has no built-in protection
+against being opened by more than one process at once, and SQLite's own
+concurrency story assumes a single writer.
+
+**A real corruption incident happened here** from three things compounding:
+hardlinking `cv3.db` into several parallel git worktrees (a hardlink is the
+same bytes, same inode - every process across every worktree was writing to
+the identical physical file, not a copy), one of those sessions putting the
+file into WAL mode to test a theory, and routinely force-killing the engine
+process (`taskkill /F`) rather than shutting it down cleanly. A forceful
+kill mid-checkpoint left the file's own header claiming more pages than the
+file actually contained - a straightforward truncation, confirmed by
+comparing the header's declared page count against the file's real size.
+5 of 17 tables were unrecoverable through ordinary SQL once that happened.
+The database was reset from scratch rather than deep-recovered, since it is
+local demo/test data with no real cost to rebuilding it - see Completed.md
+for the recovery record and `demo_reset.py`'s own history for the seeding
+bug this exposed.
+
+The rules this incident produced, in force from here on:
+
+- **Never hardlink (or otherwise share) `cv3.db` between worktrees or
+  processes.** If a task needs isolation, give it its own database
+  (`DATABASE_URL` pointed at its own file, or a fresh one via `mint_keys.py`)
+  rather than sharing the real one.
+- **This project does not use git worktrees for day-to-day feature work.**
+  Work happens directly on `main`: commit each coherent, tested change and
+  keep `main` runnable and demoable at every commit, rather than
+  accumulating unmerged branches. Do not create a worktree for a task
+  unless explicitly asked to - the isolation it buys is not worth another
+  copy of `cv3.db` existing on disk.
+- **Prefer a graceful shutdown over `taskkill /F`.** On Windows, a headless
+  console Python process (no message loop) genuinely has no graceful path -
+  `taskkill` without `/F` will report "can only be terminated forcefully" -
+  and forceful termination is the correct, only option in that specific
+  case. It is not the correct default for anything that *can* shut down
+  cleanly.
+- **Stop the engine before switching branches or resetting state**, and
+  confirm no process still holds `cv3.db` open (`Get-NetTCPConnection` on
+  port 8000, or the process list) before any destructive database
+  operation.
+- **Back up before anything destructive to `cv3.db`** - a plain file copy is
+  enough for a local SQLite file; keep it until the operation is confirmed
+  good.
+- **Do not change SQLite's journal mode casually.** If WAL mode is ever
+  deliberately enabled for a real reason, it needs its own written-down
+  reason, an explicit note of who checkpoints it and when, and a plan for
+  what happens if a process holding it open gets killed - not a PRAGMA
+  added to test a theory and left in place.
+- **A stuck or unexpected database state gets diagnosed and fixed at the
+  source, never hidden.** No sleep, retry loop, poll, or frontend
+  workaround papers over a database or backend problem - if something is
+  actually wrong, find out why and fix that, the same standard this
+  project already holds application code to.
+
 ---
 
 ## Working practices, learned the hard way

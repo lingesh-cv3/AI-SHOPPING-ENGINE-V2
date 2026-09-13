@@ -213,6 +213,14 @@ call(
         "connection_id": KETTLE,
         "friction": "PAYMENT_DECLINED",
         "order_id": order,
+        # Without this, the resulting Case has no cart_id, and the recovery
+        # execution's best-effort ledger sync (engine/execution/service.py -
+        # "a successful recovery is a completed purchase... and must count
+        # toward total sales the same way") silently no-ops on its own
+        # `if case.cart_id and amount:` guard. Found by hand: this recovery
+        # showed up in revenue_recovered but never in completed_order_count
+        # or total_sales_amount until this was added.
+        "cart_id": bag["cart_id"],
         "session_id": "demo_history_1",
     },
 )
@@ -266,6 +274,10 @@ call(
         "connection_id": KETTLE,
         "friction": "PAYMENT_DECLINED",
         "order_id": hcb_order,
+        # Same reason as the first simulate call above - kept even though
+        # this recovery is expected to fail, so the case always carries a
+        # cart_id regardless of outcome.
+        "cart_id": hcb_bag["cart_id"],
         "session_id": "demo_history_hardblock",
     },
 )

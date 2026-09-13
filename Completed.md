@@ -2950,3 +2950,90 @@ below; `npm run build` now exits 0.)
     assumed) or fixed at the specific point that was actually wrong (the
     chart's missing axis, the holdout wording), never by touching
     unrelated Merchant functionality.
+
+49. **Real `cv3.db` corruption, diagnosed, reset from scratch, and one
+    genuine bug found and fixed in the demo-seeding script along the
+    way.** The engine failed to start (`database disk image is
+    malformed` on `PRAGMA table_info("cases")`). Diagnosed rather than
+    assumed: the file's own header claimed 10,364 pages while the file
+    on disk held only 10,233 - a straightforward truncation, not
+    scrambled bytes. Root cause: `cv3.db` had been hardlinked into
+    several parallel git worktrees (a hardlink is the same physical
+    file, not a copy), one investigation session had put it into WAL
+    mode to test a theory, and the engine process had been routinely
+    force-killed (`taskkill /F`) rather than shut down cleanly across
+    many sessions - a kill mid-checkpoint left the header ahead of the
+    actual page data. Confirmed non-destructively first: copied the live
+    file, patched only the copy's header to the true page count, and
+    found 13 of 17 tables still fully readable; `execution_attempts`
+    (the payment ledger), `session_turns`, `shopper_sessions`,
+    `resource_owners` and `funnel_events` were not.
+
+    Per instruction, no deep page-scan recovery was attempted - this is
+    local demo/test data with no real cost to rebuilding, so the
+    corrupted file was preserved as `cv3_corrupt_backup_20260913.db`
+    (gitignored) and the database was reset from scratch: fresh schema
+    via `mint_keys.py`, keys re-synced to the storefront via
+    `patch_auth_4c.py`, all three backends and Vite restarted clean, and
+    `demo_reset.py` re-run for the intentional minimal demo baseline
+    (one recovered Kettle payment, one recovery that fails on the
+    platform, one dead search, one pending approval) - never a hand-
+    fabricated business metric.
+
+    **A real, previously-undiscovered bug in `demo_reset.py` itself was
+    found while validating the fresh reset, not assumed clean because
+    the script is old and trusted**: its `/api/simulate` calls omitted
+    `cart_id`, so the resulting `Case` row had `cart_id=None`. Recovery
+    execution's own best-effort ledger sync
+    (`engine/execution/service.py` - "a successful recovery is a
+    completed purchase... and must count toward total sales the same
+    way") is gated on `if case.cart_id and amount:`, so it silently
+    never ran - no exception, no log line, just a no-op. The result:
+    `demo_reset.py`'s own "recovered" payment showed up in
+    `revenue_recovered` but never in `completed_order_count` or
+    `total_sales_amount` - the exact class of Sales & Revenue
+    inconsistency chased in #48, this time a real and permanent instance
+    rather than the transient one. Confirmed the real shopper-facing
+    chat/checkout path was never affected - `engine/api/chat.py` always
+    threads `cart_id` from the request through to the `Case` it creates,
+    and the storefront's own dead-search handler
+    (`storefront/src/App.tsx`) always includes the real `cart_id` - this
+    was scoped entirely to the hand-written seed script. Fixed by adding
+    `cart_id` to both `/api/simulate` calls in `demo_reset.py`; verified
+    directly against the database that the recovered payment now counts
+    toward `completed_order_count` and `total_sales_amount` as well as
+    `revenue_recovered`.
+
+    **Verified end to end on the fresh, fixed database**: both merchant
+    backends and the engine start clean from an empty `cv3.db`; Kettle's
+    Overview correctly shows the recovered payment
+    (Revenue 1831.00 INR, Orders 1) before any further activity; a real
+    purchase on each merchant afterward moved orders/revenue by exactly
+    the expected amount (Kettle 1→2 orders, 1831.00→3662.00 revenue;
+    Northfield 0→1 orders, 0.00→5072.82 revenue); Platform & Capabilities
+    correctly shows Kettle with 11/11 operations including payment
+    recovery, and Northfield with 10/11, `recoverPayment` explicitly
+    named unsupported; `supports_webhooks` confirmed `true` for Kettle
+    and `false` for Northfield directly via `/api/connections/{id}/
+    capabilities`. Both storefronts and both Merchant consoles verified
+    live in the browser, zero console errors.
+
+    **New standing rules written into `CLAUDE.md`** ("Database and
+    process safety"): never hardlink `cv3.db` between worktrees or
+    processes; this project does not use worktrees for day-to-day work
+    (work happens directly on `main`); prefer a graceful shutdown, with
+    the one documented Windows exception (a headless console process has
+    no graceful path, confirmed by `taskkill` itself refusing and naming
+    the reason); stop the engine and confirm no process holds `cv3.db`
+    open before any destructive database operation; back up before
+    anything destructive; do not change journal mode without a written
+    reason and a checkpoint/crash plan; never hide a database problem
+    behind a sleep, retry, poll, or frontend workaround.
+
+    **Verification.** `npm run build`/`npm run lint` clean (identical
+    8-error baseline, 0 new). `auditroutes.py` clean. `fuzz.py` clean
+    against the fresh database, every invariant held. `healthcheck.py`
+    (run alone, not concurrently, per the lesson in #47) 115/116 - the
+    one failure ("a successful recovery still explains what it did not
+    do") the same chat-reply-wording class already diagnosed elsewhere
+    in this file as model-variance flaky.
