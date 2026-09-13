@@ -237,6 +237,31 @@ using `DIAGNOSED` as a terminal state for "needs a choice" is semantically odd.
 Closing a handover with a blank note tells the shopper nothing by design,
 which is worth revisiting rather than an obvious bug.
 
+**A harmless console-noise regression from this session's session-id
+hardening.** `db.owners.may_touch()` now takes `read_only`, wired into the
+transcript GET route only (`_mine(..., read_only=True)` in `chat.py`'s
+`transcript()`), so a GET against a session id nobody has posted a first
+message to is correctly refused (404 `SESSION_NOT_FOUND`) rather than
+silently claiming it. Side effect, found live: on a fresh page load, before
+any message is sent, the transcript poll/mount-restore call now logs a 404
+network error in the browser DevTools console, because it hits the
+not-yet-claimed session. Both call sites already have pre-existing
+`.catch()` handlers (unchanged by this session), so it is silently absorbed
+- no user-visible behaviour changes and no functional regression - but it is
+console noise that was not there before. Worth a follow-up to skip the
+transcript call until after the first message is sent, not urgent.
+
+**Shopping-state field-extraction reliability, from this session's Phase 1
+foundation work (see Next Steps item 0).** The new `shopping_state` fields
+on the `propose_actions` tool call are not reliably filled by the model on
+every turn that has the information to fill them - one live trial captured
+`goal`/`budget_amount` correctly but left `must_have`/`exclusions` empty
+despite the shopper stating "lightweight" and "not waterproof" in the same
+sentence. The storage/merge/retrieval mechanism itself is sound and tested
+in isolation; whether the model can be prompted into consistently
+populating every field across arbitrary phrasing has not been exhaustively
+tested and should not be assumed.
+
 **One real user-reported chat bug, still open** (the original list had
 seven; seven were addressed this session - see `Completed.md` #34, both its
 original four and its later continuation covering the button-recovery
@@ -280,17 +305,111 @@ should extend the Playwright suite to them rather than reach for
 
 ### Existing Engineering Work
 
-0. **The reply-before-data constraint.** `engine.reasoning.reason()` writes
-   the shopper-facing reply before `execute_case()` runs (`chat.py:374` vs
-   `:552`), so any reply describing data fetched during the turn is generic by
-   construction — it is written before that data exists. Previously noted only
-   inside the Smart Product Comparison checkbox below; promoted here because
-   it blocks four Phase 1 shopper roadmap items, not one — see CLAUDE.md's
-   Shopper Roadmap, items 1 through 4. Needs a second reasoning pass over the
-   executed result, or a different pipeline shape. **Highest-priority
-   architecture work.** Building any of the four blocked shopper items before
-   this is fixed will produce exactly the generic output the value bar exists
-   to prevent — do not start them first.
+0. **The reply-before-data constraint — a scoped fix now built and live-
+   verified, not yet value-audited.** A session on top of `d2db753` added
+   `ReasoningService.synthesize()` (`engine/reasoning/service.py`) — a
+   second, small model call made only after `execute_case()` has produced
+   the real authoritative result, and only for two action types
+   (`COMPARE_PRODUCTS` and `RECOMMEND_PRODUCTS`; every other action already
+   has a deterministic engine-written reply and needs nothing). It carries
+   no tool schema — it cannot propose an action, assert risk, or reach
+   execution, confirmed by `invariant-guard`. Skipped when the primary
+   reasoning call already fell back to rules, to avoid a second call that
+   would fail the same way and to avoid extra latency on an
+   already-throttled turn. Wired into `engine/api/chat.py`'s
+   `COMPARE_PRODUCTS` branch (there was previously no dedicated branch at
+   all — a successful comparison's reply was 100% the pre-fetch model
+   guess) and the `RECOMMEND_PRODUCTS` branch (previously always the flat
+   "Here's what's available — N options:" sentence).
+
+   Live-verified in a real Playwright-driven browser, not assumed from a
+   unit test: on Northfield, a shopper who stated "I need running shoes for
+   a marathon, lightweight, under 15000, not waterproof" and then compared
+   two named products got "Given your focus on lightweight shoes for a
+   marathon, the Marathon Pro would be the better fit for you" next to a
+   correct, live-fetched comparison table (screenshot at
+   `storefront/scratch/comparison_verify.png`, gitignored scratch, not
+   committed). On Kettle, a shopper who stated "a coffee that's fruity and
+   not too acidic" and then compared two named coffees got "...it depends
+   on whether you prefer the unique flavors of the Guji or the balanced
+   profile of the Huila" — directly engaging the stated preference, where
+   the pre-existing code produced generic boilerplate (this exact gap was
+   independently reproduced live earlier in the same session, on this same
+   Kettle comparison). Same code path on both connections, confirming
+   platform independence.
+
+   Alongside this, structured "current shopping state" (goal/budget/
+   constraints/must-have/nice-to-have/exclusions/priorities/active_products/
+   mission_status) is now captured from the *existing* `propose_actions`
+   tool call — a new `ShoppingState` table and `engine/db/shopping_state.py`
+   (get/merge) — no extra model call for this part. Scalars only overwrite
+   when the model supplies a new value that turn (verified in isolation: a
+   turn that only restates budget leaves goal/must_have/exclusions from an
+   earlier turn untouched); list fields are additive/subtractive with
+   case-insensitive dedup and an explicit `_remove` list (verified in
+   isolation); `active_products` is set deterministically from the real
+   executed comparison/recommendation product ids, never the model's guess.
+   Honest gap found live: model reliability at filling every new field in
+   one call is not perfect — one live trial correctly captured `goal` and
+   `budget_amount` but left `must_have`/`exclusions` empty even though the
+   shopper stated "lightweight" and "not waterproof" in the same sentence.
+   The mechanism (storage, retrieval, context injection, and the synthesis
+   pass reading it) works end-to-end; per-field extraction completeness
+   across arbitrary phrasing does not, and should not be claimed reliable.
+
+   Durable shopper memory (signed-in shoppers only) was also added — a new
+   `ShopperMemoryFact` table and `engine/db/memory_facts.py` (upsert with
+   supersession keyed on connection/shopper/key, expiry-aware read),
+   populated from a new optional `durable_facts` field on the same tool
+   call. Guests never get a row (no stable identity). Verified in
+   isolation: a second upsert of the same key replaces rather than
+   duplicates; different shoppers/merchants stay isolated. **Not**
+   live-verified end-to-end — that needs a real model call actually
+   flagging a durable fact and a real second visit, later, as the same
+   signed-in shopper, which this session did not drive.
+
+   Verification run against the live services this session:
+   `invariant-guard` SAFE on the full diff (one follow-up fix applied: the
+   new shopping-state/memory-facts reads and writes in `chat.py` were
+   wrapped in try/except to match the existing best-effort pattern used
+   nearby for `session_store.add_turn`/`record_case`, after invariant-guard
+   flagged them as unwrapped). `healthcheck.py`: 115 passed, 1 FAILED (the
+   same pre-existing, already-documented model-variance flake in a Kettle
+   recovery `why()` check that appears elsewhere in `Completed.md` under
+   this exact "115/1" signature — unrelated code path). `fuzz.py`: 20/20
+   sequences, 1200 assertions, every invariant held. `auditroutes.py`:
+   every probe held. `npm run build` clean, `npm run lint` unchanged
+   baseline.
+
+   **`value-auditor` run against this specific capability, same session —
+   verdict THIN, not VALUABLE.** Confirmed the generic-reply defect is
+   genuinely fixed rather than relocated (the raw API response for a live
+   comparison turn still carries the old-shape pre-fetch `model_reply`
+   field alongside the new, actually-grounded `reply` field the shopper
+   sees — direct evidence the fix is real, not a renamed no-op), confirmed
+   the "Buy now" buttons are driven by the unchanged `comparison` array and
+   cannot be broken or hidden by the synthesis text, and confirmed a
+   zero-shopping-state (Kettle, no stated preference) turn degrades
+   honestly rather than forcing a winner. Two concrete, named gaps kept it
+   from clearing the bar: **(1) no figure moves** — this is a real
+   capability with no way to ever tell whether it helped anyone, the exact
+   "unmeasured feature" anti-pattern; cheapest fix is logging whether a
+   synthesized comparison reply preceded an add-to-cart of the "named
+   better" product in the same session, even as a rough directional
+   signal, before the next pass. **(2) the platform-down path for this
+   exact call was never forced live** — `synthesize()` catching
+   `LLMUnavailable` and falling back to the safe "Here's how they compare."
+   sentence is sound by inspection and gated correctly (only ever called
+   after `executed.succeeded`), but nobody has actually throttled/killed
+   the model provider mid-comparison to watch it degrade for real. Do not
+   move this, or the Smart Product Comparison entry below, to Completed.md
+   until both are addressed and a follow-up `value-auditor` pass returns
+   VALUABLE.
+
+   Still blocked on this same constraint, unstarted: Advanced Product
+   Discovery, Personalized Recommendations, and Mission-Based Shopping
+   (items 1, 3 and 4 of the Shopper Roadmap) — the synthesis mechanism now
+   exists and is reusable, but none of the three has been wired to it.
 
 1. **Guest handover / session behaviour:** still open. Guests no longer pay,
    but can still chat and get escalated, and the shop now prompts for an email
@@ -340,34 +459,39 @@ Rules. Do not build from the checkbox label alone.
 **Blocked on item 0 above (the reply-before-data constraint) — do not start
 these first:**
 
-- [ ] Advanced Product Discovery
-- [ ] Smart Product Comparison - **partially covered by `Completed.md` #27.**
-      Checked directly against the code, not assumed: the comparison action
-      (`ActionType.COMPARE_PRODUCTS`) fetches both products fresh via
-      `adapter.get_product()` on every call - never from anything cached
-      earlier in the conversation - and returns structured fields (title,
-      price, description, availability), which satisfies "compare products
-      using structured, live product information" in full.
+- [ ] Advanced Product Discovery - unstarted; would reuse the same
+      `synthesize()` mechanism item 0 above just built, but no wiring exists
+      yet for a general discovery turn.
+- [ ] Smart Product Comparison - **the specific gap this item was tracking
+      ("explain meaningful differences rather than simply listing
+      specifications") now has a real, live-verified implementation** - see
+      item 0 above for the full account (`ReasoningService.synthesize()`,
+      wired into `COMPARE_PRODUCTS` in `engine/api/chat.py`, both merchants
+      verified live in a real browser). The live-fetch half was already
+      covered by `Completed.md` #27 (both products always fetched fresh via
+      `adapter.get_product()`, never cached). What is genuinely new this
+      session is the synthesis half, and it is real and demonstrated - a
+      comparison reply now visibly reasons over the shopper's stated
+      mission next to the actual fetched values, on both demo merchants.
 
-      Not covered: "explain meaningful differences rather than simply
-      listing specifications." `execution/service.py`'s `COMPARE_PRODUCTS`
-      dispatch (lines ~466-495) returns exactly that - a plain listing of
-      the same fields for each product, with no synthesis of which
-      differences actually matter for the shopper's situation. It cannot be
-      otherwise as built: the model's reply is written by
-      `engine.reasoning.reason()` *before* `execute_case()` ever runs (the
-      reasoning step precedes execution in `_process_turn`, confirmed at
-      `chat.py:374` vs `:552`), so the reply is generic ("Let's see how they
-      differ in price, stock and features") rather than a claim grounded in
-      the actual fetched values - it is written before those values exist.
-      Closing this gap needs a second reasoning pass *over* the fetched
-      comparison (or a different pipeline shape entirely), not a UI or
-      prompt change - it is a real, unimplemented capability, kept here
-      rather than marked done. **See item 0 above - this is the same
-      constraint, and fixing it here fixes it for all four blocked shopper
-      items at once, not just this one.**
-- [ ] Personalized Recommendations
-- [ ] Mission-Based Shopping
+      **Still not moved to Completed.md.** No `value-auditor` pass has been
+      run against this specific capability yet, and this file's own
+      maintenance note is explicit that a feature does not move on the
+      strength of "the code is written and one path was checked by hand" -
+      it needs a dedicated pass answering the six value-bar questions (in
+      particular: is the difference it now names one a shopper genuinely
+      could not get from the platform's own free comparison table, and what
+      does it cost if the synthesis states a comparison wrong). Do not move
+      this until that pass returns VALUABLE.
+- [ ] Personalized Recommendations - unstarted; also blocked on being wired
+      to the same synthesis mechanism, and additionally needs product-
+      interaction instrumentation (impressions/views) that does not exist
+      at all yet.
+- [ ] Mission-Based Shopping - unstarted. The new `ShoppingState.goal` field
+      (item 0 above) is a building block for this, but multi-item basket
+      building in one turn is untouched - the Decision Engine's one-action-
+      per-turn constraint (see the "Multi-item add" Known Issue below) still
+      applies unchanged.
 
 **Not blocked:**
 

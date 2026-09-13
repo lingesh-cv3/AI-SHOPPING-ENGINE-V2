@@ -98,6 +98,138 @@ def propose_tool() -> dict[str, Any]:
                             "happened after your reply."
                         ),
                     },
+                    "shopping_state": {
+                        "type": "object",
+                        "description": (
+                            "Update to the shopper's CURRENT mission, only "
+                            "when THIS message states something new or "
+                            "different. Every field is optional and should "
+                            "be left out entirely when this message says "
+                            "nothing new about it - omitting a field means "
+                            "'no change', not 'clear it'. Never infer a "
+                            "durable goal/budget/constraint from a "
+                            "greeting, thanks, or small talk."
+                        ),
+                        "properties": {
+                            "goal": {
+                                "type": "string",
+                                "description": (
+                                    "What they are ultimately trying to buy "
+                                    "or accomplish, in their own terms ('a "
+                                    "lightweight marathon setup'). Only "
+                                    "when newly stated or changed this "
+                                    "message."
+                                ),
+                            },
+                            "budget_amount": {
+                                "type": "number",
+                                "description": (
+                                    "A total budget the shopper stated for "
+                                    "this mission (not a per-item price "
+                                    "filter - that is max_price on the "
+                                    "action itself). Only when this message "
+                                    "states or changes one."
+                                ),
+                            },
+                            "budget_currency": {
+                                "type": "string",
+                                "description": "Only if the shopper named a currency explicitly.",
+                            },
+                            "constraints_add": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "New hard constraints stated this message (e.g. 'not waterproof').",
+                            },
+                            "constraints_remove": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Constraints the shopper just said no longer apply.",
+                            },
+                            "must_have_add": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "New must-have requirements stated this message.",
+                            },
+                            "must_have_remove": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "nice_to_have_add": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "New preferences that would help but are not required.",
+                            },
+                            "nice_to_have_remove": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "exclusions_add": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Things the shopper explicitly does not want.",
+                            },
+                            "exclusions_remove": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "priorities_add": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "A trade-off the shopper stated, in "
+                                    "their own words ('lighter matters more "
+                                    "than cushioning'). Only an explicit "
+                                    "trade-off, never one you inferred."
+                                ),
+                            },
+                            "mission_status": {
+                                "type": "string",
+                                "enum": ["exploring", "comparing", "deciding", "done"],
+                                "description": (
+                                    "Your best read of where they are: "
+                                    "exploring (browsing/discovering), "
+                                    "comparing (weighing specific options), "
+                                    "deciding (close to choosing), done "
+                                    "(bought or dropped it). Omit if unclear."
+                                ),
+                            },
+                        },
+                        "additionalProperties": False,
+                    },
+                    "durable_facts": {
+                        "type": "array",
+                        "description": (
+                            "Facts worth remembering on a FUTURE, DIFFERENT "
+                            "visit - not for this mission. Only a stable "
+                            "preference or an owned item the shopper "
+                            "explicitly stated (e.g. 'I always drink oat "
+                            "milk', 'I already have the Trailblazer in a "
+                            "9'). Leave this empty almost always. Never "
+                            "include a greeting, a filler remark, or "
+                            "anything only true for this one purchase - "
+                            "that belongs in shopping_state, not here."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {
+                                    "type": "string",
+                                    "description": (
+                                        "A short, stable label for this "
+                                        "fact ('prefers_oat_milk', not a "
+                                        "full sentence) - so a later, "
+                                        "differently-worded restatement of "
+                                        "the same fact updates the same "
+                                        "one rather than creating a "
+                                        "duplicate."
+                                    ),
+                                },
+                                "value": {"type": "string"},
+                            },
+                            "required": ["key", "value"],
+                            "additionalProperties": False,
+                        },
+                    },
                     "actions": {
                         "type": "array",
                         "minItems": 1,
@@ -384,6 +516,106 @@ Rules that matter:
   "I can add that" rather than "I've added that", and let the system report what
   actually happened.
 
+- Fill shopping_state only from what THIS message actually states. "I need
+  running shoes for a marathon, lightweight, under 15000, not waterproof" is
+  goal="a marathon setup", budget_amount=15000, must_have_add=["lightweight"],
+  exclusions_add=["waterproof"]. A later message that only says "actually
+  make it under 12000" changes only budget_amount - leave every other field
+  out entirely, because nothing else changed. Never restate the whole
+  mission back - that duplicates what is already stored and risks
+  contradicting it.
+- Fill durable_facts only for something that would still be true on a
+  completely different visit, weeks from now - a stable preference or an
+  owned item, and only when the shopper stated it themselves. Almost every
+  turn should leave this empty. A shopper choosing a size for one order is
+  not a durable fact; a shopper saying they always take a US 9 is.
+
 Friction types you may see: {", ".join(str(f) for f in FrictionType)}.
 
 Always answer by calling propose_actions. Do not reply in prose."""
+
+
+#: The post-execution synthesis pass's own system prompt - deliberately
+#: separate from SYSTEM_PROMPT above. This call happens *after* the
+#: authoritative result already exists (see ReasoningService.synthesize),
+#: so its whole job is different: explain real facts already in hand,
+#: never propose anything, never guess at what has not run yet.
+_SYNTHESIS_SYSTEM_PROMPT = """You write one short, grounded reply about a
+result that has already happened. The facts below are real and already
+fetched - never invent, guess, or add anything not listed.
+
+Rules:
+- Two to three sentences, plain and warm, present tense describing what is
+  true right now ("The X is..."), never future tense about something not
+  yet done.
+- If the shopper stated a goal, budget, constraint, must-have, exclusion or
+  priority, use it to say which of the real facts below actually matters for
+  them - not a generic listing of specs. If nothing was stated, describe the
+  most useful real difference or two without inventing a preference for them.
+- Never state a price, stock level, or attribute that is not in the facts
+  given to you.
+- Never mention internal systems, action names, or that you are an AI.
+- For a comparison: name which one fits better for what they said, and why,
+  or say plainly that it depends on what matters most to them if the facts
+  do not clearly favour one.
+- For a discovery/recommendation list: say what ties the shown options
+  together and, if a stated constraint ruled anything out, that it did -
+  never claim something is shown that is not in the list.
+"""
+
+
+def _synthesis_prompt(
+    kind: str,
+    message: str | None,
+    items: list[dict],
+    shopping_state: dict | None,
+) -> str:
+    """The compact, plain-text user message for one synthesis call.
+
+    Deliberately small - this is not the full Context Builder (see
+    engine/reasoning/context.py). It carries exactly what this one judgement
+    needs: the real fetched items, what the shopper said this turn, and the
+    current mission state if one has been captured.
+    """
+    parts: list[str] = []
+    if message:
+        parts.append(f"THE SHOPPER JUST SAID: {message}")
+
+    if shopping_state:
+        bits = []
+        if shopping_state.get("goal"):
+            bits.append(f"goal: {shopping_state['goal']}")
+        if shopping_state.get("budget_amount"):
+            bits.append(
+                f"budget: {shopping_state['budget_amount']} "
+                f"{shopping_state.get('budget_currency') or ''}".strip()
+            )
+        for field, label in (
+            ("must_have", "must have"),
+            ("exclusions", "must not have"),
+            ("nice_to_have", "would like"),
+            ("priorities", "trade-off priorities"),
+        ):
+            values = shopping_state.get(field)
+            if values:
+                bits.append(f"{label}: {', '.join(values)}")
+        if bits:
+            parts.append("THEIR CURRENT MISSION: " + "; ".join(bits))
+
+    label = "THE TWO PRODUCTS, FETCHED JUST NOW" if kind == "comparison" else "THE REAL OPTIONS, FETCHED JUST NOW"
+    lines = []
+    for item in items:
+        bits = [item.get("title", "")]
+        if item.get("price"):
+            bits.append(str(item["price"]))
+        if item.get("availability"):
+            bits.append(str(item["availability"]).replace("_", " ").lower())
+        if item.get("description"):
+            bits.append(str(item["description"]))
+        lines.append("  - " + ", ".join(str(b) for b in bits if b))
+    parts.append(f"{label}:\n" + "\n".join(lines))
+
+    parts.append(
+        "Write the reply now - two to three sentences, grounded only in the facts above."
+    )
+    return "\n\n".join(parts)

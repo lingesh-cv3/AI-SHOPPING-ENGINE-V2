@@ -31,6 +31,7 @@ from engine.db.models import Case
 
 from ..db.models import Case, SessionTurn
 from ..db.session import session_scope
+from . import shopper_memory
 
 #: How many turns of conversation to carry. Six is roughly three exchanges, which
 #: covers "no, cheaper than that" style follow-ups without spending the token
@@ -45,6 +46,19 @@ from ..db.session import session_scope
 #: turn here is tokens against a per-minute budget that is already the
 #: main thing slowing development down: remember more, throttle sooner.
 #: Fourteen covers a browse-and-decide without doubling the cost.
+#:
+#: This is deliberately a *different* number from `shopper_memory.STORED`
+#: (30), and the two are not competing definitions of "how much memory" -
+#: they are two different layers. HISTORY_TURNS bounds what the model reads
+#: as conversational context, every turn, and is a cost control against a
+#: per-minute token budget. STORED bounds what is *retained at all* (raw
+#: history, per the Context Builder's layering - see
+#: engine/reasoning/context.py) before older turns are deleted outright, for
+#: every session regardless of whether the model ever reads that far back.
+#: A shopper can retain up to STORED turns of scrollback while the model
+#: still only ever reasons over the most recent HISTORY_TURNS of them. If a
+#: future change needs a single combined "context budget" knob, it should
+#: replace one of these two, not add a third alongside them.
 HISTORY_TURNS = 14
 
 #: How many recent friction events to surface. Two is enough for "my payment failed
@@ -100,6 +114,14 @@ async def add_turn(
                 ),
             )
         )
+
+    # Raw-history retention, applied after every turn - not just at sign-in
+    # adoption. Before this, `shopper_memory.trim()` was only ever called from
+    # `adopt()`, so a long-lived guest or already-signed-in session's
+    # `session_turns` rows grew without bound between adoptions - the STORED
+    # cap existed in code but was not actually enforced continuously. Every
+    # session, guest or signed-in, is capped the same way now.
+    await shopper_memory.trim(session_id, connection_id)
 
 
 async def history(

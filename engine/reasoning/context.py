@@ -39,6 +39,8 @@ def build_context(
     catalog_sample: list[Product] | None = None,
     history: list[str] | None = None,
     recorded_friction: list[str] | None = None,
+    shopping_state: dict | None = None,
+    memory_facts: list[dict] | None = None,
 ) -> str:
     """Assemble the user message for one turn.
 
@@ -59,6 +61,49 @@ def build_context(
 
     if friction and message:
         parts.append(f"AND THE STOREFRONT DETECTED: {friction}")
+
+    # Their current mission, if one has been captured - the structured
+    # "current shopping state" layer. Placed early, right after what they
+    # just said, because it is high-value grounding for everything that
+    # follows: a budget or exclusion stated three turns ago still applies to
+    # this one, and it should not have to survive by being re-read out of
+    # raw history prose.
+    if shopping_state:
+        bits = []
+        if shopping_state.get("goal"):
+            bits.append(f"goal: {shopping_state['goal']}")
+        if shopping_state.get("budget_amount"):
+            currency = shopping_state.get("budget_currency") or ""
+            bits.append(f"budget: {shopping_state['budget_amount']} {currency}".strip())
+        for field, label in (
+            ("must_have", "must have"),
+            ("exclusions", "must not have"),
+            ("nice_to_have", "would like"),
+            ("priorities", "trade-off priorities"),
+        ):
+            values = shopping_state.get(field)
+            if values:
+                bits.append(f"{label}: {', '.join(values)}")
+        if shopping_state.get("mission_status"):
+            bits.append(f"status: {shopping_state['mission_status']}")
+        if bits:
+            parts.append(
+                "THEIR CURRENT SHOPPING MISSION (established earlier this "
+                "visit - treat a newer, contradicting statement in THE "
+                "SHOPPER SAYS above as replacing this, not the other way "
+                "round):\n  " + "; ".join(bits)
+            )
+
+    # Durable facts about this shopper, from a previous visit - never from
+    # this conversation's own history, which is already covered below.
+    # Authenticated shoppers only; see engine/db/memory_facts.py.
+    if memory_facts:
+        parts.append(
+            "WHAT WE ALREADY KNOW ABOUT THIS SHOPPER FROM BEFORE (stated by "
+            "them previously, not necessarily relevant to this exact "
+            "message):\n"
+            + "\n".join(f"  - {f['key']}: {f['value']}" for f in memory_facts)
+        )
 
     if query:
         parts.append(f'THE SHOPPER SEARCHED FOR: "{query}"')

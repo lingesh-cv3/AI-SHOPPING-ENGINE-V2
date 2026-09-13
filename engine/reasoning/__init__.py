@@ -9,7 +9,7 @@ impossible for the model to influence risk classification.
 
 from .llm import DEFAULT_MODEL, LLMClient, LLMConfig, LLMUnavailable
 from .prompts import PROPOSABLE, SYSTEM_PROMPT
-from .service import Reasoning, ReasoningService
+from .service import Reasoning, ReasoningService, Synthesis
 
 __all__ = [
     "DEFAULT_MODEL",
@@ -20,4 +20,5 @@ __all__ = [
     "LLMUnavailable",
     "Reasoning",
     "ReasoningService",
+    "Synthesis",
 ]

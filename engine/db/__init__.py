@@ -23,6 +23,8 @@ from .models import (
     ResourceOwner,
     SentMail,
     SessionHoldout,
+    ShoppingState,
+    ShopperMemoryFact,
 )
 from .repository import (
     checkout_conversion,
@@ -70,6 +72,11 @@ from . import shopper_carts
 # Who a cart, a conversation or an order belongs to. Imported after the models
 # for the same reason as the two above: it asks this package for session_scope.
 from . import owners
+
+# The current-mission and durable-memory layers of the Context Builder.
+# Imported after the models/session for the same reason as the modules above.
+from . import shopping_state
+from . import memory_facts
 
 __all__ = [
     "ApiKey",
@@ -123,4 +130,8 @@ __all__ = [
     "list_merchant_tasks",
     "merchant_task_counts",
     "decide_merchant_task",
+    "ShoppingState",
+    "ShopperMemoryFact",
+    "shopping_state",
+    "memory_facts",
 ]

@@ -776,6 +776,135 @@ class OrderLine(Base):
     )
 
 
+class ShoppingState(Base):
+    """The active shopping mission for one conversation - the "current shopping
+    state" layer of the Context Builder (see engine/reasoning/context.py).
+
+    One row per (session_id, connection_id), the same scope a conversation
+    already has - a guest's mission lives as long as their session, a
+    signed-in shopper's for as long as that conversation exists. Not scoped
+    to the shopper account: a mission is "what this visit is trying to
+    buy", not a durable fact about the person, which is what
+    ShopperMemoryFact is for instead.
+
+    Every scalar field (goal/budget/currency/mission_status) is overwritten
+    only when the model's structured output supplies a new value that turn;
+    an omitted field means "no new information this turn", not "clear it" -
+    new explicit information supersedes old, stale information is left
+    alone rather than erased by silence. The list fields
+    (constraints/must_have/nice_to_have/exclusions) are maintained the same
+    way at the call site (engine/db/shopping_state.py's `merge`): additions
+    are appended and de-duplicated, and an explicit removal (the shopper
+    correcting themselves) takes an item back out - the row is never
+    replaced wholesale from one turn's partial view of the mission.
+    """
+
+    __tablename__ = "shopping_states"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    goal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    budget_amount: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    budget_currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+
+    constraints: Mapped[list] = mapped_column(JSON, default=list)
+    must_have: Mapped[list] = mapped_column(JSON, default=list)
+    nice_to_have: Mapped[list] = mapped_column(JSON, default=list)
+    exclusions: Mapped[list] = mapped_column(JSON, default=list)
+
+    #: Free-text trade-off notes ("lighter over cushioning"), not numeric
+    #: weights - capturing what the shopper said takes priority over a
+    #: quantitative re-ranking model this pass does not build. Kept as an
+    #: ordered list, most recent last, so re-stated priorities read in the
+    #: order the shopper actually gave them.
+    priorities: Mapped[list] = mapped_column(JSON, default=list)
+
+    #: Product ids currently under consideration - what a comparison or a
+    #: shortlist was actually built from, so a later turn ("compare those
+    #: two again but cheaper first") has something concrete to refer back
+    #: to. Replaced wholesale each time it changes, unlike the list fields
+    #: above - "what am I looking at right now" has no meaningful partial
+    #: update.
+    active_products: Mapped[list] = mapped_column(JSON, default=list)
+
+    #: One of "exploring", "comparing", "deciding", "done" - never invented
+    #: by anything other than the model's own structured output, and left
+    #: null until the model states one.
+    mission_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
+class ShopperMemoryFact(Base):
+    """One durable, structured fact about a signed-in shopper - the "important
+    shopper memory" layer, deliberately separate from ShoppingState (the
+    current mission) and from raw conversation history.
+
+    Authenticated shoppers only. A guest has no durable identity to attach a
+    fact to, and inventing one to remember them across visits is exactly
+    the tracking-without-consent this project's own guest model already
+    refuses elsewhere (see ShopperCart's docstring on the same point).
+
+    `key` plus (connection_id, shopper_id) is the supersession identity: a
+    later fact with the same key replaces the value, provenance, confidence
+    and timestamp of the earlier one rather than accumulating a duplicate
+    row - "new explicit information supersedes conflicting old information"
+    applies to durable memory the same way it applies to the current
+    shopping state, just at a longer time horizon. `key` is a short, stable
+    label the model or a deterministic rule chose (e.g. "prefers_low_acidity",
+    "owns:prod_123"), not free text - two different phrasings of the same
+    preference must collide into one row, not two.
+
+    A chat claim is never itself an authoritative purchase record - see
+    `provenance`. Only a value derived from real commerce data (an actual
+    order) may ever carry a commerce-grounded provenance; anything else is
+    "the shopper said so", which is a real, useful, but explicitly
+    lower-confidence kind of fact than an authoritative order line.
+    """
+
+    __tablename__ = "shopper_memory_facts"
+    __table_args__ = (
+        UniqueConstraint(
+            "connection_id", "shopper_id", "key", name="uq_memory_fact_key"
+        ),
+        Index("ix_memory_facts_shopper", "connection_id", "shopper_id"),
+    )
+
+    fact_id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+    shopper_id: Mapped[str] = mapped_column(String(64), index=True)
+
+    key: Mapped[str] = mapped_column(String(120))
+    value: Mapped[str] = mapped_column(Text)
+
+    #: "shopper_stated" (the common case - something they said in chat) or
+    #: "commerce_data" (derived from an actual order/adapter fact, never
+    #: from conversation). Nothing here writes "commerce_data" today - that
+    #: is deliberately reserved for a future pass that would derive a fact
+    #: from OrderLine rows rather than chat - but the column exists so a
+    #: shopper-stated preference is never silently indistinguishable from a
+    #: verified purchase.
+    provenance: Mapped[str] = mapped_column(String(24), default="shopper_stated")
+    confidence: Mapped[float] = mapped_column(default=1.0)
+    source_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    #: Null means "no expiry known" - most preferences do not go stale on a
+    #: schedule. Set only where a fact is inherently time-bound (never
+    #: populated by this pass; the column exists so a future write can
+    #: express it without a migration).
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
 class SessionHoldout(Base):
     """Whether one session was assigned to the no-assistance holdout group.
 

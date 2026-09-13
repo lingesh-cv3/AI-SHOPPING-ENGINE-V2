@@ -315,7 +315,14 @@ class ChatReply(BaseModel):
     #: have phrased them.
 
 
-async def _mine(who: Visitor, connection_id: str, *, session_id: str, cart_id: str | None = None) -> None:
+async def _mine(
+    who: Visitor,
+    connection_id: str,
+    *,
+    session_id: str,
+    cart_id: str | None = None,
+    read_only: bool = False,
+) -> None:
     """Refuse unless this conversation and cart belong to the caller.
 
     Both, because a message carries both and either one being somebody else's is a
@@ -323,9 +330,14 @@ async def _mine(who: Visitor, connection_id: str, *, session_id: str, cart_id: s
     stranger naming another shopper's cart_id in a pay request spends against a
     basket they did not fill.
 
-    Session ids come from the storefront and look like sess_a1b2c3d4e5f6, so they
-    are not countable the way cart ids are - but "hard to guess" is not the same as
-    "checked", and this is the check.
+    Session ids come from the storefront and look like sess_<uuid4 hex>, generated
+    with crypto.randomUUID() - not countable the way cart ids are, and no longer
+    guessable the way a Math.random() id was, but "hard to guess" was never the
+    same as "checked", and this is the check.
+
+    `read_only` is forwarded to the session ownership check only. A cart_id is
+    never present on a route that could pass read_only=True (the transcript poll
+    takes no cart_id), so there is nothing to narrow there.
     """
     await require_owner(
         who,
@@ -334,6 +346,7 @@ async def _mine(who: Visitor, connection_id: str, *, session_id: str, cart_id: s
         session_id,
         code="SESSION_NOT_FOUND",
         message="no such conversation",
+        read_only=read_only,
     )
 
     if cart_id:
@@ -426,11 +439,18 @@ async def chat(
     """
     belongs_to(key, req.connection_id)
     await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
-    return await _process_turn(req, owner_keys=await who.keys_for(req.connection_id))
+    return await _process_turn(
+        req,
+        owner_keys=await who.keys_for(req.connection_id),
+        shopper_id=await who.shopper_id_for(req.connection_id),
+    )
 
 
 async def _process_turn(
-    req: ChatRequest, *, owner_keys: list[str] | None = None
+    req: ChatRequest,
+    *,
+    owner_keys: list[str] | None = None,
+    shopper_id: str | None = None,
 ) -> ChatReply:
     """The pipeline: reasoning, decision, risk, execution, reply.
 
@@ -446,6 +466,11 @@ async def _process_turn(
     the visitor's own keys; the webhook route leaves it `None` - a merchant's
     own platform reporting an event has no shopper identity to check against,
     and defaulting to "not verified" is the safe direction.
+
+    `shopper_id` is the same idea, for durable shopper memory: only a
+    signed-in shopper has a stable identity to attach a durable fact to
+    (see engine/db/memory_facts.py). `chat()` passes it when one is signed
+    in; the webhook route leaves it `None`, same reasoning as `owner_keys`.
     """
     adapter = engine.registry.adapter_for(req.connection_id)
     if adapter is None:
@@ -456,6 +481,27 @@ async def _process_turn(
     history, friction = await session_store.context_for(
         req.session_id, req.connection_id
     )
+
+    # The current shopping mission (goal/budget/constraints/...) and, for a
+    # signed-in shopper only, durable facts from a previous visit. Both read
+    # before reasoning so this turn's proposal can see them; both updated
+    # after reasoning returns, from that same call's structured output - see
+    # below. Neither is conversation history: they are the structured-memory
+    # layers the raw 14-turn window above is deliberately not asked to hold.
+    #
+    # Best-effort, like the commerce lookups below: a shopping turn should
+    # not fail because a memory read hiccuped. Reasoning with less context is
+    # better than a turn that breaks outright over it.
+    shopping_state = None
+    memory_facts: list[dict] = []
+    try:
+        shopping_state = await db.shopping_state.get(req.session_id, req.connection_id)
+        if shopper_id:
+            memory_facts = await db.memory_facts.for_shopper(
+                req.connection_id, shopper_id
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("could not read shopping state/memory; continuing without it")
 
     if not req.synthetic:
         await session_store.add_turn(
@@ -523,7 +569,31 @@ async def _process_turn(
         catalog_sample=catalog_sample,
         history=history,
         recorded_friction=friction,
+        shopping_state=shopping_state,
+        memory_facts=memory_facts,
     )
+
+    # Fold this turn's structured output into stored memory - never a second
+    # model call, just parsing what the same call already returned.
+    # Best-effort: losing a memory update is a worse outcome to fail the
+    # whole turn over than to log and move on, the same standard as every
+    # other non-critical write in this function (record_case, add_turn).
+    try:
+        if reasoning.shopping_state:
+            await db.shopping_state.merge(
+                req.session_id, req.connection_id, **reasoning.shopping_state
+            )
+        if shopper_id and reasoning.durable_facts:
+            for fact in reasoning.durable_facts:
+                await db.memory_facts.upsert(
+                    req.connection_id,
+                    shopper_id,
+                    key=fact["key"],
+                    value=fact["value"],
+                    source_session_id=req.session_id,
+                )
+    except Exception:  # noqa: BLE001
+        logger.exception("could not persist shopping state/memory; continuing")
     # Merge what we already know into the proposals. Never overwrite: if the model
     # did supply a value, it saw context we did not pass here and should be trusted
     # over our guess.
@@ -811,6 +881,41 @@ async def _process_turn(
                 else "I couldn't read your cart just then. The cart panel on "
                 "the right shows what's in it."
             )
+        elif executed.action_type == "COMPARE_PRODUCTS" and executed.succeeded:
+            # The reply-before-data fix, applied here: `reasoning.reply` was
+            # written before this comparison ever ran, so before this branch
+            # existed the shopper simply got that pre-fetch guess verbatim,
+            # sitting next to a real, correct comparison table it never
+            # referenced (live-reproduced during the Shopper audit this
+            # session implements: a stated preference one turn earlier was
+            # completely ignored by a generic "I can help you compare"
+            # reply). A second, small model call - made only now, with the
+            # real fetched prices/stock/descriptions and the shopper's
+            # current mission already in hand - writes the sentence instead.
+            #
+            # Bounded, not a blanket "call the model twice every turn": only
+            # for this one action type, and only when the first call actually
+            # reached the model - if it fell back to rules, a second call
+            # would fail the same way, so there is no point trying and no
+            # extra latency spent on an already-throttled turn.
+            if reasoning.used_model:
+                synth = await engine.reasoning.synthesize(
+                    kind="comparison",
+                    message=req.message,
+                    items=comparison,
+                    shopping_state=shopping_state,
+                )
+                reply = synth.text or "Here's how they compare."
+            else:
+                reply = "Here's how they compare."
+            try:
+                await db.shopping_state.merge(
+                    req.session_id,
+                    req.connection_id,
+                    active_products=[c["product_id"] for c in comparison],
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("could not record active_products; continuing")
         elif executed.action_type == "PREPARE_CHECKOUT" and executed.succeeded:
             payment = executed.payload
             # Replaces the model's sentence rather than appending to it.
@@ -886,6 +991,35 @@ async def _process_turn(
                 # choice, not a question needing a typed answer.
                 count = len(products)
                 reply = f"Here's what's available - {count} option{'s' if count != 1 else ''}:"
+                # Same reply-before-data fix as COMPARE_PRODUCTS above,
+                # scoped to a genuinely curated discovery result rather than
+                # every browse: only RECOMMEND_PRODUCTS (never
+                # SUGGEST_ALTERNATIVE's "search failed, showing something
+                # else" case), only when the model was actually reachable,
+                # and only when the shopper's mission/message gives the
+                # synthesis something real to reason over rather than
+                # narrating an arbitrary six-item slice of the catalog.
+                if (
+                    executed.action_type == "RECOMMEND_PRODUCTS"
+                    and reasoning.used_model
+                    and (shopping_state or req.message)
+                ):
+                    synth = await engine.reasoning.synthesize(
+                        kind="discovery",
+                        message=req.message,
+                        items=products,
+                        shopping_state=shopping_state,
+                    )
+                    if synth.text:
+                        reply = synth.text
+                try:
+                    await db.shopping_state.merge(
+                        req.session_id,
+                        req.connection_id,
+                        active_products=[p["product_id"] for p in products],
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("could not record active_products; continuing")
             elif executed.action_type == "CHECK_AVAILABILITY":
                 reply = f"{reply}\n\n{executed.summary}"
         else:
@@ -1017,7 +1151,12 @@ async def transcript(
     belongs_to(key, connection_id)
     if engine.registry.adapter_for(connection_id) is None:
         raise HTTPException(404, f"unknown connection '{connection_id}'")
-    await _mine(who, connection_id, session_id=session_id)
+    # read_only=True: a transcript poll must never be the thing that claims an
+    # unstarted conversation. A session id that nobody has posted a first
+    # message against yet is refused here (SESSION_NOT_FOUND) exactly as if it
+    # did not exist - because, ownership-wise, it does not yet. Only the chat/
+    # act POST routes (which write the first turn) may originate a session.
+    await _mine(who, connection_id, session_id=session_id, read_only=True)
     return {
         "session_id": session_id,
         "turns": await session_store.turns(session_id, connection_id, limit=60),

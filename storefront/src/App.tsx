@@ -76,7 +76,12 @@ function sessionFor(connectionId: string): string {
   const key = `cv3_session_${connectionId}`;
   const existing = sessionStorage.getItem(key);
   if (existing) return existing;
-  const fresh = `sess_${Math.random().toString(36).slice(2, 12)}`;
+  // crypto.randomUUID(), not Math.random(): a session id used to be guessable
+  // in principle, and combined with the (now-fixed) claim-on-first-GET
+  // behaviour on the transcript route, a predicted id could be pre-claimed
+  // before the real shopper's first message. Every evergreen browser this
+  // storefront targets implements crypto.randomUUID() natively.
+  const fresh = `sess_${crypto.randomUUID().replace(/-/g, "")}`;
   sessionStorage.setItem(key, fresh);
   return fresh;
 }

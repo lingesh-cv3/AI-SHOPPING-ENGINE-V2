@@ -288,6 +288,7 @@ async def require_owner(
     *,
     code: str,
     message: str,
+    read_only: bool = False,
 ) -> None:
     """Refuse unless this caller owns this cart, conversation or order.
 
@@ -295,9 +296,18 @@ async def require_owner(
     403 confirms the thing exists, so an id that answers "forbidden" is an id
     somebody has just learned is real. Refusing the way a missing thing refuses
     tells them nothing they did not already have.
+
+    `read_only` is forwarded to `may_touch` unchanged - see its own docstring.
+    A route that only ever reads (the transcript poll) passes this so a
+    not-yet-started conversation cannot be silently claimed by whoever happens
+    to poll it first.
     """
     if await db.owners.may_touch(
-        connection_id, kind, resource_id, await who.keys_for(connection_id)
+        connection_id,
+        kind,
+        resource_id,
+        await who.keys_for(connection_id),
+        read_only=read_only,
     ):
         return
 

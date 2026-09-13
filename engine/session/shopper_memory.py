@@ -5,15 +5,24 @@ gets what they always got: a session that lasts the visit, which is right - ther
 no identity to remember a guest by, and inventing one would mean tracking somebody
 who did not ask to be tracked.
 
-Two caps, and they are deliberately different numbers.
+Two caps, and they are deliberately different numbers with different jobs -
+see `engine/session/store.py`'s `HISTORY_TURNS` docstring for the full
+reconciliation between the two.
 
-STORED is how much history is kept and shown to the shopper: 30 turns, which is what
-Raman asked for. Enough to scroll back through a previous visit.
+STORED is the raw-history retention cap: how many turns are kept at all,
+for any session, before older ones are deleted outright. 30 is what Raman
+asked for - enough to scroll back through a previous visit. Applied to
+every session via `store.add_turn()` after every turn, not only at
+sign-in adoption (`adopt()`, below) - a session that never adopts a guest
+conversation still gets the same cap.
 
-The model still sees only the recent part, because every turn in its context is
-tokens against a per-minute budget that is already the main constraint here.
-Remembering more and reading less are not in conflict - the shopper wants to see
-their history, and the model only needs the thread it is answering.
+The model reasoning about a turn never sees anywhere near this far back
+regardless - it reads `HISTORY_TURNS` (14), a separate, smaller, tunable
+context-budget number, because every turn in its context is tokens against
+a per-minute rate limit. Retaining more than the model reads and reading
+less than is retained are not in conflict: a shopper can scroll back
+through 30 stored turns while the model only ever reasons over the most
+recent 14 of them.
 """
 
 from __future__ import annotations

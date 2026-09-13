@@ -39,7 +39,13 @@ from shared.models import (
 
 from .context import build_context
 from .llm import LLMClient, LLMConfig, LLMUnavailable
-from .prompts import PROPOSABLE, SYSTEM_PROMPT, propose_tool
+from .prompts import (
+    PROPOSABLE,
+    SYSTEM_PROMPT,
+    _SYNTHESIS_SYSTEM_PROMPT,
+    _synthesis_prompt,
+    propose_tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +127,30 @@ class Reasoning:
     #: so the shopper can be told a real number rather than "a few seconds". Only
     #: set on the rate-limited fallback path; None everywhere else.
     retry_after_seconds: float | None = None
+    #: Update to the current shopping mission, parsed straight from the same
+    #: tool call - never a second model call. None on the rules fallback
+    #: (nothing to parse) and whenever the model supplied nothing new this
+    #: turn; the caller (engine/db/shopping_state.py::merge) treats an
+    #: absent field as "no change", not "clear it".
+    shopping_state: dict | None = None
+    #: Durable facts the model flagged this turn, almost always empty. Only
+    #: ever written to storage for a signed-in shopper - see chat.py.
+    durable_facts: list[dict] | None = None
+
+
+@dataclass
+class Synthesis:
+    """The result of the post-execution synthesis pass (see `synthesize`
+    below) - a second, small model call made only after the authoritative
+    commerce result already exists, so its text can actually reference that
+    result instead of guessing at it.
+    """
+
+    text: str | None
+    used_model: bool
+    model_name: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 class ReasoningService:
@@ -163,6 +193,8 @@ class ReasoningService:
         catalog_sample: list[Product] | None = None,
         history: list[str] | None = None,
         recorded_friction: list[str] | None = None,
+        shopping_state: dict | None = None,
+        memory_facts: list[dict] | None = None,
         skip_model: bool = False,
     ) -> Reasoning:
         """Produce proposals for one situation, or one shopper message."""
@@ -188,6 +220,8 @@ class ReasoningService:
             catalog_sample=catalog_sample,
             history=history,
             recorded_friction=recorded_friction,
+            shopping_state=shopping_state,
+            memory_facts=memory_facts,
         )
 
         try:
@@ -232,6 +266,105 @@ class ReasoningService:
             ),
             reply=str(args.get("reply", "")).strip() or None,
             used_model=True,
+            model_name=result.model,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            shopping_state=self._parse_shopping_state(args.get("shopping_state")),
+            durable_facts=self._parse_durable_facts(args.get("durable_facts")),
+        )
+
+    def _parse_shopping_state(self, raw: object) -> dict | None:
+        """Only fields the model actually supplied this turn, validated the
+        same defensive way the action parameters are - a NaN/inf budget must
+        not be able to break a later Decimal comparison, the same class of
+        bug already fixed for max_price/min_price above."""
+        if not isinstance(raw, dict) or not raw:
+            return None
+
+        out: dict[str, object] = {}
+        if goal := raw.get("goal"):
+            out["goal"] = str(goal).strip()[:300]
+        budget = raw.get("budget_amount")
+        if isinstance(budget, (int, float)) and math.isfinite(budget) and budget > 0:
+            out["budget_amount"] = budget
+        if currency := raw.get("budget_currency"):
+            out["budget_currency"] = str(currency).strip()[:8].upper()
+        for field in (
+            "constraints_add",
+            "constraints_remove",
+            "must_have_add",
+            "must_have_remove",
+            "nice_to_have_add",
+            "nice_to_have_remove",
+            "exclusions_add",
+            "exclusions_remove",
+            "priorities_add",
+        ):
+            values = raw.get(field)
+            if isinstance(values, list) and values:
+                out[field] = [str(v).strip()[:200] for v in values if str(v).strip()]
+        status = raw.get("mission_status")
+        if status in ("exploring", "comparing", "deciding", "done"):
+            out["mission_status"] = status
+        return out or None
+
+    def _parse_durable_facts(self, raw: object) -> list[dict] | None:
+        if not isinstance(raw, list) or not raw:
+            return None
+        out = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip()[:120]
+            value = str(item.get("value", "")).strip()[:400]
+            if key and value:
+                out.append({"key": key, "value": value})
+        return out or None
+
+    # -- post-execution synthesis -------------------------------------------
+
+    async def synthesize(
+        self,
+        *,
+        kind: str,
+        message: str | None,
+        items: list[dict],
+        shopping_state: dict | None = None,
+    ) -> Synthesis:
+        """Write the shopper-facing sentence *after* the authoritative result
+        already exists, so it can actually reference real fetched values
+        instead of the pre-fetch guess `reason()` above produces.
+
+        This is the fix for the reply-before-data constraint - but scoped
+        deliberately, not a second call bolted onto every action type.
+        `kind` is "comparison" (exactly two products, from COMPARE_PRODUCTS)
+        or "discovery" (a curated set, from RECOMMEND_PRODUCTS/
+        SUGGEST_ALTERNATIVE). Every other action already has a deterministic,
+        engine-written reply (see engine/api/chat.py) that needs no model
+        call at all, because it has nothing to synthesize - a cart total or
+        an order status is a fact to state, not a judgement to explain.
+
+        No tool schema is passed here on purpose: this call cannot propose
+        an action, assert risk, or do anything but return text. It is
+        strictly a narrower capability than `reason()`, not an equal one.
+        """
+        if self._client is None:
+            return Synthesis(text=None, used_model=False)
+
+        prompt = _synthesis_prompt(kind, message, items, shopping_state)
+        try:
+            result = await self._client.complete(
+                system=_SYNTHESIS_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except LLMUnavailable as exc:
+            logger.info("synthesis pass unavailable, falling back: %s", exc)
+            return Synthesis(text=None, used_model=False)
+
+        text = (result.text or "").strip() or None
+        return Synthesis(
+            text=text,
+            used_model=text is not None,
             model_name=result.model,
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,

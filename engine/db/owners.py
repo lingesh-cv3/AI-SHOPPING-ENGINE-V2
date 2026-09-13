@@ -142,14 +142,27 @@ async def may_touch(
     kind: str,
     resource_id: str,
     owner_keys: Iterable[str],
+    *,
+    read_only: bool = False,
 ) -> bool:
     """Whether this caller may reach this thing.
 
-    Unclaimed means claimed, by them, now. That is trust-on-first-use, and it is
-    the compromise that lets a database full of carts nobody recorded an owner for
+    Unclaimed means claimed, by them, now - trust-on-first-use - and it is the
+    compromise that lets a database full of carts nobody recorded an owner for
     keep working instead of locking every existing shopper out of their basket.
-    Everything created from here on is claimed at creation, where the answer is not
-    a guess.
+    Everything created from here on is claimed at creation, where the answer is
+    not a guess.
+
+    `read_only=True` turns that compromise off for one call: a caller merely
+    reading an unclaimed resource is refused rather than silently becoming its
+    owner. Session ids are generated client-side and a bare transcript GET used
+    to be able to claim one nobody had started a conversation in yet - a caller
+    who guessed or pre-generated an id could lock the real shopper out of their
+    own about-to-start session before they ever sent a message. Nothing here
+    changes the semantics for a caller who legitimately reaches a resource
+    through a route that is allowed to originate it (the chat POST that writes
+    the first turn, a cart's own creation route) - those still call this with
+    read_only left False, so a real first-touch still claims normally.
     """
     keys = [k for k in owner_keys if k]
     if not keys:
@@ -158,6 +171,8 @@ async def may_touch(
     held = await owner_of(connection_id, kind, resource_id)
 
     if held is None:
+        if read_only:
+            return False
         await claim_safely(connection_id, kind, resource_id, keys[0])
         return True
 
