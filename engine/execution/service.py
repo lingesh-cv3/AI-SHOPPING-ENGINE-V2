@@ -526,6 +526,21 @@ class ExecutionService:
                         candidates = [p for p in candidates if p.rating is not None]
                         candidates.sort(key=lambda p: p.rating, reverse=True)
                     titles = [p.title for p in candidates[:6]]
+                    # A keyword-overlap relevance guard was tried here during
+                    # Phase 2 (refuse this fallback outright when nothing in
+                    # the browse shares a literal word with the failed
+                    # query) and reverted after live-testing on Kettle
+                    # exposed a real regression: "a fruity coffee" searches
+                    # for "coffee", which matches nothing because Kettle's
+                    # products are named by varietal ("Ethiopia Guji
+                    # Natural"), never the generic category word - the exact
+                    # "search matches titles literally" pitfall this
+                    # fallback already exists to route around, documented
+                    # above. A relevance guard built on the same literal-
+                    # word assumption cannot tell that case apart from a
+                    # shop genuinely not carrying something, so it is not
+                    # done here; see PROGRESS.md for the honest state of
+                    # this gap instead of a broken fix.
 
                 if not titles:
                     return Executed(

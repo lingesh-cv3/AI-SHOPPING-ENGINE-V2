@@ -35,6 +35,8 @@ from pydantic import BaseModel, Field
 
 from engine import db
 from engine import session as session_store
+from engine.execution import events as shopper_events
+from engine.execution import mission_ranking
 from engine.notify import confirm_order
 from shared.models import CommerceError
 
@@ -594,6 +596,21 @@ async def _process_turn(
                 )
     except Exception:  # noqa: BLE001
         logger.exception("could not persist shopping state/memory; continuing")
+    else:
+        # Re-read rather than patch the in-memory dict by hand: `shopping_state`
+        # was fetched at the *start* of this turn, before reasoning ran, so it
+        # is last turn's mission - a shopper who states their goal/budget/
+        # exclusion for the first time in THIS message would otherwise have it
+        # persisted correctly but not actually used by this same turn's
+        # mission-aware ranking/synthesis below, which read the stale variable.
+        # Only worth the extra read when something was actually written.
+        if reasoning.shopping_state:
+            try:
+                shopping_state = await db.shopping_state.get(
+                    req.session_id, req.connection_id
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("could not re-read shopping state; continuing")
     # Merge what we already know into the proposals. Never overwrite: if the model
     # did supply a value, it saw context we did not pass here and should be trusted
     # over our guess.
@@ -767,11 +784,61 @@ async def _process_turn(
         action_summary = executed.summary
         escalated_to_human = executed.action_type == str(ActionType.ESCALATE_TO_HUMAN)
         found = executed.payload.get("products")
+        mission_exhausted = False
         if isinstance(found, list):
             products = found
+            # Mission-aware shortlist - deterministic, never a model call.
+            # Only for RECOMMEND_PRODUCTS: SUGGEST_ALTERNATIVE is already the
+            # "search failed, showing something else" fallback, where a
+            # scarce result set narrowing further is the wrong default.
+            # Category-choice offers (handled separately below) never reach
+            # here since `found` would be None for that branch.
+            if executed.action_type == "RECOMMEND_PRODUCTS" and products:
+                shortlisted, fit_reasons = mission_ranking.rank_and_filter(
+                    products, shopping_state
+                )
+                for p in shortlisted:
+                    reasons = fit_reasons.get(p.get("product_id"))
+                    if reasons:
+                        p["fit"] = reasons
+                # The catalog had real matches, but every one of them was
+                # ruled out by a hard constraint (an exclusion, or over
+                # budget) - a different, honest situation from "the catalog
+                # had nothing at all," and one that needs its own reply
+                # rather than falling through to the pre-fetch model guess.
+                mission_exhausted = bool(products) and not shortlisted
+                products = shortlisted
+                if products:
+                    try:
+                        await shopper_events.record_many(
+                            connection_id=req.connection_id,
+                            session_id=req.session_id,
+                            event_type=shopper_events.EventType.PRODUCT_IMPRESSION,
+                            shopper_id=shopper_id,
+                            product_ids=[
+                                p["product_id"] for p in products if p.get("product_id")
+                            ],
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("could not record product_impression; continuing")
         found_comparison = executed.payload.get("comparison")
         if isinstance(found_comparison, list):
             comparison = found_comparison
+            if comparison:
+                try:
+                    await shopper_events.record(
+                        connection_id=req.connection_id,
+                        session_id=req.session_id,
+                        event_type=shopper_events.EventType.COMPARISON_STARTED,
+                        shopper_id=shopper_id,
+                        detail={
+                            "product_ids": [
+                                c["product_id"] for c in comparison if c.get("product_id")
+                            ]
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("could not record comparison_started; continuing")
         found_categories = executed.payload.get("category_choices")
         if isinstance(found_categories, list):
             category_choices = found_categories
@@ -918,6 +985,15 @@ async def _process_turn(
                 logger.exception("could not record active_products; continuing")
         elif executed.action_type == "PREPARE_CHECKOUT" and executed.succeeded:
             payment = executed.payload
+            try:
+                await shopper_events.record(
+                    connection_id=req.connection_id,
+                    session_id=req.session_id,
+                    event_type=shopper_events.EventType.CHECKOUT_STARTED,
+                    shopper_id=shopper_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("could not record checkout_started; continuing")
             # Replaces the model's sentence rather than appending to it.
             #
             # It writes before the action runs, so it cannot know the cart was
@@ -939,6 +1015,30 @@ async def _process_turn(
                 count = executed.payload.get("item_count")
                 total = executed.payload.get("grand_total")
                 removed = executed.payload.get("removed")
+                try:
+                    if executed.action_type == "ADD_TO_CART":
+                        await shopper_events.record(
+                            connection_id=req.connection_id,
+                            session_id=req.session_id,
+                            event_type=shopper_events.EventType.ADD_TO_CART,
+                            shopper_id=shopper_id,
+                            product_id=trace.selected.action.parameters.get(
+                                "chosen_product"
+                            )
+                            or trace.selected.action.parameters.get("product_id"),
+                        )
+                    elif executed.action_type == "REMOVE_CART_LINE":
+                        await shopper_events.record(
+                            connection_id=req.connection_id,
+                            session_id=req.session_id,
+                            event_type=shopper_events.EventType.REMOVE_FROM_CART,
+                            shopper_id=shopper_id,
+                            product_id=trace.selected.action.parameters.get(
+                                "product_id"
+                            ),
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.exception("could not record cart event; continuing")
                 done = f"Done - {removed} is out of your cart" if removed else "Done"
                 done_sentence = done + (
                     f". Your cart is now {count} item(s), {total}." if count is not None else "."
@@ -970,6 +1070,29 @@ async def _process_turn(
                     reply = done_sentence + second_note
                 else:
                     reply = f"{reply}\n\n{done_sentence}"
+            elif mission_exhausted:
+                # The catalog genuinely had matches; the mission's own hard
+                # constraints (an exclusion, a budget) ruled out every one of
+                # them. Deterministic and specific, from the real
+                # shopping_state fields - not the generic "I couldn't turn
+                # anything up" the final catch-all below would otherwise
+                # produce, which would read as a broken search rather than
+                # an honestly-applied constraint.
+                bits = []
+                if shopping_state and shopping_state.get("exclusions"):
+                    bits.append(
+                        "without " + ", ".join(shopping_state["exclusions"])
+                    )
+                if shopping_state and shopping_state.get("budget_amount"):
+                    currency = shopping_state.get("budget_currency") or ""
+                    bits.append(
+                        f"under {shopping_state['budget_amount']} {currency}".strip()
+                    )
+                constraint = " and ".join(bits) if bits else "with what you've asked for"
+                reply = (
+                    f"I found options, but nothing fits {constraint}. "
+                    "Want me to loosen one of those and look again?"
+                )
             elif products:
                 # Was "pass" - trusting the model's pre-written reply as-is,
                 # on the theory that a label above the cards is just noise.
@@ -1318,6 +1441,16 @@ async def act(
             reply = (f"{what} " if what else "") + "Which would you like?"
         elif executed.succeeded:
             cart_changed = True
+            try:
+                await shopper_events.record(
+                    connection_id=req.connection_id,
+                    session_id=req.session_id,
+                    event_type=shopper_events.EventType.ADD_TO_CART,
+                    shopper_id=await who.shopper_id_for(req.connection_id),
+                    product_id=req.product_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("could not record cart event; continuing")
             count = executed.payload.get("item_count")
             total = executed.payload.get("grand_total")
             chosen = next(
@@ -1606,6 +1739,16 @@ async def pay(
             f"Paid. Your order is {order_id} and you will get a confirmation "
             "shortly. Thank you."
         )
+        try:
+            await shopper_events.record(
+                connection_id=req.connection_id,
+                session_id=req.session_id,
+                event_type=shopper_events.EventType.PURCHASE_COMPLETED,
+                shopper_id=_shopper_id,
+                detail={"order_id": order_id} if order_id else {},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("could not record purchase_completed; continuing")
         if order_id:
             await confirm_order(
                 engine.mailer,

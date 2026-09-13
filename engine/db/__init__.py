@@ -25,6 +25,7 @@ from .models import (
     SessionHoldout,
     ShoppingState,
     ShopperMemoryFact,
+    ShopperEvent,
 )
 from .repository import (
     checkout_conversion,
@@ -132,6 +133,7 @@ __all__ = [
     "decide_merchant_task",
     "ShoppingState",
     "ShopperMemoryFact",
+    "ShopperEvent",
     "shopping_state",
     "memory_facts",
 ]

@@ -1932,6 +1932,14 @@ select.card-picker {
   max-width: 220px;
 }
 
+.cpfit {
+  font-size: 11px;
+  color: var(--accent, var(--ink-3));
+  line-height: 1.4;
+  max-width: 220px;
+  font-style: italic;
+}
+
 /* One per column, so comparing never dead-ends a shopper who has already
  * decided - the whole point of the table is to reach this. */
 .cpbuy {

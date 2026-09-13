@@ -144,6 +144,11 @@ export interface StoredTurn {
     description: string | null;
     price: string | null;
     categories: string[];
+    /** Deterministic, evidence-grounded reasons this product made the
+     *  mission-aware shortlist (engine/execution/mission_ranking.py) -
+     *  never model-invented. Absent when no shopping mission has been
+     *  captured yet. */
+    fit?: string[];
   }[];
   comparison: {
     product_id: string;
@@ -252,6 +257,7 @@ export interface ChatTurn {
     description: string | null;
     price: string | null;
     categories: string[];
+    fit?: string[];
   }[];
   /** Exactly two products, fetched fresh, when the shopper asked to compare
    *  them - never more, never recalled from earlier in the conversation. */
@@ -307,6 +313,7 @@ export interface ChatReply {
     description: string | null;
     price: string | null;
     categories: string[];
+    fit?: string[];
   }[];
   comparison: {
     product_id: string;

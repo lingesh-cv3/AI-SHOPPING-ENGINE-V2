@@ -612,6 +612,13 @@ def _synthesis_prompt(
             bits.append(str(item["availability"]).replace("_", " ").lower())
         if item.get("description"):
             bits.append(str(item["description"]))
+        # Deterministic fit evidence, when the mission-aware shortlist
+        # (engine/execution/mission_ranking.py) already computed it - real
+        # matched keywords/budget facts, never an invented one. Handing this
+        # to the model lets it cite the actual reason a product was shown
+        # rather than re-deriving one from prose alone.
+        if item.get("fit"):
+            bits.append("already matched on: " + "; ".join(item["fit"]))
         lines.append("  - " + ", ".join(str(b) for b in bits if b))
     parts.append(f"{label}:\n" + "\n".join(lines))
 

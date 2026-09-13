@@ -456,6 +456,15 @@ export function ChatWidget({
                     {p.description && (
                       <span className="cpdesc">{p.description}</span>
                     )}
+                    {p.fit && p.fit.length > 0 && (
+                      // Grounded, deterministic evidence for why THIS product
+                      // made a mission-aware shortlist (engine/execution/
+                      // mission_ranking.py) - real matched facts, never a
+                      // model-invented justification. Absent whenever no
+                      // shopping mission has been captured yet, same as
+                      // the shortlist mechanism itself.
+                      <span className="cpfit">Why this: {p.fit.join(" · ")}</span>
+                    )}
                   </button>
                 ))}
               </div>

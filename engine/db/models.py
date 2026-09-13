@@ -905,6 +905,54 @@ class ShopperMemoryFact(Base):
     )
 
 
+class ShopperEvent(Base):
+    """One raw shopper-journey interaction, logged as it happens - the
+    minimal instrumentation foundation Phase 2 asks for, deliberately
+    nothing more.
+
+    Kept strictly separate from semantic shopper memory
+    (`ShopperMemoryFact`) and from the current mission (`ShoppingState`):
+    an event is a fact about what happened, not a durable preference, and
+    nothing in this codebase promotes an event into either of those tables
+    automatically. A future personalized-ranking pass can read this table;
+    this pass only writes it.
+
+    `event_type` is one of a small fixed set (see
+    `engine/execution/events.py`'s `EventType` for the authoritative list)
+    - a string column rather than an enum for the same reason `SessionTurn`
+    already gives (`speaker`): the set is small, append-only, and a new
+    value should not need a migration.
+
+    `shopper_id` is null for a guest - an event is still worth recording
+    (aggregate, cross-session product-interest signal a merchant could one
+    day read), it just cannot yet be tied to a durable identity. Written
+    best-effort from `engine/api/chat.py`, never allowed to fail a turn.
+    """
+
+    __tablename__ = "shopper_events"
+
+    event_id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    shopper_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    product_id: Mapped[str | None] = mapped_column(String(120), index=True, nullable=True)
+
+    #: Small, event-specific extra detail (e.g. a comparison's second
+    #: product id, an add-to-cart's quantity) - never a place semantic
+    #: memory or commerce state is derived from.
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_shopper_events_conn_type", "connection_id", "event_type"),
+    )
+
+
 class SessionHoldout(Base):
     """Whether one session was assigned to the no-assistance holdout group.
 

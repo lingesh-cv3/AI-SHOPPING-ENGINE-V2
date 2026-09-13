@@ -288,6 +288,35 @@ full fix):
   Whoever picks this up next should design that queue explicitly, not patch
   around the single-action-per-turn constraint.
 
+**Weak relevance judgment in `SUGGEST_ALTERNATIVE`'s whole-catalog browse
+fallback, pre-existing and unresolved** (found again, not newly introduced,
+while a fix was tried and reverted this Phase 2 session — see item 0 above).
+A search with no literal keyword hits (e.g. "kayak" on a shop that doesn't
+carry one) can fall through to an unrelated item (a water bottle) with no
+fabrication — the item is real, correctly priced — but no real relevance
+judgment behind offering it. A keyword-overlap guard was tried and reverted
+because it broke a legitimate case on Kettle ("a fruity coffee" fails a
+literal "coffee" keyword match against varietal-named products like
+"Ethiopia Guji Natural"), and could not distinguish that from a genuine
+"shop doesn't carry it" case. Needs a better relevance signal than literal
+keyword overlap, not attempted here to avoid re-introducing the same
+regression.
+
+**A pre-existing, previously-undiscovered logging bug in
+`engine/reasoning/llm.py`, found (not introduced) during Phase 2 smoke
+testing.** The "discarded unparseable tool call" warning path does
+`logger.warning(..., extra={"name": call.function.name})`, colliding with
+Python logging's own reserved `name` LogRecord attribute and raising
+`KeyError: "Attempt to overwrite 'name' in LogRecord"` — turning a soft
+warning into an unhandled 500 to the caller. Reproduced once, immediately
+after a clean engine restart, on a bare "hello"; not reproducible on
+immediate retry (three retries of the identical request all succeeded), so
+it fires only when the model provider returns a malformed/unparseable tool
+call — rare, not deterministic. `git diff engine/reasoning/llm.py` is empty,
+confirming this is not something this session's own diff caused. A one-line
+fix (rename the `extra` key, e.g. to `tool_name`) would close it; not
+attempted, out of scope for this phase.
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived
@@ -411,6 +440,167 @@ should extend the Playwright suite to them rather than reach for
    (items 1, 3 and 4 of the Shopper Roadmap) — the synthesis mechanism now
    exists and is reusable, but none of the three has been wired to it.
 
+   **A follow-on Phase 2 session, on top of this one (uncommitted on
+   `main`), added a deterministic mission-aware shortlist/ranking layer —
+   still not moved here, see below.** New `engine/execution/mission_ranking.py`
+   (`rank_and_filter`, pure function, no I/O) is now wired into
+   `engine/api/chat.py`'s `RECOMMEND_PRODUCTS` branch, narrowing the
+   previously-unranked first-N-from-catalog slice into a small (default 4)
+   shortlist. Exclusions and budget are hard filters (a matching product is
+   dropped, not just deprioritized); must-haves and priorities are soft,
+   additive scoring via a deliberately coarse 6-character-stem keyword
+   check against title/description text, with priorities recency-weighted
+   so the most recently stated one outweighs an earlier one — this is what
+   makes "actually prioritize X instead" genuinely re-rank the list rather
+   than just reword the reply around a fixed set. Reads only
+   `shopping_state` (the current-turn mission), never `ShopperMemoryFact`
+   (durable memory) — a structural guarantee, confirmed by `invariant-guard`,
+   that current explicit intent beats stored preference, not just a prompt
+   request. Each surviving product carries a `fit: list[str]` field with
+   real, grounded reasons ("within your budget (4299.00 INR)", "matches
+   'lightweight'", "fits your priority: carbon racing plate"), traced by
+   `invariant-guard` to only real product fields and `shopping_state`
+   values, never invented. A new `mission_exhausted` reply branch in
+   `chat.py` handles the case where every candidate was ruled out by a hard
+   constraint, with a specific, honest deterministic reply rather than
+   falling through to the stale pre-fetch model guess. `engine/reasoning/
+   prompts.py`'s synthesis prompt was extended to hand the model this same
+   `fit` evidence so its narrative can cite the real reason a product was
+   shown. `storefront/src/ChatWidget.tsx`/`api.ts`/`styles.css` render it
+   as a small "Why this: ..." line under each shortlisted product card.
+
+   A real staleness bug was found and fixed live during this session's own
+   testing: `shopping_state` was read at the *start* of `_process_turn`,
+   before reasoning ran, so a mission stated for the first time in the
+   current message was persisted by the merge step moments later but the
+   in-memory variable used for ranking/synthesis in that same turn was
+   still the old (often empty) value. Fixed by re-reading `shopping_state`
+   from the DB immediately after the merge, only when the model actually
+   supplied new shopping-state fields that turn. Verified live: before the
+   fix a first-ever mission statement showed no `fit` reasons on the same
+   turn's shortlist; after, it does.
+
+   Live-verified, not narrated: on Northfield, "prioritize lightweight"
+   then "actually prioritize carbon racing plate instead, for race day"
+   flipped the shortlist's #1 product from Trailblazer Running Shoe to
+   Marathon Pro Racing Shoe between turns, with the `fit` reason updating
+   to match. A signed-in test shopper with a seeded durable memory fact
+   (`prefers_lightweight=true`, simulating an established preference) who
+   then said "prioritize cushioning over weight this time, I don't care
+   about lightweight today" correctly got a shortlist led by the cushioned
+   product and a reply following the current stated intent — structurally
+   guaranteed, not just prompt-following, since `rank_and_filter` never
+   reads durable memory at all.
+
+   New minimal interaction instrumentation: a `ShopperEvent` table
+   (`engine/db/models.py`) and `engine/execution/events.py`
+   (`record`/`record_many`) log `product_impression` (per shown shortlist
+   item), `comparison_started`, `add_to_cart`, `remove_from_cart`,
+   `checkout_started`, `purchase_completed` from ~6 call sites in
+   `chat.py`, all wrapped best-effort (confirmed by `invariant-guard` not
+   able to break a turn, and the payment-completion event specifically
+   confirmed to only ever fire after a real successful charge, never
+   before or independent of one). Deliberately write-only this phase — not
+   auto-promoted into `ShopperMemoryFact`, not read by ranking or
+   synthesis — except for one new read function,
+   `events.py::shortlist_engagement(connection_id, days=30)`, which joins
+   `product_impression`/`add_to_cart` by `(session_id, product_id)` into a
+   real conversion rate for the shortlist mechanism. Confirmed by grep this
+   session: `shortlist_engagement` is not called anywhere in
+   `engine/db/repository.py` or wired into any Merchant/Operations route —
+   it exists and was run directly this session (first read
+   `{'impressions': 72, 'converted': 0, 'rate': 0.0}` off real accumulated
+   test-session traffic — real and unflattering, most of this session's own
+   test scripts only viewed shortlists without tapping through — then, to
+   prove the wiring actually works end to end, a real cart was created, a
+   real shortlist fetched, and the real top-ranked in-stock item tap-added
+   with a real variant; the same query then read
+   `{'impressions': 87, 'converted': 1, 'rate': 0.0115}`), but has not been
+   surfaced on any screen a merchant or operator can see.
+
+   A relevance guard was attempted in `engine/execution/service.py`'s
+   RECOMMEND_PRODUCTS whole-catalog browse fallback (refuse the fallback
+   if none of its results share a literal keyword with the failed search
+   term) and reverted after live-testing on Kettle caught a real
+   regression: "a fruity coffee" is a legitimate in-catalog request, but
+   searches for "coffee", which matches nothing because Kettle's products
+   are named by varietal ("Ethiopia Guji Natural") — exactly the "search
+   matches titles literally" pitfall this fallback already exists to route
+   around. The guard could not tell that case apart from a shop genuinely
+   not carrying something, so it was reverted; `git diff
+   engine/execution/service.py` is comment-only, confirmed clean by
+   `invariant-guard`. The underlying "kayak search → unrelated water
+   bottle" honesty gap (no fabrication — the water bottle is real and
+   correctly priced — but a weak relevance judgment) remains open and
+   pre-existing, tracked as a Known Issue below rather than fixed here.
+
+   Verification run this session: `invariant-guard` SAFE on the full
+   diff (mission_ranking purity, no durable-memory read, `fit` evidence
+   provenance, `ShopperEvent` write scoping/safety, payment path
+   untouched, no risk-gate bypass). `healthcheck.py`: 115 passed, 1 FAILED
+   (the same pre-existing, already-documented Kettle recovery `why()`
+   model-variance flake — re-confirmed as the identical signature, not a
+   new failure; two transient failures seen mid-session in an unrelated
+   `/api/simulate` path were independently confirmed by a clean third
+   rerun to be model non-determinism, not a regression). `fuzz.py`: 20/20
+   sequences, 1200 assertions, every invariant held. `auditroutes.py`: all
+   probes held. `npm run build`/`npm run lint`: clean, same pre-existing
+   baseline.
+
+   Full test matrix run live against both merchants: simple mission,
+   exclusion, trade-off re-ranking, memory precedence, and isolation (two
+   concurrent shoppers on the same connection with different missions,
+   confirmed via `asyncio.gather` to never cross-contaminate) all PASS.
+   Comparison synthesis itself is unchanged from the item-0 work above and
+   was not re-tested deeply this session. Zero-data/relevance (the
+   kayak/coffee case) came back mixed and honest, as described above,
+   rather than clean. Real volume (150 synthetic test-only products seeded
+   into Northfield via `_seed_bulk`/`_clear_bulk`, non-destructively torn
+   down after) held the shortlist small and correct throughout. Capability
+   limit (Northfield's `recoverPayment: supported=False`) is unchanged by
+   this phase. Platform-down was forced live, not just reasoned about: 
+   Northfield's own backend process was actually stopped mid-session, a
+   real chat turn against `conn_demo` was driven while it was down, and the
+   reply degraded to a normalized safe sentence with the raw transport
+   failure confined to the internal `action_summary` field only — Northfield
+   was then restarted and confirmed healthy with a normal follow-up call.
+
+   **`value-auditor` verdict on this specific capability: THIN, not
+   VALUABLE** — explicitly named as materially stronger evidence than the
+   comparison-synthesis THIN verdict above (this phase changes what is
+   shown and in what order, driven by verifiable deterministic logic, not
+   just narration around a fixed list), but still short at the time of the
+   audit on: (a) no merchant/ops-read figure existed yet, and (b) the
+   platform-down path had only been reasoned about from code, not forced
+   live. Both gaps have since had new evidence gathered *after* that
+   verdict — `shortlist_engagement` now exists and was run against real
+   data (point above), and the platform-down path was directly forced live
+   (also above) — but neither has been re-submitted to `value-auditor`.
+   **The THIN verdict stands as the last actual audit result.** A
+   follow-up `value-auditor` pass is needed to judge whether this new
+   evidence is sufficient before anything here moves to Completed.md — do
+   not self-certify it as resolved.
+
+   A pre-existing, previously undiscovered bug was found (not introduced)
+   while smoke-testing this session, unrelated to any file this phase
+   touched: `engine/reasoning/llm.py`'s `logger.warning(..., extra={"name":
+   call.function.name})` on the "discarded unparseable tool call" path
+   collides with Python logging's own reserved `name` LogRecord attribute,
+   raising `KeyError: "Attempt to overwrite 'name' in LogRecord"` and
+   turning what should be a soft-logged warning into an unhandled 500.
+   Reproduced exactly once, immediately after a clean engine restart, on a
+   bare "hello"; three immediate retries of the identical request all
+   succeeded normally, so it's a rare path (fires only when the model
+   provider returns a malformed/unparseable tool call), not something
+   introduced by this session's diff (`git diff engine/reasoning/llm.py` is
+   empty). A one-line fix (rename the `extra` key) would close it but was
+   deliberately not attempted here — outside this phase's own scope, and
+   fixing an unrelated file under time pressure without a dedicated
+   verification pass of its own is exactly the scope-creep this project's
+   practices warn against. Tracked as a Known Issue below.
+
+   This Phase 2 work is uncommitted on `main` at the time of writing.
+
 1. **Guest handover / session behaviour:** still open. Guests no longer pay,
    but can still chat and get escalated, and the shop now prompts for an email
    where it used to finish a sale. Whether this nudges merchant conversion is
@@ -459,9 +649,19 @@ Rules. Do not build from the checkbox label alone.
 **Blocked on item 0 above (the reply-before-data constraint) — do not start
 these first:**
 
-- [ ] Advanced Product Discovery - unstarted; would reuse the same
-      `synthesize()` mechanism item 0 above just built, but no wiring exists
-      yet for a general discovery turn.
+- [ ] Advanced Product Discovery - **not built as a feature**, but a
+      reusable deterministic building block for it now exists and is
+      live-verified: `engine/execution/mission_ranking.py::rank_and_filter`,
+      wired into `RECOMMEND_PRODUCTS` (see item 0 above, the Phase 2
+      addition) narrows an unranked catalog slice into a small,
+      evidence-backed shortlist against the shopper's stated mission,
+      with grounded `fit` reasons per product. This is the shortlisting
+      half of discovery, not the "a shopper describing what they need in
+      their own words reaches a product they would not have found by
+      keyword" outcome itself — no general free-text discovery turn has
+      been built around it yet, and the mechanism's own `value-auditor`
+      pass came back THIN (see item 0). Do not treat this checkbox as
+      started in the sense of a shipped roadmap feature.
 - [ ] Smart Product Comparison - **the specific gap this item was tracking
       ("explain meaningful differences rather than simply listing
       specifications") now has a real, live-verified implementation** - see
@@ -483,15 +683,31 @@ these first:**
       could not get from the platform's own free comparison table, and what
       does it cost if the synthesis states a comparison wrong). Do not move
       this until that pass returns VALUABLE.
-- [ ] Personalized Recommendations - unstarted; also blocked on being wired
-      to the same synthesis mechanism, and additionally needs product-
-      interaction instrumentation (impressions/views) that does not exist
-      at all yet.
-- [ ] Mission-Based Shopping - unstarted. The new `ShoppingState.goal` field
-      (item 0 above) is a building block for this, but multi-item basket
-      building in one turn is untouched - the Decision Engine's one-action-
-      per-turn constraint (see the "Multi-item add" Known Issue below) still
-      applies unchanged.
+- [ ] Personalized Recommendations - unstarted as a feature. The
+      product-interaction instrumentation it needs (impressions/views) no
+      longer "does not exist at all" — a Phase 2 session added
+      `ShopperEvent` and `engine/execution/events.py` (see item 0 above),
+      logging impressions, comparisons, cart adds/removes, checkout starts
+      and purchases. This is deliberately write-only this phase: it is
+      never read by ranking or synthesis, and durable memory
+      (`ShopperMemoryFact`) still has no automatic promotion path from it.
+      A returning shopper being shown something that visibly reflects what
+      they bought/kept/returned is still unbuilt.
+- [ ] Mission-Based Shopping - unstarted as a feature, but its core
+      deterministic mechanism moved substantially this Phase 2 session.
+      `ShoppingState` (goal/budget/must-have/exclusions/priorities, item 0
+      above) now drives real, live-verified re-ranking of shortlisted
+      products via `mission_ranking.rank_and_filter` (hard-filters
+      exclusions/budget, soft-scores must-haves/priorities, recency-weights
+      trade-offs), demonstrated live flipping the top-ranked product between
+      turns as stated priorities changed. What is still missing for the
+      actual roadmap outcome ("a complete, compatible set of items... rather
+      than treating every message as an isolated product query"): multi-item
+      basket building in one turn is untouched - the Decision Engine's
+      one-action-per-turn constraint (see the "Multi-item add" Known Issue
+      below) still applies unchanged, and there is no cross-category bundle
+      logic (e.g. shoes + socks + hydration for a marathon goal) - the
+      mechanism only ranks/filters within one already-fetched product list.
 
 **Not blocked:**
 
