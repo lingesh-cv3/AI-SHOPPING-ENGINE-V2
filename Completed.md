@@ -3349,3 +3349,91 @@ below; `npm run build` now exits 0.)
     merchant-measurement half (this entry) - are now VALUABLE. See
     PROGRESS.md: the Cart Proposals section under Shopper - Initial
     Priorities is removed now that nothing about it remains open.
+
+52. **Fixed a real discovery-routing bug found by hand: a plain product
+    request could fall through to the bare category-choice offer instead of
+    real discovery, and a keyword-filtered search that came back empty
+    silently broadened to an unfiltered browse while the reply still implied
+    a match.** Reported by the user testing the shopper chat UI directly
+    ("I need running shoes." landing on the Accessories/Apparel/Footwear/...
+    category offer). Direct API probing and a live Playwright browser test
+    could not reproduce that exact phrasing deterministically against the
+    committed code - it worked correctly in isolated fresh-session trials -
+    but driving the same journey further (comparison, re-ranking,
+    waterproof/trail-running follow-ups) surfaced two real, reproducible
+    defects underneath the report, both in `engine/execution/service.py`'s
+    `RECOMMEND_PRODUCTS` path:
+
+    1. Genuine intermittent model variance: the model occasionally (not
+       always - confirmed across repeated live trials) leaves
+       `RECOMMEND_PRODUCTS`'s `search_query`/`category` blank even when the
+       shopper's message plainly names a product ("running shoes for trail
+       running"), falling into the bare-browse category-offer branch.
+    2. Always-reproducible: when a keyword+price-filtered search came back
+       empty, the code silently broadened to an unfiltered browse (dropping
+       keyword relevance entirely) while the reply text still said "Here's
+       what's available" as if the results matched - e.g. "waterproof
+       running shoes under 3000" returned a Recovery Slide and a Canvas
+       Sneaker with no indication they don't actually match. The same
+       "generic reply written before data exists" anti-pattern CLAUDE.md
+       already names for `RECOMMEND_PRODUCTS`/`COMPARE_PRODUCTS`, reached
+       here through the empty-search fallback rather than the pre-fetch
+       model reply.
+
+    Fix, no new `ActionType` and no new route: `service.py`'s bare-browse
+    branch now runs a deterministic rescue search against the shopper's raw
+    message (`said`) before offering `category_choices`, gated by a
+    real-word-length guard (>2 chars) so a bare "hi" still correctly gets
+    the category offer rather than being searched literally - only falls
+    through to categories if the rescue search also finds nothing. This
+    reuses the adapter's own real, catalog-grounded search, never a
+    hardcoded phrase, so it fixes defect 1 without special-casing any
+    wording. Separately, the existing empty-query-fallback-to-unfiltered-
+    browse path (already documented in that file's own comments, kept
+    deliberately after a prior Kettle-regression revert) now sets a
+    `relevance_relaxed` flag; `engine/api/chat.py` reads it and, only when
+    the original query was non-empty, overrides the reply with a
+    deterministic, non-model disclaimer (`'Nothing matched "X" exactly, so
+    here's what's available instead:'`) instead of the generic "Here's
+    what's available" text, fixing defect 2.
+
+    Verified end to end against the running services: `invariant-guard`
+    SAFE (confined to the read-only `RECOMMEND_PRODUCTS` search branch,
+    correctly tenant-scoped adapter, no new `ActionType`/risk/payment/cart-
+    mutation path touched). `healthcheck.py`: 115 passed, 3 failed both
+    before and after the change (confirmed via `git stash` - the same
+    pre-existing model-variance flakes, unrelated to this change, that
+    alternate between runs); two new checks added and passing - "a plain
+    product request reaches discovery, not the category offer" and "a bare
+    greeting still offers real categories, not arbitrary products".
+    `fuzz.py`: 20/20 sequences, every invariant held. `auditroutes.py`:
+    clean, no regressions. Live-verified on both merchants: Northfield
+    (REST, `conn_demo`) and Kettle (GraphQL, `conn_kettle`) - the rescue
+    search and the honest disclaimer both work correctly on Kettle's
+    differently-named catalog too (varietal names, not generic words), and
+    this does not regress the specific "a fruity coffee" case that caused
+    the earlier relevance-guard attempt to be reverted (documented in
+    `service.py`'s own comments) - "I need a fruity coffee" on Kettle still
+    returns real matching products. Browser-verified via a new tracked
+    Playwright test, `storefront/tests/discovery-routing.spec.ts` (2 tests:
+    "a plain product request reaches real discovery, not the category
+    offer" and "a bare greeting still offers the shop's real categories"),
+    both passing headed against the real running engine + Northfield + Vite.
+    `npm run build` (the real typecheck guard) clean, 0 new errors.
+
+    This is a bug fix restoring the intended behaviour of already-completed,
+    already-value-audited capabilities (Advanced Product Discovery's
+    shortlisting mechanism and the RECOMMEND_PRODUCTS reply path) - not a
+    new roadmap feature, so no fresh `value-auditor` pass was run against it
+    (judged unnecessary rather than silently skipped).
+
+    **Explicitly not done this pass, left open:** the underlying model-
+    variance root cause (defect 1's cause) is mitigated by the deterministic
+    rescue search but not eliminated - a sufficiently unusual phrasing could
+    still occasionally slip past both the model and the rescue search's
+    word-length heuristic; a much larger "functional completion and
+    integration pass" this fix was extracted from (Mission Shopping
+    structured state, a dedicated trade-off UI, full Return-Risk Prevention
+    frontend integration in `ChatWidget.tsx`, a Merchant-side functional
+    verification pass) remains entirely unstarted beyond this one discovery-
+    routing defect - see PROGRESS.md.

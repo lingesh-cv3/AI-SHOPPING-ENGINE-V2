@@ -467,6 +467,58 @@ class ExecutionService:
                     and not price_bounded
                     and not top_rated
                 ):
+                    # A deterministic backstop against model intent-extraction
+                    # variance, not a second copy of the model's job. `said`
+                    # only reaches here still non-empty and not one of the
+                    # genuinely generic browse phrases above - so if the
+                    # model left search_query blank anyway, that is the
+                    # model's parameter-filling failing on a message that
+                    # plainly names something ("running shoes for trail
+                    # running"), not a shopper who actually wants the
+                    # category list. Running the shopper's own words through
+                    # the same real, catalog-grounded word-match search
+                    # RECOMMEND_PRODUCTS already uses for an explicit query -
+                    # never a hardcoded phrase - lets a real product match
+                    # win before falling back to categories. Only offers
+                    # categories when even this finds nothing, the same
+                    # honest last resort as before.
+                    # A greeting ("hi") or other short filler also reaches
+                    # here with `said` non-empty but carrying nothing a
+                    # search could ever match on - the same "at least one
+                    # real word" floor the search itself applies, checked
+                    # here first so "hi" is not searched as if it were a
+                    # product term and does not silently return an
+                    # unrelated slice of the catalog.
+                    has_real_word = any(len(w) > 2 for w in said.split())
+                    if said and has_real_word:
+                        rescued = await adapter.search_products(said, limit=6)
+                        if rescued.products:
+                            titles = [p.title for p in rescued.products[:6]]
+                            return Executed(
+                                succeeded=True,
+                                action_type=str(action_type),
+                                summary=(
+                                    f'Searched "{said}" and found {len(titles)}: '
+                                    + ", ".join(titles[:3])
+                                    + ("…" if len(titles) > 3 else "")
+                                ),
+                                payload={
+                                    "query": said,
+                                    "products": [
+                                        {
+                                            "product_id": p.product_id,
+                                            "title": p.title,
+                                            "description": p.description,
+                                            "price": str(p.price) if p.price else None,
+                                            "availability": str(p.availability),
+                                            "rating": p.rating,
+                                            "rating_count": p.rating_count,
+                                        }
+                                        for p in rescued.products[:6]
+                                    ],
+                                },
+                            )
+
                     browse = await adapter.search_products("", limit=100)
                     categories = sorted(
                         {c for p in browse.products for c in p.categories}
@@ -528,7 +580,15 @@ class ExecutionService:
                 # browse the wider catalog here would tell a shopper nothing
                 # exists under 2000 when a cheaper product does, just not one
                 # whose title happens to contain their exact word.
+                # Whether this result set is actually a keyword match, or a
+                # relevance-relaxed browse standing in for one - set below,
+                # before `query` can be blanked out for the browse retry, so
+                # the caller can tell "these match what was asked" from
+                # "nothing matched, these are what's available instead"
+                # rather than getting a confident-looking list either way.
+                relevance_relaxed = False
                 if not titles and action_type is ActionType.RECOMMEND_PRODUCTS:
+                    relevance_relaxed = bool(query)
                     found = await adapter.search_products("", limit=30 if narrowed else 6)
                     candidates = [
                         p for p in found.products if _within_price(p) and _within_category(p)
@@ -581,6 +641,7 @@ class ExecutionService:
                     ),
                     payload={
                         "query": query,
+                        "relevance_relaxed": relevance_relaxed,
                         "products": [
                             {
                                 "product_id": p.product_id,

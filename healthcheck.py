@@ -487,6 +487,47 @@ if model_on:
             str(ids),
             "engine/execution/service.py COMPARE_PRODUCTS",
         )
+    # A shopper naming a real product in plain language ("I need running
+    # shoes") must reach actual discovery, not the category-choice offer -
+    # that offer exists only for a genuinely bare "what do you have", and a
+    # live manual test found it firing for a message that plainly names a
+    # product. The model usually fills search_query itself; when it does
+    # not, engine/execution/service.py's own rescue search (run against the
+    # shopper's raw message) must still find real products before falling
+    # back to categories.
+    discovered = call(
+        "POST",
+        "/api/chat",
+        {
+            "connection_id": NORTHFIELD,
+            "session_id": f"hc_discover_{uuid.uuid4().hex[:6]}",
+            "message": "I need running shoes.",
+        },
+    )
+    check(
+        "a plain product request reaches discovery, not the category offer",
+        bool(discovered.get("products")) and not discovered.get("category_choices"),
+        f"products={len(discovered.get('products') or [])} "
+        f"category_choices={discovered.get('category_choices')}",
+        "engine/execution/service.py RECOMMEND_PRODUCTS rescue search",
+    )
+    # A genuinely bare greeting/browse must still offer categories - the
+    # rescue search above must not swallow this case.
+    bare_browse = call(
+        "POST",
+        "/api/chat",
+        {
+            "connection_id": NORTHFIELD,
+            "session_id": f"hc_browse_{uuid.uuid4().hex[:6]}",
+            "message": "hi",
+        },
+    )
+    check(
+        "a bare greeting still offers real categories, not arbitrary products",
+        bool(bare_browse.get("category_choices")),
+        f"category_choices={bare_browse.get('category_choices')}",
+        "engine/execution/service.py RECOMMEND_PRODUCTS category offer",
+    )
 else:
     print("  SKIP  model checks (no key configured)")
 

@@ -935,6 +935,19 @@ async def _process_turn(
         escalated_to_human = executed.action_type == str(ActionType.ESCALATE_TO_HUMAN)
         found = executed.payload.get("products")
         mission_exhausted = False
+        # True only when RECOMMEND_PRODUCTS's keyword+price search came back
+        # empty and the engine fell back to an unfiltered browse instead of
+        # telling the shopper nothing matched - see engine/execution/service.py.
+        # The fallback exists so a real cheaper item is not hidden just
+        # because its title lacks the shopper's exact word (see that file's
+        # own long comment on the Kettle regression this already caused
+        # once), but a shopper asking for "waterproof running shoes" must
+        # not be told "here's what's available" about a running cap or a
+        # canvas sneaker as if it matched - that is the same generic,
+        # pre-fetch reply CLAUDE.md's reply-before-data section names as the
+        # anti-pattern, just reached through a different action.
+        relevance_relaxed = bool(executed.payload.get("relevance_relaxed"))
+        relaxed_query = str(executed.payload.get("query") or "")
         if isinstance(found, list):
             products = found
             # Mission-aware shortlist - deterministic, never a model call.
@@ -1385,6 +1398,18 @@ async def _process_turn(
                 reply = (
                     f"I found options, but nothing fits {constraint}. "
                     "Want me to loosen one of those and look again?"
+                )
+            elif relevance_relaxed and products:
+                # Deterministic, not model-written - the model's reply is
+                # written before this search runs (see above) and has no way
+                # to know the keyword match came back empty, so it cannot be
+                # trusted to say so on its own. No synthesis pass over these
+                # products either: they were not chosen for relevance to
+                # what was asked, so there is nothing true a synthesis could
+                # say about why they fit.
+                reply = (
+                    f'Nothing matched "{relaxed_query}" exactly, so here\'s '
+                    "what's available instead:"
                 )
             elif products:
                 # Was "pass" - trusting the model's pre-written reply as-is,

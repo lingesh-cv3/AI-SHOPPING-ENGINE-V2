@@ -311,6 +311,31 @@ shape and confirming it no longer raises. Not moved to Completed.md on its
 own — it is one fix inside the still-THIN hardening pass, and this project's
 practice is not to split one session's work across both files.
 
+**Discovery-routing bug fixed and verified this session (see `Completed.md`
+#52) - one residual limitation left open, stated honestly rather than
+claimed closed.** The rescue search added to `engine/execution/service.py`'s
+`RECOMMEND_PRODUCTS` bare-browse branch mitigates, but does not eliminate,
+the underlying model-variance root cause (the model occasionally leaves
+`search_query`/`category` blank even when the shopper's message plainly
+names a product): a sufficiently unusual phrasing could still slip past
+both the model and the rescue search's own real-word-length heuristic
+(`>2 chars`). Not attempted further this session, since a general fix
+belongs in the model-side extraction reliability work already tracked
+above, not in this narrow rescue path.
+
+**The larger request this discovery-routing fix was extracted from remains
+almost entirely open** - only the one defect above was fixed and verified
+this pass:
+- Mission Shopping structured state and a dedicated trade-off UI - untouched
+  this session.
+- Return-Risk Prevention's frontend integration - `return_risk` is computed
+  and sent by the API (`engine/api/chat.py`, per the `[~]` entry above) but
+  `storefront/src/ChatWidget.tsx` still never renders it anywhere. Confirmed
+  still true by reading `ChatWidget.tsx` this session; not touched, not
+  re-verified beyond that read.
+- A Merchant-side functional verification pass - not attempted this
+  session.
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived
