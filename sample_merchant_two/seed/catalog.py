@@ -76,6 +76,18 @@ def _rating_for(product_id: str) -> tuple[float, int]:
     return rating, count
 
 
+#: Real, deliberately-curated complementary-product relationships - same
+#: reasoning as Northfield's own `_COMPATIBLE_WITH` (see
+#: sample_merchant/seed/catalog.py): never inferred from category text,
+#: only ever a merchant's own declared pairing. A product absent from this
+#: table has no declared relationship at all, not an assumed empty one.
+_COMPATIBLE_WITH: dict[str, list[str]] = {
+    "KB-EQP-10": ["KB-BLD-07"],  # Burr Hand Grinder -> House Filter Blend
+    "KB-EQP-09": ["KB-EQP-12"],  # Pour Over Dripper -> Digital Brew Scale
+    "KB-EQP-11": ["KB-EQP-09"],  # Gooseneck Kettle -> Pour Over Dripper
+}
+
+
 def _build(row):
     pid, name, collection, price, in_stock, options, story = row
     rating, rating_count = _rating_for(pid)
@@ -89,6 +101,7 @@ def _build(row):
         "inStock": in_stock,
         "rating": rating,
         "ratingCount": rating_count,
+        "compatibleWith": list(_COMPATIBLE_WITH.get(pid, [])),
         "options": [
             {"id": f"{pid}::{label}", "label": label, "inStock": ok}
             for label, ok in options

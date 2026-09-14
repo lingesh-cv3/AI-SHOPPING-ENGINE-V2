@@ -152,33 +152,90 @@ def _uncertain(text: str, exclusion_phrase: str) -> bool:
     return any(term in text for term in related)
 
 
+#: Durable-memory keys treated as a stable preference fallback for ranking -
+#: deliberately narrow (the `prefers_` prefix convention, set by
+#: `engine/reasoning/service.py`'s durable-fact extraction), not a general
+#: reading of arbitrary memory content into ranking. See `rank_and_filter`'s
+#: own docstring for the precedence rule this exists to implement.
+_PREFERENCE_KEY_PREFIX = "prefers_"
+
+
+def _durable_preference_terms(memory_facts: list[dict] | None) -> list[str]:
+    """Real, structured shopper preferences - not general memory content -
+    expressed as ranking-usable terms. Only `prefers_X` keys qualify (e.g.
+    `prefers_lightweight` -> "lightweight"); an owned-product fact, an
+    order-history fact, or anything else recorded under a different key
+    convention is not a ranking preference and is left alone."""
+    if not memory_facts:
+        return []
+    terms = []
+    for fact in memory_facts:
+        key = str(fact.get("key", ""))
+        if key.startswith(_PREFERENCE_KEY_PREFIX):
+            term = key[len(_PREFERENCE_KEY_PREFIX):].replace("_", " ").strip()
+            if term:
+                terms.append(term)
+    return terms
+
+
 def rank_and_filter(
     products: list[dict],
     shopping_state: dict | None,
     *,
+    memory_facts: list[dict] | None = None,
     limit: int = DEFAULT_LIMIT,
 ) -> tuple[list[dict], dict[str, list[str]]]:
-    """Narrow and order `products` against the shopper's current mission.
+    """Narrow and order `products` against the shopper's current mission -
+    and, deliberately and only as a fallback, their durable preferences.
 
     Returns (shortlist, fit_reasons). `fit_reasons` maps product_id to a
     short list of plain-English reasons, each grounded in a real field
     (price, description text, rating) - never an invented one.
 
-    With no shopping_state at all, returns the first `limit` products
-    unchanged and no reasons: there is no mission to reason against yet, and
-    inventing evidence for one would be exactly the defect this mechanism
-    exists to prevent.
+    With no shopping_state and no usable `memory_facts` at all, returns the
+    first `limit` products unchanged and no reasons: there is no mission to
+    reason against yet, and inventing evidence for one would be exactly the
+    defect this mechanism exists to prevent.
+
+    **Deliberate personalization, not accidental prompt behaviour.** Prior
+    to this, `memory_facts` was never passed to this function at all - a
+    durable preference could only reach ranking by accident, if the model
+    happened to fold it into the *current* `shopping_state.must_have` on
+    its own initiative (a real, observed, but unreliable and unintentional
+    side effect - see PROGRESS.md). This makes it a real, tested, code-level
+    feature instead, with an explicit precedence rule: a durable preference
+    (`prefers_X` facts, `_durable_preference_terms`) is only ever used to
+    fill in for a dimension the CURRENT session has said nothing about -
+    if `shopping_state` already has its own `priorities`/`must_have` for
+    this turn, memory contributes nothing at all, whatever it contains.
+    When it does apply, it scores lower than any current-turn signal (a
+    flat, non-recency-weighted bonus, always less than a fresh must-have or
+    priority) and is labelled in `fit_reasons` as coming from what the
+    shopper has told this shop before, not from this message - so "current
+    explicit intent beats stale memory" holds structurally, the same as the
+    Phase 1 guarantee this extends rather than replaces.
 
     Can legitimately return an empty shortlist from a non-empty input - a
     genuinely full exclusion/budget match. The caller is expected to say so
     honestly rather than treat it as "nothing in the catalog" (see
     engine/api/chat.py's RECOMMEND_PRODUCTS branch).
     """
-    if not shopping_state or not products:
+    shopping_state = shopping_state or {}
+    priorities = [p for p in (shopping_state.get("priorities") or []) if p]
+    must_haves = [m for m in (shopping_state.get("must_have") or []) if m]
+
+    # The precedence rule, applied once, here: only when THIS turn's own
+    # state has nothing for priorities/must-haves at all does a durable
+    # preference get a say - never blended with or allowed to outweigh a
+    # current explicit one.
+    preference_terms = (
+        _durable_preference_terms(memory_facts) if not priorities and not must_haves else []
+    )
+
+    if (not shopping_state and not preference_terms) or not products:
         return products[:limit], {}
 
     exclusions = [e for e in (shopping_state.get("exclusions") or []) if e]
-    must_haves = [m for m in (shopping_state.get("must_have") or []) if m]
     # `constraints` used to be captured by the model and never read here -
     # silently inert, a real bug the hardening pass fixed. A stated
     # constraint is a real shopper requirement whether or not the model
@@ -188,12 +245,14 @@ def rank_and_filter(
     # statements depending on what the model chose to put there - see
     # engine/reasoning/prompts.py's schema comment for the fuller account.
     constraints = [c for c in (shopping_state.get("constraints") or []) if c]
+    # `priorities`/`must_haves` were already extracted above, before the
+    # personalization-precedence check - not re-extracted here.
+    #
     # Recency-weighted: the most recently stated priority (last in the list)
     # outweighs an earlier one. This is what makes "actually cushioning
     # matters more than weight" change the ranking itself, not just the
     # prose describing it - not NLP contradiction detection, just "the
     # newest explicit priority carries more weight," expressed numerically.
-    priorities = [p for p in (shopping_state.get("priorities") or []) if p]
     budget_amount: Decimal | None = None
     raw_budget = shopping_state.get("budget_amount")
     if raw_budget:
@@ -256,6 +315,18 @@ def rank_and_filter(
                 score += 1.0 + i * 0.5
                 why.append(f"fits your priority: {pr}")
 
+        # Deliberate personalization - only ever populated when THIS turn
+        # stated no priority/must-have of its own (see the precedence check
+        # above `preference_terms` is derived from). Weighted below every
+        # current-turn signal (0.4 < the 1.0 floor everything else uses) so
+        # it can nudge a tiebreak but never outrank an explicit current
+        # statement - which cannot coexist with a non-empty
+        # `preference_terms` anyway, by construction.
+        for pref in preference_terms:
+            if _matches(text, pref):
+                score += 0.4
+                why.append(f"you've told us before you prefer {pref}")
+
         rating = product.get("rating")
         if isinstance(rating, (int, float)):
             score += rating / 10.0  # a tiebreaker, never the deciding factor
@@ -296,3 +367,40 @@ def has_stated_priority(shopping_state: dict | None) -> bool:
         or shopping_state.get("must_have")
         or shopping_state.get("constraints")
     )
+
+
+def stated_terms(shopping_state: dict | None) -> list[str]:
+    """The actual priority/must-have/constraint phrases captured this
+    session - not just whether any exist (`has_stated_priority`), but what
+    they specifically are. Post-hardening-pass finding, found by further
+    adversarial testing of `_honest_synthesis`: checking only "is
+    `shopping_state` non-empty" let a synthesized reply through that
+    attributed the recommendation to a priority the shopper never actually
+    stated (state had `priorities=["lightweight"]`; the text confidently
+    claimed "since you prioritized durability...") - any grounded state at
+    all was enough to wave the whole reply through, whatever it specifically
+    claimed. `engine/api/chat.py::_honest_synthesis` uses this list to also
+    verify the claim is *about* something actually stored, not merely that
+    something, anything, was stored.
+    """
+    if not shopping_state:
+        return []
+    return [
+        *(shopping_state.get("priorities") or []),
+        *(shopping_state.get("must_have") or []),
+        *(shopping_state.get("constraints") or []),
+    ]
+
+
+def any_term_mentioned(text: str, terms: list[str]) -> bool:
+    """Whether `text` actually mentions at least one of `terms` - the same
+    coarse, honest stem/hyphen-aware keyword check `_matches` already uses
+    for ranking, reused here for a different purpose: verifying a
+    synthesized claim is *about* a real, stored term rather than an
+    unrelated one. Not a semantic entailment check (this file makes no
+    claim to that) - only a floor: a reply naming zero of the shopper's own
+    stated terms anywhere is not a reply about what the shopper said."""
+    if not terms:
+        return False
+    lowered = text.lower()
+    return any(_matches(lowered, term) for term in terms)

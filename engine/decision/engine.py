@@ -97,6 +97,8 @@ def operation_for(action_type: ActionType) -> Operation | None:
         ActionType.RECOMMEND_PRODUCTS: Operation.SEARCH_PRODUCTS,
         ActionType.CHECK_AVAILABILITY: Operation.CHECK_INVENTORY,
         ActionType.COMPARE_PRODUCTS: Operation.GET_PRODUCT,
+        ActionType.CHECK_COMPATIBILITY: Operation.GET_PRODUCT,
+        ActionType.SUGGEST_COMPLEMENTARY: Operation.GET_PRODUCT,
         ActionType.SUGGEST_ALTERNATIVE: Operation.SEARCH_PRODUCTS,
         ActionType.ADD_TO_CART: Operation.ADD_TO_CART,
         ActionType.UPDATE_CART_QUANTITY: Operation.UPDATE_CART,

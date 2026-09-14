@@ -139,6 +139,7 @@ def to_product(raw: dict[str, Any], *, storefront_url: str | None = None) -> Pro
         ],
         rating=raw.get("rating"),
         rating_count=raw.get("ratingCount"),
+        compatible_with=list(raw.get("compatibleWith") or []),
     )
 
 

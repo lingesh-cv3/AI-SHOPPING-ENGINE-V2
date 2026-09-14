@@ -180,6 +180,7 @@ def to_product(
         ],
         rating=raw.get("rating"),
         rating_count=raw.get("rating_count"),
+        compatible_with=list(raw.get("compatible_with") or []),
     )
 
 

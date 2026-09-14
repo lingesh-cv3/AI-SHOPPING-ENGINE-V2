@@ -131,6 +131,10 @@ ASSISTANCE_PREFERENCE: tuple[ActionType, ...] = (
     # reason as the rest of this chain: a shopper who asked to compare two
     # things wants the comparison, not a restated description of one of them.
     ActionType.COMPARE_PRODUCTS,
+    # Same reasoning again: a shopper asking "does X work with Y" or "what
+    # else do I need" wants the grounded answer, not a restated description.
+    ActionType.CHECK_COMPATIBILITY,
+    ActionType.SUGGEST_COMPLEMENTARY,
     ActionType.ANSWER_PRODUCT_QUESTION,
 )
 

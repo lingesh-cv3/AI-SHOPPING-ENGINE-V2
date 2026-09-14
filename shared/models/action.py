@@ -48,6 +48,20 @@ class ActionType(StrEnum):
     #: ANSWER_PRODUCT_QUESTION and CHECK_AVAILABILITY.
     COMPARE_PRODUCTS = "COMPARE_PRODUCTS"
 
+    #: Whether one product actually works with another. Answered only from a
+    #: merchant's own declared `compatible_with` data (see
+    #: shared.models.commerce.Product.compatible_with) - "compatible" and "not
+    #: compatible" both require positive evidence; anything else is
+    #: "unknown," never guessed from category or description text. Read-only,
+    #: same shape as CHECK_AVAILABILITY.
+    CHECK_COMPATIBILITY = "CHECK_COMPATIBILITY"
+
+    #: What else the shopper would need alongside a product they already have
+    #: in view - grounded in the same merchant-declared `compatible_with`
+    #: relationships as CHECK_COMPATIBILITY, never an arbitrary upsell.
+    #: Read-only.
+    SUGGEST_COMPLEMENTARY = "SUGGEST_COMPLEMENTARY"
+
     # Recovery — non-financial
     SUGGEST_ALTERNATIVE = "SUGGEST_ALTERNATIVE"
     ADD_TO_CART = "ADD_TO_CART"
@@ -128,6 +142,8 @@ ACTION_RISK_PROPERTIES: dict[ActionType, RiskProperties] = {
     ActionType.ANSWER_PRODUCT_QUESTION: RiskProperties(financial=False, reversible=True),
     ActionType.CHECK_AVAILABILITY: RiskProperties(financial=False, reversible=True),
     ActionType.COMPARE_PRODUCTS: RiskProperties(financial=False, reversible=True),
+    ActionType.CHECK_COMPATIBILITY: RiskProperties(financial=False, reversible=True),
+    ActionType.SUGGEST_COMPLEMENTARY: RiskProperties(financial=False, reversible=True),
     ActionType.SUGGEST_ALTERNATIVE: RiskProperties(financial=False, reversible=True),
     ActionType.ADD_TO_CART: RiskProperties(financial=False, reversible=True),
     ActionType.UPDATE_CART_QUANTITY: RiskProperties(financial=False, reversible=True),

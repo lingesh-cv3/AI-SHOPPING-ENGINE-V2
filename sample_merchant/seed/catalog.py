@@ -144,6 +144,19 @@ def _rating_for(product_id: str) -> tuple[float, int]:
     return rating, count
 
 
+#: Real, deliberately-curated complementary-product relationships - not
+#: inferred from category/description text, which is exactly the kind of
+#: guess the compatibility/complete-the-set features this exists for must
+#: never make. A product not listed here has no declared relationship at
+#: all (empty list on the built dict, never guessed), the same "absence is
+#: not a claim" rule `rating` already follows for products nobody has rated.
+_COMPATIBLE_WITH: dict[str, list[str]] = {
+    "P1001": ["P3002", "P1006"],  # Trailblazer Running Shoe -> socks, recovery slide
+    "P1002": ["P3007", "P3006"],  # Marathon Pro Racing Shoe -> calf sleeves, race belt
+    "P5001": ["P5002"],  # GPS Watch Series 4 -> heart rate chest strap
+}
+
+
 def _build(row):
     pid, title, dept, price, was, state, qty, sizes, blurb = row
     rating, rating_count = _rating_for(pid)
@@ -158,6 +171,7 @@ def _build(row):
         "qty_available": qty,
         "rating": rating,
         "rating_count": rating_count,
+        "compatible_with": list(_COMPATIBLE_WITH.get(pid, [])),
         "variants": [
             {"variant_ref": f"{pid}-{label}", "opt_size": label, "qty_available": n}
             for label, n in (sizes or [])

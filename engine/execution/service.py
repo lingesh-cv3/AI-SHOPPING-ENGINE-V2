@@ -33,6 +33,7 @@ from typing import Any
 from engine import db
 from engine import session as session_store
 from engine.decision import CapabilityRegistry
+from engine.execution import product_relations
 from shared.models import (
     ActionType,
     CapabilityUnsupported,
@@ -650,6 +651,77 @@ class ExecutionService:
                                 "availability": str(p.availability),
                             }
                             for p in (first, second)
+                        ],
+                    },
+                )
+            case ActionType.CHECK_COMPATIBILITY:
+                first_id = params.get("product_id")
+                second_id = params.get("compare_with_id")
+                if not (first_id and second_id):
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=(
+                            "Two products are needed to check compatibility, "
+                            "and only one was named."
+                        ),
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+                # Fetched fresh, same reasoning as COMPARE_PRODUCTS: a
+                # compatibility verdict built from a stale product record is
+                # worse than not answering.
+                first, second = await asyncio.gather(
+                    adapter.get_product(first_id), adapter.get_product(second_id)
+                )
+                result = product_relations.check_compatibility(first, second)
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=result.reason,
+                    payload={
+                        "verdict": result.verdict,
+                        "first": {"product_id": first.product_id, "title": first.title},
+                        "second": {"product_id": second.product_id, "title": second.title},
+                    },
+                )
+            case ActionType.SUGGEST_COMPLEMENTARY:
+                anchor_id = params.get("product_id")
+                if not anchor_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="A product is needed to suggest what goes with it.",
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+                anchor = await adapter.get_product(anchor_id)
+                related_ids = product_relations.complementary_product_ids(anchor)
+                related = (
+                    await asyncio.gather(
+                        *(adapter.get_product(pid) for pid in related_ids)
+                    )
+                    if related_ids
+                    else []
+                )
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f"{len(related)} declared complement(s) for {anchor.title}."
+                        if related
+                        else f"No declared complementary products for {anchor.title}."
+                    ),
+                    payload={
+                        "anchor": {"product_id": anchor.product_id, "title": anchor.title},
+                        "complements": [
+                            {
+                                "product_id": p.product_id,
+                                "title": p.title,
+                                "price": str(p.price) if p.price else None,
+                                "availability": str(p.availability),
+                            }
+                            for p in related
                         ],
                     },
                 )

@@ -99,6 +99,16 @@ class Product(_Base):
     #: silent 0 or 5, either of which would be invented.
     rating: float | None = None
     rating_count: int | None = None
+    #: Product ids the merchant has actually declared as complementary/
+    #: compatible with this one (e.g. a shoe's matching insole, a grinder's
+    #: matching filter). Empty list, never None, when a platform has no such
+    #: data for this product - the same "absence is not a claim" rule
+    #: `rating` already follows: empty means "we don't know," never "nothing
+    #: is compatible." This is what lets compatibility-check and
+    #: complete-the-set answer from real declared relationships instead of
+    #: guessing at one from category/description text - see
+    #: engine/execution/product_relations.py.
+    compatible_with: list[str] = Field(default_factory=list)
 
 
 class InventoryStatus(_Base):

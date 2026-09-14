@@ -178,6 +178,22 @@ def _honest_synthesis(text: str | None, shopping_state: dict | None, fallback: s
     ungrounded turns for a guarantee that actually holds: no synthesized
     reply reaches a shopper as a personalization claim unless
     `shopping_state` genuinely has something to justify it.
+
+    A SECOND gap, found by further adversarial testing of this same
+    function (not by `value-auditor`, but by the same standard it set):
+    "some grounded state exists" is not the same as "the claim is about
+    what's actually stored." With `shopping_state.priorities=["lightweight"]`,
+    the text "Since you prioritized durability above all else, the Marathon
+    Pro is the clear winner" passed the first check untouched - a stated
+    priority existed, so the whole reply was trusted, even though the
+    specific thing it claimed was prioritized was never said by the
+    shopper at all. Closed the same way as the first gap: not by trying to
+    parse what the claim specifically asserts (as fragile as the regex
+    blocklist this function already replaced once), but by requiring the
+    reply to actually MENTION at least one of the real stored terms
+    (`mission_ranking.stated_terms`/`any_term_mentioned`) - a floor, not a
+    semantic proof, but one that closes this specific, now-demonstrated
+    bypass shape without reintroducing a phrase blocklist.
     """
     if not text:
         return fallback
@@ -186,6 +202,14 @@ def _honest_synthesis(text: str | None, shopping_state: dict | None, fallback: s
             "no captured mission state this turn; using the plain "
             "deterministic reply rather than trusting synthesized text "
             "that cannot be verified as grounded"
+        )
+        return fallback
+    terms = mission_ranking.stated_terms(shopping_state)
+    if not mission_ranking.any_term_mentioned(text, terms):
+        logger.warning(
+            "synthesis referenced no actual stored mission term (%r); "
+            "falling back rather than trusting an unrelated claim",
+            terms,
         )
         return fallback
     return text
@@ -894,7 +918,7 @@ async def _process_turn(
             # here since `found` would be None for that branch.
             if executed.action_type == "RECOMMEND_PRODUCTS" and products:
                 shortlisted, fit_reasons = mission_ranking.rank_and_filter(
-                    products, shopping_state
+                    products, shopping_state, memory_facts=memory_facts
                 )
                 for p in shortlisted:
                     reasons = fit_reasons.get(p.get("product_id"))
@@ -1095,6 +1119,31 @@ async def _process_turn(
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("could not record active_products; continuing")
+        elif executed.action_type == "CHECK_COMPATIBILITY" and executed.succeeded:
+            # Deterministic, not a second model call - unlike COMPARE_PRODUCTS's
+            # synthesis above, there is no meaningful sentence-writing task
+            # here: the verdict is one of exactly two words
+            # (compatible/unknown) and the reason is already a complete,
+            # grounded sentence built in product_relations.check_compatibility.
+            # Spending a throttled model turn to rephrase "compatible" would
+            # buy nothing and risks the same false-certainty failure this
+            # whole feature exists to avoid.
+            reply = executed.summary or "I couldn't determine compatibility just now."
+        elif executed.action_type == "SUGGEST_COMPLEMENTARY" and executed.succeeded:
+            # Same reasoning as CHECK_COMPATIBILITY just above: deterministic,
+            # grounded only in the merchant's own declared relationships, no
+            # model call needed to list them.
+            payload = executed.payload or {}
+            complements = payload.get("complements") or []
+            anchor_title = (payload.get("anchor") or {}).get("title", "that product")
+            if complements:
+                names = ", ".join(c["title"] for c in complements)
+                reply = f"Goes well with {anchor_title}: {names}."
+            else:
+                reply = (
+                    f"The merchant hasn't declared anything as a specific "
+                    f"complement for {anchor_title} yet."
+                )
         elif executed.action_type == "PREPARE_CHECKOUT" and executed.succeeded:
             payment = executed.payload
             try:
