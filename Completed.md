@@ -3168,3 +3168,62 @@ below; `npm run build` now exits 0.)
     existing baseline. Three real Playwright browser tests passing in
     `storefront/tests/proposals.spec.ts`, one of which drives the actual
     chat UI with no test shortcut.
+
+    **Addendum, later session:** the manual-check workaround noted above
+    (the route's lock/tenant-isolation was checked by hand because it
+    wasn't yet in `auditroutes.py`'s own probe list) is closed -
+    `GET /api/cart-proposals/{connection_id}` now has a tracked probe in
+    `auditroutes.py`, following the same no-key-refused/own-key-accepted
+    pattern as the adjacent merchant-report probe, and it runs clean. The
+    remaining gap named above - nothing in the Merchant console UI reading
+    this route - is addressed in a follow-on session; see #50 and
+    PROGRESS.md for why the merchant-measurement half still hasn't moved
+    here in full.
+
+50. **11-journey formal regression matrix run live against the running
+    engine, confirming the shopper-facing features already shipped in
+    Completed.md still hold end to end - not a new feature, a verification
+    pass.** All 11 passed: (1) discovery→recommendation→selection, (2)
+    mission shopping→ranking→shortlist, (3) comparison→priority→
+    re-ranking, (4) personalization→current-intent override, (5)
+    compatibility→complete-the-set, (6) cart intelligence→proposal→reject,
+    (7) cart intelligence→proposal→accept→execution, (8) checkout→
+    decline→recovery→shopper action (Kettle), (9) checkout→successful
+    purchase→correct final state, (10) post-purchase order lookup, (11)
+    platform-limitation→honest escalation (Northfield, no payment-recovery
+    capability). Journey 1 needed a rephrased message on retry, matching
+    the already-documented model-choice variance, not a regression.
+    Journeys 6/7 (cart intelligence/proposals) were independently
+    re-verified live by a value-auditor pass in the same session, not just
+    by this matrix script: a real cart question produced a real
+    `CART_INTELLIGENCE` finding and a real `PENDING` proposal; reject left
+    the proposal `REJECTED` with the cart unchanged; accept executed to a
+    real 2-line cart with the correct total, confirmed by a direct cart
+    re-fetch rather than trusting the accept response.
+
+    **A `search_products("", limit=100)`-style scoring-function benchmark
+    was also run this session, and it is recorded here precisely rather
+    than oversold:** `mission_ranking.rank_and_filter` against 2000
+    synthetic in-memory products (9ms) and `cart_intelligence.analyze_cart`
+    against a 200-line synthetic cart (0.16ms). This is a pure in-process
+    scoring-function timing benchmark - no HTTP, no DB, no adapter, no real
+    catalogue in the path - and CLAUDE.md's real-client conditions
+    explicitly warn against treating that as proof of real-volume
+    readiness. It is not called a real-volume verification anywhere in
+    this entry; a genuine real-volume exercise of the actual feature path
+    (through real HTTP/DB/adapter at real catalogue scale) remains undone
+    and is tracked in PROGRESS.md.
+
+    `healthcheck.py`: 114/116, the 2 failures matching the two
+    already-documented pre-existing classes (`PAYMENT_DECLINED`
+    model-proposal variance; the intermittent read-after-write lag on
+    aggregate reads under real adapter I/O, verdict C in PROGRESS.md -
+    distinct from the days=1-window funnel timing artifact, not
+    re-described as that here). `fuzz.py`: 20/20 sequences, 1200
+    assertions, every invariant held. `auditroutes.py`: fully clean
+    including the new cart-proposals probe. `invariant-guard`: SAFE on the
+    auditroutes probe and the merchant-panel diff together, and again by
+    inference on the same component/data path for the `shoppers_helped`
+    render-branch fix described in PROGRESS.md - flagged there as a
+    judgment call rather than a fresh dedicated pass, since it is the
+    identical component and data path already reviewed moments earlier.

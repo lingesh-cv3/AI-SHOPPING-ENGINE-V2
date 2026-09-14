@@ -930,21 +930,56 @@ these first:**
       Cart Proposal accept/reject/execute lifecycle. See Completed.md #49
       for the full value-bar answers and verification record.
 
-      **What did not move, and stays open here:** the merchant-measurement
-      half. `engine/db/repository.py::cart_proposal_activity` and
-      `GET /api/cart-proposals/{connection_id}` (`engine/api/routes.py`)
-      are real, tenant-scoped, and now honest (a `has_history` bug found by
-      this session's `value-auditor` pass - derived only from
-      `proposal_created` events, which could be silently missing - is
-      fixed to check all four `PROPOSAL_*` event kinds). But **nothing in
-      the Merchant console UI reads this route yet** - grepped the whole
-      `storefront/` tree, zero references. The API/data half of "what
-      figure moves" is satisfied; the merchant-facing screen that would
-      let a real merchant actually see it is not. Whoever picks this up
-      next should wire a panel (Merchant console, alongside the existing
-      Recovery/AI Commerce sections) to this route before considering the
-      measurement half done, and re-run `value-auditor` on that specific
-      addition before moving it to Completed.md.
+      **What did not move, and stays open here: the merchant-measurement
+      half - closing, not closed.** A follow-on session built and wired
+      the panel this entry originally said was missing: the Merchant
+      console's "AI Commerce" screen (`storefront/src/AICommerce.tsx`) now
+      has a `CartSuggestionsPanel` reading the real
+      `console_api.cartProposalActivity()` /
+      `GET /api/cart-proposals/{connection_id}` route (real counts,
+      acceptance rate, top-suggested products, honest empty state when
+      `has_history` is false). `auditroutes.py` now carries a tracked
+      no-key-refused/own-key-accepted probe for the route, closing the
+      "checked by hand instead of in the suite" gap #49 itself named (see
+      the addendum on #49 in Completed.md).
+
+      A live `value-auditor` pass on this panel found a real bug and it
+      was fixed the same session: the panel was only wired into one of
+      `AICommerce.tsx`'s two render branches, so a merchant with real
+      cart-proposal history but zero friction cases (`shoppers_helped ===
+      0`) hit the generic "Nothing yet" screen and never saw their real
+      proposal data at all - cases and proposals are recorded on
+      independent paths. Fixed by extracting the panel into a shared
+      component rendered in both branches. `npm run build` (0 new TS
+      errors) and `npm run lint` (0 new, same 8-error baseline) both clean
+      after the fix.
+
+      **Two concrete things keep this from moving to Completed.md, named
+      rather than papered over:**
+      - **The render-branch fix has not been separately re-verified in a
+        live browser.** The underlying API/data are real and were
+        live-verified earlier; this specific fix is a straightforward JSX
+        extraction confirmed by typecheck and lint and by re-reading the
+        component, but nobody has actually opened a browser and clicked
+        through both render paths (a seeded zero-case/real-proposal
+        connection, and a real-case connection) since the fix landed.
+      - **The real-volume claim for this feature is not backed by a real
+        exercise of the actual path.** The only volume check run this
+        session (`mission_ranking.rank_and_filter` against 2000 synthetic
+        in-memory products, `cart_intelligence.analyze_cart` against a
+        200-line synthetic cart) is a pure in-process scoring-function
+        timing benchmark - no HTTP, no DB, no adapter, no real catalogue -
+        and is exactly the kind of thing CLAUDE.md's real-client
+        conditions warn against mistaking for real-volume readiness. A
+        genuine real-volume test (through the real HTTP/DB/adapter path,
+        at real catalogue scale, of `cart_proposal_activity` and the panel
+        that reads it) remains undone.
+
+      Whoever picks this up next: do a real browser pass on both render
+      branches of `AICommerce.tsx`, build (or reuse) a real high-volume
+      merchant fixture and exercise `cart_proposal_activity` through it,
+      then re-run `value-auditor` specifically on the merchant-measurement
+      half before moving it to Completed.md.
 
       Also not exercised this session, named honestly rather than
       assumed: a platform-cannot or platform-down condition specific to

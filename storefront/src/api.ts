@@ -967,6 +967,14 @@ export const console_api = {
   report: (days = 30) =>
     merchantCall<MerchantReport>(`/api/report/${getConnection()}?days=${days}`),
 
+  /** What the AI's cart-change suggestions actually did - real counts from
+   *  real events, never a projection. See CartProposalActivity's own
+   *  fields for what "honest zero" looks like here. */
+  cartProposalActivity: (days = 30) =>
+    merchantCall<CartProposalActivity>(
+      `/api/cart-proposals/${getConnection()}?days=${days}`,
+    ),
+
   askCopilot: (question: string) =>
     merchantCall<CopilotAnswer>(`/api/copilot/${getConnection()}`, {
       method: "POST",
@@ -1147,6 +1155,21 @@ export interface CopilotAnswer {
   /** False means the model was unreachable and nothing was actually
    *  answered - the console must not render that as a real figure. */
   used_model: boolean;
+}
+
+/** Real counts from the PROPOSAL_* ShopperEvent rows - observed behavior,
+ *  never a causal or business-value claim. `has_history` false means no
+ *  proposal has ever been created for this connection; `acceptance_rate`
+ *  is null (not 0) when nothing has been decided yet. */
+export interface CartProposalActivity {
+  days: number;
+  has_history: boolean;
+  created: number;
+  accepted: number;
+  rejected: number;
+  executed: number;
+  acceptance_rate: number | null;
+  most_suggested_products: { product_id: string; times_suggested: number }[];
 }
 
 export interface MerchantReport {

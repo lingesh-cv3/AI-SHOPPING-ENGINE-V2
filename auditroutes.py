@@ -146,6 +146,7 @@ PROBES = [
     ("capabilities", "GET", "/api/connections/conn_demo/capabilities", SK_DEMO, None, None),
     ("read policy", "GET", "/api/policy/conn_demo", SK_DEMO, None, None),
     ("merchant report", "GET", "/api/report/conn_demo", SK_DEMO, None, None),
+    ("cart proposal activity", "GET", "/api/cart-proposals/conn_demo", SK_DEMO, None, None),
     ("approval queue", "GET", "/api/approvals/conn_demo", SK_DEMO, None, None),
     ("case history", "GET", "/api/cases/conn_demo", SK_DEMO, None, None),
     ("merchant stats", "GET", "/api/stats/conn_demo", SK_DEMO, None, None),
