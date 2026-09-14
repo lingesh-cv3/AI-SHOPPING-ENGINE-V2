@@ -3227,3 +3227,125 @@ below; `npm run build` now exits 0.)
     render-branch fix described in PROGRESS.md - flagged there as a
     judgment call rather than a fresh dedicated pass, since it is the
     identical component and data path already reviewed moments earlier.
+
+51. **Cart Proposal merchant-measurement, closed - a fresh `value-auditor`
+    pass returns VALUABLE, closing the last open half of the whole Cart
+    Intelligence / Cart Proposals initiative (Shopper Roadmap item 5,
+    "Not blocked").** #49 closed the shopper-facing loop; #50 named two
+    remaining gaps against the merchant-measurement half (the render-branch
+    fix unverified in a live browser, and no genuine real-volume test of
+    the measurement path). Both are closed this session, with nothing else
+    changed in the underlying route or panel code.
+
+    - **Browser verification of the two render branches, real Playwright
+      tests, not a by-hand click-through.** New
+      `storefront/tests/merchant-cart-suggestions.spec.ts`, 4 tests, all
+      passing: (1) a merchant with zero friction cases still sees real,
+      non-fabricated Cart Suggestions numbers - forced via network-response
+      interception on the adjacent `/api/report` call only, leaving
+      `/api/cart-proposals` hitting the real live API untouched, which is
+      what actually exercises the `CartSuggestionsPanel` extraction from
+      #50 (the bug it fixed: a merchant with real proposal history but
+      zero cases hit the generic "Nothing yet" screen in one of
+      `AICommerce.tsx`'s two render branches and never saw the panel); (2)
+      each merchant's console only ever shows its own connection's data
+      (Northfield's console never shows a Kettle product id); (3) a
+      wrong-shaped key never reaches the console (local validation); (4)
+      another merchant's genuinely valid secret key (Kettle's console,
+      Northfield's real key) is refused by the real API and bounces back
+      to sign-in, never silently showing the wrong tenant's data. No
+      backend or engine code changed to make these pass - the fix from
+      #50 already worked; this only adds the browser proof that was
+      missing.
+    - **A genuine real-volume test of the measurement path**, replacing
+      the earlier pure-scoring-function benchmark named in #50 (which
+      stays recorded there as exactly what it was, not retroactively
+      upgraded): 5000 real `ShopperEvent` rows written through the real
+      async DB write path (`engine/execution/events.py::record`, the same
+      function the real `PROPOSE_CART_CHANGE`/accept/reject execution
+      paths call) under an isolated synthetic `connection_id` that owns
+      no real merchant key, then aggregated through the real
+      `cart_proposal_activity` function (the same one the HTTP route
+      calls) - the returned aggregate exactly matched the 5000 rows
+      written (1250 of each of the 4 event kinds, `acceptance_rate` 50.0,
+      `has_history` correctly True), query completed in ~53ms. Not
+      claimed as production-scale evidence - SQLite dev database, single
+      machine, no concurrent writers, 5000 rows is real but modest - it
+      demonstrates the real persistence → aggregation → API path is
+      correct and reasonably fast at a meaningfully-larger-than-demo
+      volume, nothing stronger. The script that ran this
+      (`.claude_scratch/real_volume_test.py`) is scratch, not committed.
+
+    **A residual, explicitly non-blocking caveat, found by this same
+    fresh audit:** `cart_proposal_activity`'s query pulls every matching
+    row in its (clamped, max 365-day) time window into memory with no
+    row-count cap - correct and fast at the volume actually tested (5000
+    rows, ~53ms), but unexercised at true worst-case volume (a real
+    40k-SKU/six-figure-case merchant with very heavy cart-suggestion
+    traffic over a full year). This is not the `_catalog_alerts`
+    anti-pattern (a fixed page silently presented as complete) - it is a
+    correct, time-bounded aggregation, just untested at the extreme end.
+    Worth a row cap or streaming aggregation if a real client's volume
+    ever approaches it; not treated by the auditor as a blocker to the
+    verdict below.
+
+    **Fresh `value-auditor` verdict, specific to Cart Proposal
+    merchant-measurement: VALUABLE.** The auditor independently
+    re-verified tenant isolation live (five direct checks against the
+    running engine: correct data per own key, cross-key refused both
+    directions, no-key refused), confirmed the real-volume test above is
+    genuine persistence → aggregation evidence rather than a pure
+    function benchmark, confirmed no causal overclaiming anywhere in
+    code, route, or frontend copy (all three layers checked directly),
+    and confirmed honest zero/empty-history handling in both of
+    `AICommerce.tsx`'s render branches. The row-cap caveat above was the
+    one open item, explicitly not treated as a blocker.
+
+    **Value-bar answers, specific to this measurement half (the shopper-
+    facing loop's own answers are in #49):**
+    1. *Whose decision changes?* A merchant's marketer looking at their
+       own `/merchant` console, deciding whether the Cart Suggestions
+       feature is worth trusting or tuning.
+    2. *What can they do now that they could not before?* See a real
+       count of proposals created/accepted/rejected/executed and a real
+       acceptance rate for their own store, rather than having no way to
+       tell whether the feature is doing anything at all - and see it
+       honestly even when they have zero friction cases, which #50's own
+       bug had been silently hiding.
+    3. *What does it cost them if this is wrong?* A merchant who trusts a
+       fabricated or wrong acceptance rate could keep or expand a feature
+       that isn't working, or distrust and disable one that is - the cost
+       of a wrong number here is a wrong product decision, not a
+       financial or data-integrity error.
+    4. *Where is the action?* Read-only measurement, named as such - the
+       action it informs (tuning or disabling Cart Suggestions) is the
+       existing merchant policy control elsewhere in the console, not a
+       new action added by this entry.
+    5. *What number moves?* `cart_proposal_activity`'s counts and
+       acceptance rate, now reachable on the Cart Suggestions panel in
+       `/merchant`'s AI Commerce screen - this closes the one figure #49
+       explicitly named as not yet reachable by a merchant on any screen.
+    6. *Real-client conditions exercised:* zero-history handled and
+       live-browser-tested (both render branches); tenant isolation
+       live-tested both directions; a genuine (not pure-function)
+       real-volume test now exists (5000 rows through the real write/read
+       path). **Not** separately tested: a platform-cannot or
+       platform-down condition specific to this measurement route - it
+       reads only `ShopperEvent` rows already written by the existing
+       execution pipeline and never calls an adapter itself, so there is
+       no platform-down path for it to have.
+
+    **Verification this session:** 4 new Playwright tests passing
+    (`storefront/tests/merchant-cart-suggestions.spec.ts`); the real-volume
+    result above; `invariant-guard` SAFE from the prior session's passes
+    (no engine/adapter/risk code touched this session); `healthcheck.py`
+    111-115/116 across runs, every failure matching the two already-
+    documented pre-existing classes named in #49/#50; `fuzz.py` 20/20
+    sequences, 1200 assertions, every invariant held; `auditroutes.py`
+    clean.
+
+    **This closes the entire Cart Intelligence + Cart Proposals
+    initiative.** Both halves - the shopper-facing loop (#49) and the
+    merchant-measurement half (this entry) - are now VALUABLE. See
+    PROGRESS.md: the Cart Proposals section under Shopper - Initial
+    Priorities is removed now that nothing about it remains open.

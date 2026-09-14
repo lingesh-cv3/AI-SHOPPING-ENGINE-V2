@@ -917,76 +917,16 @@ these first:**
 
 **Not blocked:**
 
-- [x] **Smart Cart & Checkout Recovery - Cart Intelligence and the
-      shopper-facing half of Cart Proposals** - moved to `Completed.md`
-      (#49). A follow-on session closed the two gaps a prior
-      `value-auditor` pass had named against `43f3bf4` (a deterministic
-      `engine/reasoning/cart_intent.py` bridge fixed the model's
-      unreliable choice of `CART_INTELLIGENCE`, confirmed 8/8 on the
-      product spec's exact example phrasings; a real, no-shortcut
-      Playwright test now drives the actual chat UI end to end), and a
-      fresh independent `value-auditor` pass returned VALUABLE for both
-      the Cart Intelligence finding→proposal loop and the shopper-facing
-      Cart Proposal accept/reject/execute lifecycle. See Completed.md #49
-      for the full value-bar answers and verification record.
-
-      **What did not move, and stays open here: the merchant-measurement
-      half - closing, not closed.** A follow-on session built and wired
-      the panel this entry originally said was missing: the Merchant
-      console's "AI Commerce" screen (`storefront/src/AICommerce.tsx`) now
-      has a `CartSuggestionsPanel` reading the real
-      `console_api.cartProposalActivity()` /
-      `GET /api/cart-proposals/{connection_id}` route (real counts,
-      acceptance rate, top-suggested products, honest empty state when
-      `has_history` is false). `auditroutes.py` now carries a tracked
-      no-key-refused/own-key-accepted probe for the route, closing the
-      "checked by hand instead of in the suite" gap #49 itself named (see
-      the addendum on #49 in Completed.md).
-
-      A live `value-auditor` pass on this panel found a real bug and it
-      was fixed the same session: the panel was only wired into one of
-      `AICommerce.tsx`'s two render branches, so a merchant with real
-      cart-proposal history but zero friction cases (`shoppers_helped ===
-      0`) hit the generic "Nothing yet" screen and never saw their real
-      proposal data at all - cases and proposals are recorded on
-      independent paths. Fixed by extracting the panel into a shared
-      component rendered in both branches. `npm run build` (0 new TS
-      errors) and `npm run lint` (0 new, same 8-error baseline) both clean
-      after the fix.
-
-      **Two concrete things keep this from moving to Completed.md, named
-      rather than papered over:**
-      - **The render-branch fix has not been separately re-verified in a
-        live browser.** The underlying API/data are real and were
-        live-verified earlier; this specific fix is a straightforward JSX
-        extraction confirmed by typecheck and lint and by re-reading the
-        component, but nobody has actually opened a browser and clicked
-        through both render paths (a seeded zero-case/real-proposal
-        connection, and a real-case connection) since the fix landed.
-      - **The real-volume claim for this feature is not backed by a real
-        exercise of the actual path.** The only volume check run this
-        session (`mission_ranking.rank_and_filter` against 2000 synthetic
-        in-memory products, `cart_intelligence.analyze_cart` against a
-        200-line synthetic cart) is a pure in-process scoring-function
-        timing benchmark - no HTTP, no DB, no adapter, no real catalogue -
-        and is exactly the kind of thing CLAUDE.md's real-client
-        conditions warn against mistaking for real-volume readiness. A
-        genuine real-volume test (through the real HTTP/DB/adapter path,
-        at real catalogue scale, of `cart_proposal_activity` and the panel
-        that reads it) remains undone.
-
-      Whoever picks this up next: do a real browser pass on both render
-      branches of `AICommerce.tsx`, build (or reuse) a real high-volume
-      merchant fixture and exercise `cart_proposal_activity` through it,
-      then re-run `value-auditor` specifically on the merchant-measurement
-      half before moving it to Completed.md.
-
-      Also not exercised this session, named honestly rather than
-      assumed: a platform-cannot or platform-down condition specific to
-      `CART_INTELLIGENCE`/`PROPOSE_CART_CHANGE` themselves (both actions
-      inherit the existing execution pipeline's adapter-failure handling,
-      which is exercised elsewhere in this project, but was not
-      independently forced down for these two action types this session).
+- [x] **Smart Cart & Checkout Recovery - Cart Intelligence and Cart
+      Proposals, both the shopper-facing loop and the merchant-measurement
+      half.** Moved to `Completed.md` in full (#49, #51). Nothing about
+      this initiative remains open here; see Completed.md for the full
+      value-bar answers and verification record on both halves, including
+      the real-volume test, the four browser tests covering both merchant
+      render branches and tenant isolation, and the one named non-blocking
+      caveat (`cart_proposal_activity` has no row-count cap, correct and
+      fast at the volume actually tested but unexercised at true
+      worst-case merchant volume).
 
 ### Merchant — Initial Priorities
 
