@@ -17,6 +17,7 @@ import {
 
 import { OpsConsole } from "./OpsConsole";
 import { CartPanel } from "./CartPanel";
+import { ProposalsPanel } from "./ProposalsPanel";
 import { ChatWidget } from "./ChatWidget";
 import { Gates } from "./Gates";
 import { MerchantConsole } from "./MerchantConsole";
@@ -525,6 +526,17 @@ export default function App() {
             <Gates pipeline={pipeline} />
           </div>
         </section>
+      )}
+
+      {cart && (
+        <ProposalsPanel
+          sessionId={sessionId}
+          cartId={cart.cart_id}
+          refreshSignal={chatTurns.length}
+          onCartChanged={() => {
+            api.getCart(cart.cart_id).then(setCart).catch(() => {});
+          }}
+        />
       )}
 
       <CartPanel

@@ -99,6 +99,11 @@ def operation_for(action_type: ActionType) -> Operation | None:
         ActionType.COMPARE_PRODUCTS: Operation.GET_PRODUCT,
         ActionType.CHECK_COMPATIBILITY: Operation.GET_PRODUCT,
         ActionType.SUGGEST_COMPLEMENTARY: Operation.GET_PRODUCT,
+        ActionType.CART_INTELLIGENCE: Operation.GET_CART,
+        # Creates a stored suggestion only - reads the cart to ground the
+        # proposal in something real, but PROPOSE_CART_CHANGE's own
+        # execution never calls a mutating operation.
+        ActionType.PROPOSE_CART_CHANGE: Operation.GET_CART,
         ActionType.SUGGEST_ALTERNATIVE: Operation.SEARCH_PRODUCTS,
         ActionType.ADD_TO_CART: Operation.ADD_TO_CART,
         ActionType.UPDATE_CART_QUANTITY: Operation.UPDATE_CART,

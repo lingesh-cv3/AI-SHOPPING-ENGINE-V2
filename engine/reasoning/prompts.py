@@ -36,6 +36,8 @@ PROPOSABLE: tuple[ActionType, ...] = (
     ActionType.COMPARE_PRODUCTS,
     ActionType.CHECK_COMPATIBILITY,
     ActionType.SUGGEST_COMPLEMENTARY,
+    ActionType.CART_INTELLIGENCE,
+    ActionType.PROPOSE_CART_CHANGE,
     ActionType.SUGGEST_ALTERNATIVE,
     ActionType.ADD_TO_CART,
     ActionType.UPDATE_CART_QUANTITY,
@@ -393,6 +395,30 @@ def propose_tool() -> dict[str, Any]:
                                         "REMOVE_CART_LINE."
                                     ),
                                 },
+                                "proposal_change_type": {
+                                    "type": "string",
+                                    "enum": ["ADD", "REMOVE", "REPLACE", "CHANGE_QUANTITY"],
+                                    "description": (
+                                        "For PROPOSE_CART_CHANGE only: what kind "
+                                        "of change you are suggesting. ADD/REMOVE "
+                                        "use product_id for the product involved; "
+                                        "REPLACE uses product_id for the new "
+                                        "product and proposal_replaces_product_id "
+                                        "for what it would remove; "
+                                        "CHANGE_QUANTITY uses product_id and "
+                                        "quantity for the new amount."
+                                    ),
+                                },
+                                "proposal_replaces_product_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "For PROPOSE_CART_CHANGE with "
+                                        "proposal_change_type REPLACE only: the "
+                                        "product currently in the cart that this "
+                                        "would remove. Must be a product actually "
+                                        "in the shopper's cart, from the context."
+                                    ),
+                                },
                                 "order_id": {
                                     "type": "string",
                                     "description": (
@@ -513,6 +539,19 @@ Rules that matter:
   will come only from what the merchant has actually declared as
   complementary - never suggest an accessory yourself in your reply based on
   category or guesswork.
+- Propose CART_INTELLIGENCE when the shopper asks something about their
+  actual cart beyond "what's in it" - "is anything wrong with my cart",
+  "am I missing anything", "is this over budget", "can I still afford
+  this". The findings are computed from the real cart and real,
+  freshly-fetched product data, never from your own impression of the
+  conversation so far.
+- Propose PROPOSE_CART_CHANGE when you want to suggest adding, removing,
+  replacing, or changing the quantity of something in the cart, rather than
+  just doing it. This creates a suggestion for the shopper to accept or
+  reject - it never changes the cart by itself, so word your reply as an
+  offer ("Want me to add X?"), never as something already done. Only
+  propose a product that is actually present in your context; never invent
+  one to fill out a suggestion.
 - Propose CHECK_ORDER_STATUS when the shopper asks about an order and gives
   you a number, and put that number in the order_id field exactly as they
   wrote it. If they ask about an order without naming one, ask for the

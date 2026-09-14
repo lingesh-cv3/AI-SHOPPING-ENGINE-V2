@@ -122,6 +122,10 @@ ASSISTANCE_PREFERENCE: tuple[ActionType, ...] = (
     # is in their cart right now has asked a direct question, not started a
     # new browse - it should not be outranked by RECOMMEND_PRODUCTS.
     ActionType.CHECK_CART_STATUS,
+    # A shopper asking what's wrong with, or missing from, their actual
+    # cart has asked a direct question about real state - same "doing/
+    # answering beats browsing" reasoning as CHECK_CART_STATUS just above.
+    ActionType.CART_INTELLIGENCE,
     ActionType.PREPARE_CHECKOUT,
     ActionType.ADD_TO_CART,
     ActionType.RECOMMEND_PRODUCTS,
@@ -135,6 +139,10 @@ ASSISTANCE_PREFERENCE: tuple[ActionType, ...] = (
     # else do I need" wants the grounded answer, not a restated description.
     ActionType.CHECK_COMPATIBILITY,
     ActionType.SUGGEST_COMPLEMENTARY,
+    # Below every direct question/action above - proposing a cart change is
+    # only the right move once nothing more direct answers what the
+    # shopper actually asked, and it never mutates anything by itself.
+    ActionType.PROPOSE_CART_CHANGE,
     ActionType.ANSWER_PRODUCT_QUESTION,
 )
 

@@ -299,6 +299,23 @@ export interface WhyBlock {
   evidence: string[];
 }
 
+/** A cart change the assistant has suggested, stored, and is waiting on the
+ *  shopper to accept or reject. See CartProposal's own docstring in
+ *  engine/db/models.py - nothing here has changed the cart yet. */
+export interface CartProposal {
+  proposal_id: string;
+  cart_id: string;
+  change_type: "ADD" | "REMOVE" | "REPLACE" | "CHANGE_QUANTITY";
+  product_id: string;
+  variant_id: string | null;
+  quantity: number | null;
+  replaces_product_id: string | null;
+  reason: string;
+  evidence: string[];
+  state: string;
+  created_at: string;
+}
+
 export interface ChatReply {
   reply: string;
   session_id: string;
@@ -628,6 +645,41 @@ export const api = {
   transcript: (sessionId: string) =>
     call<{ session_id: string; turns: StoredTurn[]; friction: string[] }>(
       `/api/chat/${getConnection()}/${sessionId}`,
+    ),
+
+  /** What the assistant has suggested for this cart that the shopper has
+   *  not yet decided on. Nothing here has touched the cart - see
+   *  CartProposal's own docstring in engine/db/models.py for the full
+   *  suggest -> approve -> execute chain this is one step of. */
+  listProposals: (sessionId: string, cartId: string) =>
+    call<{ proposals: CartProposal[] }>(
+      `/api/chat/proposals?connection_id=${getConnection()}&session_id=${sessionId}&cart_id=${cartId}`,
+    ),
+
+  /** The shopper said yes. Only now does the cart actually change - and
+   *  only after the engine re-checks the suggestion is still true. */
+  acceptProposal: (proposalId: string, sessionId: string, cartId: string) =>
+    call<ChatReply>(`/api/chat/proposals/${proposalId}/accept`, {
+      method: "POST",
+      body: JSON.stringify({
+        connection_id: getConnection(),
+        session_id: sessionId,
+        cart_id: cartId,
+      }),
+    }),
+
+  /** The shopper said no. Nothing was ever changed to begin with. */
+  rejectProposal: (proposalId: string, sessionId: string, cartId: string) =>
+    call<{ proposal_id: string; state: string }>(
+      `/api/chat/proposals/${proposalId}/reject`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          connection_id: getConnection(),
+          session_id: sessionId,
+          cart_id: cartId,
+        }),
+      },
     ),
 
   applyPromotion: (cartId: string, code: string) =>

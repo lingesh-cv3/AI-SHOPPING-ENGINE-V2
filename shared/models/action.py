@@ -62,6 +62,25 @@ class ActionType(StrEnum):
     #: Read-only.
     SUGGEST_COMPLEMENTARY = "SUGGEST_COMPLEMENTARY"
 
+    #: Real understanding of the actual cart - duplicate lines, now-
+    #: unavailable products, an over-budget total, a shopper-stated
+    #: exclusion sitting in the cart, a declared complement not yet in it -
+    #: computed fresh from the real cart and real, just-fetched product
+    #: data (see engine/execution/cart_intelligence.py). Read-only; never
+    #: mutates anything itself.
+    CART_INTELLIGENCE = "CART_INTELLIGENCE"
+
+    #: The AI suggests a cart change; nothing is mutated yet. Execution
+    #: writes a stored CartProposal row (see engine/db/models.py) and
+    #: nothing else - the cart itself only ever changes once a shopper
+    #: explicitly accepts a specific proposal by id
+    #: (POST /api/chat/proposals/{id}/accept), which is then re-validated
+    #: against live data and run through the ordinary Decision Engine and
+    #: Risk Gate exactly like a tapped button. This is the one action type
+    #: whose entire effect is "create a record of a suggestion" - it can
+    #: never itself add, remove, or change anything in a real cart.
+    PROPOSE_CART_CHANGE = "PROPOSE_CART_CHANGE"
+
     # Recovery — non-financial
     SUGGEST_ALTERNATIVE = "SUGGEST_ALTERNATIVE"
     ADD_TO_CART = "ADD_TO_CART"
@@ -144,6 +163,11 @@ ACTION_RISK_PROPERTIES: dict[ActionType, RiskProperties] = {
     ActionType.COMPARE_PRODUCTS: RiskProperties(financial=False, reversible=True),
     ActionType.CHECK_COMPATIBILITY: RiskProperties(financial=False, reversible=True),
     ActionType.SUGGEST_COMPLEMENTARY: RiskProperties(financial=False, reversible=True),
+    ActionType.CART_INTELLIGENCE: RiskProperties(financial=False, reversible=True),
+    # Creating a stored suggestion touches no money and nothing it creates
+    # is itself a commerce mutation - trivially reversible because nothing
+    # has happened yet.
+    ActionType.PROPOSE_CART_CHANGE: RiskProperties(financial=False, reversible=True),
     ActionType.SUGGEST_ALTERNATIVE: RiskProperties(financial=False, reversible=True),
     ActionType.ADD_TO_CART: RiskProperties(financial=False, reversible=True),
     ActionType.UPDATE_CART_QUANTITY: RiskProperties(financial=False, reversible=True),

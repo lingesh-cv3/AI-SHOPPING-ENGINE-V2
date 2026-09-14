@@ -953,6 +953,80 @@ class ShopperEvent(Base):
     )
 
 
+class CartProposal(Base):
+    """A structured, stored cart change the AI has suggested but not yet
+    carried out - the "model suggestion -> structured proposal -> shopper
+    approval -> risk check -> execution -> actual cart state" chain made
+    concrete as a row, rather than as a sentence in a chat reply that
+    happens to also mutate the cart.
+
+    Created only by `PROPOSE_CART_CHANGE` execution (see
+    `engine/execution/service.py`), which never itself touches the cart -
+    creating this row IS the entire effect of that action type. A cart is
+    only ever actually changed when a shopper explicitly accepts a specific
+    proposal by id (`POST /api/chat/proposals/{id}/accept`), which converts
+    it into the same trusted, Decision-Engine-and-Risk-Gate-checked
+    `ProposedAction` shape a tapped button already uses
+    (`engine/api/chat.py::act`) - a proposal's existence is never itself
+    authority to mutate anything.
+
+    `state` moves forward only: PENDING -> ACCEPTED|REJECTED|EXPIRED, and
+    ACCEPTED -> EXECUTED|FAILED. Never back. A proposal is revalidated
+    against the live cart/catalog at accept time
+    (`engine/api/chat.py::accept_proposal`) rather than trusted from
+    creation time - the
+    cart or the product's price/availability may have changed since, and a
+    stale proposal executed blindly is exactly the "trusted input beats
+    model guess, but only if the model's guess is still true" gap this
+    table exists to close.
+    """
+
+    __tablename__ = "cart_proposals"
+
+    proposal_id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    shopper_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    cart_id: Mapped[str] = mapped_column(String(64), index=True)
+
+    #: "ADD" | "REMOVE" | "REPLACE" | "CHANGE_QUANTITY". A plain string for
+    #: the same append-only reasoning every other small-fixed-set column in
+    #: this file already gives.
+    change_type: Mapped[str] = mapped_column(String(24))
+
+    product_id: Mapped[str] = mapped_column(String(120))
+    variant_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: REPLACE only - the product this would remove in the same action.
+    replaces_product_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    #: Why this was proposed, in the shopper's terms ("completes your
+    #: espresso setup"). Advisory text, same as ProposedAction.rationale -
+    #: never itself a fact the execution layer trusts.
+    reason: Mapped[str] = mapped_column(Text)
+    #: Concrete, grounded facts backing the proposal - e.g. "declared
+    #: compatible with KB-EQP-10", "within your stated budget" - never a
+    #: free-form model claim with nothing under it.
+    evidence: Mapped[list] = mapped_column(JSON, default=list)
+
+    #: A snapshot of the product's price at proposal time, so accept-time
+    #: revalidation can detect a price change rather than silently acting on
+    #: a now-stale figure.
+    snapshot_price: Mapped[str | None] = mapped_column(String(24), nullable=True)
+
+    state: Mapped[str] = mapped_column(String(16), default="PENDING", index=True)
+    #: Set only once execution (accept) actually ran - what really happened,
+    #: never what the model claimed would happen.
+    execution_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_cart_proposals_cart", "connection_id", "cart_id", "state"),
+    )
+
+
 class SessionHoldout(Base):
     """Whether one session was assigned to the no-assistance holdout group.
 

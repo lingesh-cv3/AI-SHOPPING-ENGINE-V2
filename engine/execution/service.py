@@ -33,7 +33,7 @@ from typing import Any
 from engine import db
 from engine import session as session_store
 from engine.decision import CapabilityRegistry
-from engine.execution import product_relations
+from engine.execution import cart_intelligence, product_relations
 from shared.models import (
     ActionType,
     CapabilityUnsupported,
@@ -113,6 +113,16 @@ CART_MUTATING: frozenset[ActionType] = frozenset(
         ActionType.REMOVE_CART_LINE,
         ActionType.CLEAR_CART,
         ActionType.APPLY_PROMOTION,
+        # PROPOSE_CART_CHANGE never itself mutates the cart - only a later
+        # accept does. It is still refused here, upfront, for a paid cart:
+        # dangling a suggestion nobody can ever actually accept ("want me to
+        # add X?" against an order that already went through) is a milder
+        # version of the same honesty failure a real mutation would be, and
+        # accept-time revalidation would refuse it anyway once every
+        # underlying step (ADD_TO_CART etc.) hits this same paid-cart check
+        # - refusing at proposal time just says so immediately instead of
+        # only once the shopper has already tried to accept.
+        ActionType.PROPOSE_CART_CHANGE,
     }
 )
 
@@ -724,6 +734,158 @@ class ExecutionService:
                             for p in related
                         ],
                     },
+                )
+            case ActionType.CART_INTELLIGENCE:
+                if not case.cart_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="There is no cart to look at yet.",
+                        error_code="CART_NOT_FOUND",
+                        final_state=str(CaseState.FAILED),
+                    )
+                cart = await adapter.get_cart(case.cart_id)
+                distinct_ids = {line.product_id for line in cart.lines}
+                fetched = await asyncio.gather(
+                    *(adapter.get_product(pid) for pid in distinct_ids),
+                    return_exceptions=True,
+                )
+                products_by_id = {
+                    p.product_id: p for p in fetched if isinstance(p, Product)
+                }
+                shopping_state = None
+                if case.session_id:
+                    shopping_state = await db.shopping_state.get(
+                        case.session_id, case.connection_id
+                    )
+                findings = cart_intelligence.analyze_cart(
+                    cart, products_by_id, shopping_state
+                )
+                # A diagnosis with nothing to do about it is the "read-only
+                # twin" anti-pattern CLAUDE.md names explicitly - so the one
+                # finding this can act on (a real, merchant-declared
+                # complement missing from the cart) gets turned into an
+                # actual, acceptable proposal in the same turn, not just a
+                # sentence. Only the first missing-complement finding's
+                # first product - one proposal per turn, not a wall of them.
+                created_proposal = None
+                complement_finding = next(
+                    (f for f in findings if f.kind == "missing_complement"), None
+                )
+                if complement_finding and complement_finding.product_ids:
+                    complement_id = complement_finding.product_ids[0]
+                    try:
+                        complement_product = await adapter.get_product(complement_id)
+                        created_proposal = await db.cart_proposals.create(
+                            connection_id=case.connection_id,
+                            session_id=case.session_id or "",
+                            shopper_id=None,
+                            cart_id=case.cart_id,
+                            change_type="ADD",
+                            product_id=complement_id,
+                            reason="declared complementary to something already in your cart",
+                            evidence=["declared compatible by the merchant"],
+                            snapshot_price=(
+                                str(complement_product.price.amount)
+                                if complement_product.price
+                                else None
+                            ),
+                        )
+                    except CommerceError:
+                        pass
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=(
+                        f"{len(findings)} thing(s) worth flagging about this cart."
+                        if findings
+                        else "Nothing to flag - the cart looks fine."
+                    ),
+                    payload={
+                        "findings": [
+                            {
+                                "kind": f.kind,
+                                "message": f.message,
+                                "product_ids": f.product_ids,
+                            }
+                            for f in findings
+                        ],
+                        "created_proposal": created_proposal,
+                    },
+                )
+            case ActionType.PROPOSE_CART_CHANGE:
+                if not case.cart_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="There is no cart to propose a change to.",
+                        error_code="CART_NOT_FOUND",
+                        final_state=str(CaseState.FAILED),
+                    )
+                change_type = str(params.get("proposal_change_type") or "").upper()
+                product_id = params.get("product_id")
+                replaces_id = params.get("proposal_replaces_product_id")
+                if not change_type:
+                    # The model reliably names the product but not always the
+                    # kind of change (live-observed: a plain "propose adding
+                    # X" call omitted proposal_change_type entirely). The
+                    # product's own presence/absence of a stated replacement
+                    # target is enough to infer the two common cases
+                    # deterministically rather than failing a proposal the
+                    # model clearly did intend to make.
+                    change_type = "REPLACE" if replaces_id else "ADD"
+                if change_type not in {"ADD", "REMOVE", "REPLACE", "CHANGE_QUANTITY"} or not product_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="Not enough information to propose a cart change.",
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+                if change_type == "REPLACE" and not replaces_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="A replacement needs to name what it replaces.",
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+                try:
+                    product = await adapter.get_product(product_id)
+                except CommerceError:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="Could not find that product to propose it.",
+                        error_code="PRODUCT_UNAVAILABLE",
+                        final_state=str(CaseState.FAILED),
+                    )
+                raw_qty = params.get("quantity")
+                quantity = int(raw_qty) if str(raw_qty).isdigit() else None
+                evidence = []
+                if replaces_id and replaces_id in product.compatible_with:
+                    evidence.append(f"declared compatible with {replaces_id}")
+                if product.compare_at_price and product.price:
+                    evidence.append("currently discounted from the usual price")
+                proposal = await db.cart_proposals.create(
+                    connection_id=case.connection_id,
+                    session_id=case.session_id or "",
+                    shopper_id=None,
+                    cart_id=case.cart_id,
+                    change_type=change_type,
+                    product_id=product_id,
+                    variant_id=params.get("variant_id"),
+                    quantity=quantity,
+                    replaces_product_id=replaces_id,
+                    reason=str(params.get("proposal_reason") or "suggested based on your cart"),
+                    evidence=evidence,
+                    snapshot_price=str(product.price.amount) if product.price else None,
+                )
+                return Executed(
+                    succeeded=True,
+                    action_type=str(action_type),
+                    summary=f"Proposed {change_type.lower()} for {product.title}.",
+                    payload={"proposal": proposal, "product_title": product.title},
                 )
             case ActionType.ADD_TO_CART:
                 product_id = params.get("chosen_product") or params.get("product_id")

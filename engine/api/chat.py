@@ -1144,6 +1144,70 @@ async def _process_turn(
                     f"The merchant hasn't declared anything as a specific "
                     f"complement for {anchor_title} yet."
                 )
+        elif executed.action_type == "CART_INTELLIGENCE" and executed.succeeded:
+            # Deterministic, same reasoning as CHECK_COMPATIBILITY above -
+            # cart_intelligence.analyze_cart already produced complete,
+            # grounded sentences; no model call needed to restate them.
+            payload = executed.payload or {}
+            findings = payload.get("findings") or []
+            created_proposal = payload.get("created_proposal")
+            if findings:
+                reply = " ".join(f["message"] for f in findings)
+            else:
+                reply = "Nothing to flag - your cart looks fine."
+            # A diagnosis alone is a report, not a feature - see CLAUDE.md's
+            # "read-only twin" anti-pattern. When the cart has a real,
+            # actionable gap (a merchant-declared complement missing), the
+            # execution layer already turned it into a real, stored
+            # CartProposal - so the reply offers it as something to accept,
+            # the same one-more-step-away action the Suggestions panel
+            # already surfaces for a model-proposed change.
+            if created_proposal:
+                try:
+                    await shopper_events.record(
+                        connection_id=req.connection_id,
+                        session_id=req.session_id,
+                        event_type=shopper_events.EventType.PROPOSAL_CREATED,
+                        shopper_id=shopper_id,
+                        product_id=created_proposal.get("product_id"),
+                        detail={
+                            "proposal_id": created_proposal.get("proposal_id"),
+                            "change_type": created_proposal.get("change_type"),
+                            "source": "cart_intelligence",
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("could not record proposal_created; continuing")
+                reply = (
+                    f"{reply} I've put together a suggestion to add it - see "
+                    f"Suggestions to accept or skip it."
+                )
+        elif executed.action_type == "PROPOSE_CART_CHANGE" and executed.succeeded:
+            payload = executed.payload or {}
+            proposal = payload.get("proposal") or {}
+            product_title = payload.get("product_title", "that item")
+            change_type = proposal.get("change_type")
+            try:
+                await shopper_events.record(
+                    connection_id=req.connection_id,
+                    session_id=req.session_id,
+                    event_type=shopper_events.EventType.PROPOSAL_CREATED,
+                    shopper_id=shopper_id,
+                    product_id=proposal.get("product_id"),
+                    detail={"proposal_id": proposal.get("proposal_id"), "change_type": change_type},
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("could not record proposal_created; continuing")
+            verb = {
+                "ADD": f"add {product_title}",
+                "REMOVE": f"remove {product_title}",
+                "REPLACE": f"replace it with {product_title}",
+                "CHANGE_QUANTITY": f"change the quantity of {product_title}",
+            }.get(change_type, f"change {product_title}")
+            reply = (
+                f"Want me to {verb}? Nothing's changed yet - "
+                f"say the word and I'll do it, or let me know if you'd rather not."
+            )
         elif executed.action_type == "PREPARE_CHECKOUT" and executed.succeeded:
             payment = executed.payload
             try:
@@ -1692,6 +1756,339 @@ async def act(
         cart_changed=cart_changed,
         selected_action=str(trace.selected.action.action_type),
         risk_outcome=str(decision.outcome),
+    )
+
+
+async def _run_trusted_cart_action(
+    *,
+    connection_id: str,
+    session_id: str,
+    cart_id: str,
+    action_type: ActionType,
+    parameters: dict[str, object],
+    rationale: str,
+):
+    """Push one already-approved cart change through the ordinary Decision
+    Engine and Risk Gate - the exact same pipeline `act()` above uses for a
+    tapped button, and for the same reason: a shopper accepting a specific
+    stored proposal is a trusted decision, not a model guess, so it earns
+    the same treatment a tap does. Never called with anything the shopper
+    has not explicitly approved (see `accept_proposal` below).
+    """
+    candidate = ProposedAction(
+        action_type=action_type,
+        operation=operation_for(action_type),
+        parameters=parameters,
+        rationale=rationale,
+        confidence=1.0,
+    )
+    trace = await engine.decision.decide(
+        [candidate], connection_id=connection_id, friction=None
+    )
+    decision = engine.gate.classify(trace.selected)
+    awaiting = str(decision.outcome) != "AUTO"
+
+    case_id = None
+    try:
+        case_id = await db.record_case(
+            connection_id=connection_id,
+            friction=None,
+            query=rationale[:300],
+            cart_id=cart_id,
+            order_id=None,
+            session_id=session_id,
+            reasoning={
+                "used_model": False,
+                "fallback_reason": "the shopper accepted a stored proposal",
+                "shopper_reply": None,
+            },
+            decision={
+                "proposed": [
+                    {
+                        "action_type": str(candidate.action_type),
+                        "parameters": candidate.parameters,
+                        "rationale": candidate.rationale,
+                        "confidence": candidate.confidence,
+                    }
+                ],
+                "rejected": [
+                    {"action_type": str(r.action_type), "reason": r.reason, "detail": r.detail}
+                    for r in trace.rejected
+                ],
+                "selected_action": str(trace.selected.action.action_type),
+                "selection_reason": trace.selected.selection_reason,
+            },
+            risk={
+                "outcome": str(decision.outcome),
+                "rule": decision.policy_rule,
+                "reason": decision.reason,
+                "financial": decision.properties.financial,
+            },
+            approval_timeout_minutes=engine.policies.get(connection_id).approval_timeout_minutes,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("could not record a proposal-accept case; continuing")
+
+    if awaiting or not case_id:
+        return None, case_id, awaiting
+    executed = await engine.execution.execute_case(connection_id, case_id)
+    return executed, case_id, awaiting
+
+
+class ProposalCartRequest(BaseModel):
+    connection_id: str
+    session_id: str
+    cart_id: str
+
+
+@router.get("/proposals")
+async def list_proposals(
+    connection_id: str,
+    session_id: str,
+    cart_id: str,
+    key=Depends(any_key),
+    who: Visitor = Depends(visitor),
+) -> dict:
+    """The proposals still waiting on this shopper's decision for this cart -
+    nothing here has touched the cart yet."""
+    belongs_to(key, connection_id)
+    await _mine(who, connection_id, session_id=session_id, cart_id=cart_id)
+    pending = await db.cart_proposals.pending_for_cart(connection_id, cart_id)
+    return {"proposals": pending}
+
+
+@router.post("/proposals/{proposal_id}/reject")
+async def reject_proposal(
+    proposal_id: str,
+    req: ProposalCartRequest,
+    key=Depends(any_key),
+    who: Visitor = Depends(visitor),
+) -> dict:
+    """The shopper said no. No mutation happens - rejecting is itself the
+    entire effect, same as accepting a proposal is not itself the mutation
+    (that only happens once re-validated - see accept_proposal)."""
+    belongs_to(key, req.connection_id)
+    await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
+
+    proposal = await db.cart_proposals.get(req.connection_id, proposal_id)
+    if proposal is None or proposal["cart_id"] != req.cart_id:
+        raise HTTPException(404, "no such proposal")
+    if proposal["state"] != "PENDING":
+        raise HTTPException(409, f"that proposal is already {proposal['state'].lower()}")
+
+    await db.cart_proposals.set_state(req.connection_id, proposal_id, state="REJECTED")
+    try:
+        await shopper_events.record(
+            connection_id=req.connection_id,
+            session_id=req.session_id,
+            event_type=shopper_events.EventType.PROPOSAL_REJECTED,
+            shopper_id=await who.shopper_id_for(req.connection_id),
+            product_id=proposal.get("product_id"),
+            detail={"proposal_id": proposal_id},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("could not record proposal_rejected; continuing")
+    return {"proposal_id": proposal_id, "state": "REJECTED"}
+
+
+@router.post("/proposals/{proposal_id}/accept", response_model=ChatReply)
+async def accept_proposal(
+    proposal_id: str,
+    req: ProposalCartRequest,
+    key=Depends(any_key),
+    who: Visitor = Depends(visitor),
+) -> ChatReply:
+    """The shopper said yes. Only now does anything actually change - and
+    only after re-checking the proposal against live data, because a
+    suggestion made a few messages ago may no longer be true: the product
+    could have sold out, its price could have moved, or the proposal could
+    simply be old enough that trusting it blindly would be trusting a
+    stale guess rather than a current fact.
+    """
+    belongs_to(key, req.connection_id)
+    await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
+
+    proposal = await db.cart_proposals.get(req.connection_id, proposal_id)
+    if proposal is None or proposal["cart_id"] != req.cart_id:
+        raise HTTPException(404, "no such proposal")
+    if proposal["state"] != "PENDING":
+        raise HTTPException(409, f"that proposal is already {proposal['state'].lower()}")
+
+    adapter = engine.registry.adapter_for(req.connection_id)
+    if adapter is None:
+        raise HTTPException(404, f"unknown connection '{req.connection_id}'")
+
+    stale_reason = None
+    if db.cart_proposals.is_stale(proposal):
+        stale_reason = "it's been a while since I suggested that"
+    else:
+        try:
+            fresh = await adapter.get_product(proposal["product_id"])
+        except CommerceError:
+            fresh = None
+        if fresh is None:
+            stale_reason = "I can no longer find that product"
+        elif str(fresh.availability) == "OUT_OF_STOCK" and proposal["change_type"] in {"ADD", "REPLACE"}:
+            stale_reason = "that item just went out of stock"
+        elif (
+            proposal.get("snapshot_price")
+            and fresh.price
+            and str(fresh.price.amount) != proposal["snapshot_price"]
+        ):
+            stale_reason = "the price has changed since I suggested that"
+
+    if stale_reason:
+        await db.cart_proposals.set_state(req.connection_id, proposal_id, state="EXPIRED")
+        return ChatReply(
+            reply=f"I can't do that one anymore - {stale_reason}. Want me to look again?",
+            session_id=req.session_id,
+            case_id=None,
+            used_model=False,
+            action_taken="PROPOSE_CART_CHANGE",
+            action_summary="proposal expired at accept time",
+            awaiting_person=False,
+            cart_changed=False,
+            selected_action=None,
+            risk_outcome=None,
+        )
+
+    change_type = proposal["change_type"]
+    parameters_by_step: list[tuple[ActionType, dict]] = []
+    if change_type == "ADD":
+        params = {"chosen_product": proposal["product_id"]}
+        if proposal.get("variant_id"):
+            params["chosen_variant"] = proposal["variant_id"]
+        parameters_by_step.append((ActionType.ADD_TO_CART, params))
+    elif change_type == "REMOVE":
+        parameters_by_step.append(
+            (ActionType.REMOVE_CART_LINE, {"product_id": proposal["product_id"]})
+        )
+    elif change_type == "CHANGE_QUANTITY":
+        parameters_by_step.append(
+            (
+                ActionType.UPDATE_CART_QUANTITY,
+                {"product_id": proposal["product_id"], "quantity": proposal.get("quantity") or 1},
+            )
+        )
+    elif change_type == "REPLACE":
+        parameters_by_step.append(
+            (ActionType.REMOVE_CART_LINE, {"product_id": proposal["replaces_product_id"]})
+        )
+        add_params = {"chosen_product": proposal["product_id"]}
+        if proposal.get("variant_id"):
+            add_params["chosen_variant"] = proposal["variant_id"]
+        parameters_by_step.append((ActionType.ADD_TO_CART, add_params))
+
+    await db.cart_proposals.set_state(req.connection_id, proposal_id, state="ACCEPTED")
+    try:
+        await shopper_events.record(
+            connection_id=req.connection_id,
+            session_id=req.session_id,
+            event_type=shopper_events.EventType.PROPOSAL_ACCEPTED,
+            shopper_id=await who.shopper_id_for(req.connection_id),
+            product_id=proposal.get("product_id"),
+            detail={"proposal_id": proposal_id},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("could not record proposal_accepted; continuing")
+
+    last_executed = None
+    last_case_id = None
+    awaiting_any = False
+    step_summaries: list[str] = []
+    for step_type, step_params in parameters_by_step:
+        executed, case_id, awaiting = await _run_trusted_cart_action(
+            connection_id=req.connection_id,
+            session_id=req.session_id,
+            cart_id=req.cart_id,
+            action_type=step_type,
+            parameters=step_params,
+            rationale=f"shopper accepted proposal {proposal_id}",
+        )
+        last_case_id = case_id or last_case_id
+        if awaiting:
+            awaiting_any = True
+            step_summaries.append("a person needs to approve part of this first")
+            break
+        last_executed = executed
+        if executed is not None and executed.needs_choice:
+            # Honest, distinct case from a plain failure: the product has
+            # options (size/grind/etc) the proposal never captured, so
+            # accepting genuinely cannot finish it - a shopper adding this
+            # one directly (where the option picker already exists) is the
+            # real next step, not a retry of this same accept.
+            step_summaries.append(
+                "that item needs a size/option choice this proposal didn't "
+                "capture - add it directly so you can pick one"
+            )
+            break
+        if executed is None or not executed.succeeded:
+            step_summaries.append(executed.summary if executed else "that step could not run")
+            break
+        step_summaries.append(executed.summary)
+
+    all_succeeded = bool(parameters_by_step) and last_executed is not None and last_executed.succeeded and not awaiting_any
+
+    execution_result = {
+        "steps": step_summaries,
+        "succeeded": all_succeeded,
+    }
+    await db.cart_proposals.set_state(
+        req.connection_id,
+        proposal_id,
+        state="EXECUTED" if all_succeeded else "FAILED",
+        execution_result=execution_result,
+    )
+    if all_succeeded:
+        try:
+            await shopper_events.record(
+                connection_id=req.connection_id,
+                session_id=req.session_id,
+                event_type=shopper_events.EventType.PROPOSAL_EXECUTED,
+                shopper_id=await who.shopper_id_for(req.connection_id),
+                product_id=proposal.get("product_id"),
+                detail={"proposal_id": proposal_id},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("could not record proposal_executed; continuing")
+
+    if awaiting_any:
+        reply = "That change needs someone at the shop to approve first - I've passed it on."
+    elif all_succeeded:
+        reply = last_executed.shopper_summary or last_executed.summary or "Done."
+    else:
+        reply = (
+            "I couldn't finish that change. "
+            + (step_summaries[-1] if step_summaries else "")
+        ).strip()
+        if change_type == "REPLACE" and len(step_summaries) == 2:
+            # The remove half already ran before the add half failed - the
+            # honest, partial-failure case this whole endpoint has to be
+            # able to say out loud rather than pretend didn't happen.
+            reply = (
+                f"I removed the old item, but couldn't add the replacement: "
+                f"{step_summaries[-1]}"
+            )
+
+    await session_store.add_turn(
+        session_id=req.session_id,
+        connection_id=req.connection_id,
+        speaker="assistant",
+        text=reply,
+        case_id=last_case_id,
+    )
+
+    return ChatReply(
+        reply=reply,
+        session_id=req.session_id,
+        case_id=last_case_id,
+        used_model=False,
+        action_taken="PROPOSE_CART_CHANGE",
+        action_summary=execution_result["steps"][-1] if execution_result["steps"] else None,
+        awaiting_person=awaiting_any,
+        cart_changed=all_succeeded,
+        selected_action=change_type,
+        risk_outcome=None,
     )
 
 

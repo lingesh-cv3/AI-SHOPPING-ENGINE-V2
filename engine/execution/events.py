@@ -30,6 +30,13 @@ class EventType:
     REMOVE_FROM_CART = "remove_from_cart"
     CHECKOUT_STARTED = "checkout_started"
     PURCHASE_COMPLETED = "purchase_completed"
+    #: The cart-proposal lifecycle - see engine/db/models.py::CartProposal.
+    #: Each is a real, observed event (a row was created/accepted/rejected/
+    #: executed), never a model claim about what it intended to do.
+    PROPOSAL_CREATED = "proposal_created"
+    PROPOSAL_ACCEPTED = "proposal_accepted"
+    PROPOSAL_REJECTED = "proposal_rejected"
+    PROPOSAL_EXECUTED = "proposal_executed"
 
 
 async def record(

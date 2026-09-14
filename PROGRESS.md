@@ -917,7 +917,130 @@ these first:**
 
 **Not blocked:**
 
-- [ ] Smart Cart & Checkout Recovery
+- [~] **Smart Cart & Checkout Recovery** - a session built two pieces toward
+      this item, both real and running, neither cleared for `Completed.md`.
+      `value-auditor` has already run against both; the verdicts below are
+      its actual findings, not a summary softened afterward.
+
+      **Cart Intelligence.** New `ActionType.CART_INTELLIGENCE`
+      (`shared/models/action.py`, non-financial/reversible) computes findings
+      from the real cart plus a fresh live re-fetch of every line's product
+      data plus the real `ShoppingState`: duplicate lines, a line that has
+      gone out of stock since it was added, the cart total exceeding a stated
+      budget, a cart item matching a shopper-stated exclusion, and a
+      merchant-declared complementary product (`Product.compatible_with`)
+      that's missing from the cart. Pure function,
+      `engine/execution/cart_intelligence.py::analyze_cart`, wired through
+      `engine/execution/service.py` and a deterministic reply branch in
+      `engine/api/chat.py`.
+
+      First `value-auditor` pass: **THIN, sliding into NOT VALUABLE** - as
+      first built this was a pure Q&A panel, CLAUDE.md's own named
+      anti-pattern (answers a question, attaches to no action, no figure
+      moves). **Fixed the same session**: `CART_INTELLIGENCE`'s execution now
+      auto-creates a real, pending, acceptable `CartProposal` (see below) for
+      its most actionable finding - a missing declared complement - in the
+      same turn, and the reply says so ("I've put together a suggestion to
+      add it - see Suggestions to accept or skip it"). Live-verified after
+      the fix: a real proposal was created, listed, and accepted end to end.
+      **This fix has not itself been re-submitted to `value-auditor`** - the
+      specific gap it was flagged for has a real, verified fix in place, but
+      that is not the same claim as the capability now clearing the bar.
+
+      **Cart Proposals.** New `ActionType.PROPOSE_CART_CHANGE` whose entire
+      execution effect is writing a `CartProposal` row (`engine/db/models.py`,
+      `engine/db/cart_proposals.py`) - it never itself mutates the cart.
+      Lifecycle: `PENDING` -> `ACCEPTED`/`REJECTED`/`EXPIRED`, `ACCEPTED` ->
+      `EXECUTED`/`FAILED`. Three new routes in `engine/api/chat.py`:
+      `GET /api/chat/proposals` (list pending), `POST
+      /api/chat/proposals/{id}/reject` (marks rejected, no mutation), `POST
+      /api/chat/proposals/{id}/accept` (re-validates against live data -
+      staleness by age, a fresh product fetch, a price-change check - then
+      converts to a real `ADD_TO_CART`/`REMOVE_CART_LINE`/
+      `UPDATE_CART_QUANTITY`, or a sequential remove-then-add for a
+      replacement, run through the identical Decision Engine + Risk Gate +
+      `execute_case` pipeline the existing tap-execution route already uses -
+      confirmed twice by `invariant-guard`, both SAFE). New events
+      `PROPOSAL_CREATED`/`ACCEPTED`/`REJECTED`/`EXECUTED`
+      (`engine/execution/events.py`). Storefront:
+      `storefront/src/ProposalsPanel.tsx`, wired into `App.tsx` above the Cart
+      panel with real Accept/No-thanks buttons calling the real endpoints.
+      Two new Playwright tests (`storefront/tests/proposals.spec.ts`, both
+      passing) confirm accept actually changes the real Cart panel's line/
+      total and reject does not - driven by a new tracked helper
+      (`scripts/make_test_proposal.py`, same pattern as the existing
+      `scripts/legacy_account.py`) that creates a proposal directly, because
+      the model does not reliably choose `PROPOSE_CART_CHANGE` for a given
+      phrasing (see the open gap below) - so the browser tests exercise the
+      accept/reject half, not the "shopper asks -> model proposes" half.
+
+      A genuine mid-session regression was found and fixed: a live-model
+      healthcheck run showed the model sometimes chooses
+      `PROPOSE_CART_CHANGE` instead of `ADD_TO_CART` for a plain "add X"
+      message, and `PROPOSE_CART_CHANGE` had not been added to the
+      `CART_MUTATING` guard set in `engine/execution/service.py`, so a
+      proposal could be created against an already-paid cart with no honest
+      refusal. Fixed by adding it to that set. `invariant-guard` confirmed
+      the underlying invariant (a paid cart cannot be mutated) was never
+      actually at risk - `accept_proposal` always re-validates through the
+      same paid-cart-checking dispatch regardless - this was a UX/honesty fix
+      (an unactionable dangling suggestion on a cart that can't change), not
+      a security hole. A second real gap was found and fixed the same way:
+      the model does not always supply `proposal_change_type` even when it
+      clearly intends a proposal (live-reproduced) - `service.py` now infers
+      ADD (or REPLACE if a `proposal_replaces_product_id` was given) rather
+      than failing the proposal outright. A genuine limitation was surfaced
+      honestly rather than hidden: accepting a proposal for a product that
+      needs a variant/size choice the proposal never captured returns a
+      specific message telling the shopper to add it directly instead, not a
+      generic failure or a silent false success.
+
+      `value-auditor` verdict on Cart Proposals: **DEMO-GRADE, not
+      VALUABLE.** The accept/reject/execute half is solid, invariant-clean,
+      real, browser-tested engineering. Two gaps are open and unfixed:
+
+      1. **No figure moves.** `PROPOSAL_*` events are recorded but nothing in
+         the merchant report or ops stats aggregates or displays them - the
+         value bar's "what number moves" question is not satisfied.
+      2. **The model does not reliably choose `PROPOSE_CART_CHANGE` from a
+         normal, unassisted shopper message.** Confirmed by direct testing -
+         phrasing that should trigger a proposal sometimes gets
+         `SUGGEST_COMPLEMENTARY` or another action instead. The Playwright
+         tests only exercise the downstream accept/reject half via a
+         directly-inserted test proposal; the real end-to-end "shopper asks
+         -> model proposes -> row appears" path has never been confirmed
+         reliable.
+
+      **Verification this session:** `invariant-guard` SAFE across three
+      separate passes (the original cart-intelligence/proposals diff, and
+      the `CART_MUTATING` fix on top). `healthcheck.py`: 114 passed / 2
+      FAILED, both pre-existing documented classes (the days=1-window
+      abandoned-cart timing artifact; the Kettle recovery `why()`
+      model-variance flake) - not new. The "replaces the model's reply
+      rather than appending a failure to it" check now passes (it was
+      failing before the `CART_MUTATING` fix, in the same session).
+      `fuzz.py`: every invariant held (exit 0). `auditroutes.py`: every
+      locked route, shopper-scoping, and public-route check passed. Two new
+      Playwright tests added and passing. `npm run build`/`npm run lint`:
+      clean, 0 new errors against the existing baseline.
+
+      **Neither piece moves to `Completed.md`.** Cart Intelligence's
+      anti-pattern fix is real but unaudited; Cart Proposals is demo-grade
+      with two named, unfixed gaps (no report figure, unreliable model
+      trigger). Whoever picks this up next should wire `PROPOSAL_*` into a
+      merchant-visible figure and improve the model's trigger reliability
+      (prompt work or a deterministic fallback rule) before requesting
+      another `value-auditor` pass.
+
+      Explicitly not attempted this session: full Merchant/Ops-console
+      integration of the new `PROPOSAL_*` events into any dashboard (the
+      events are recorded and correctly tenant/shopper-scoped, but nothing
+      reads them into a report yet - the same gap named above); a full
+      formal multi-journey test matrix assembled as one documented pass
+      (individual pieces were live-verified via targeted HTTP tests and the
+      two Playwright tests, not assembled into one 11-journey run); load/
+      real-volume testing at a larger catalogue size for these two specific
+      capabilities.
 
 ### Merchant — Initial Priorities
 

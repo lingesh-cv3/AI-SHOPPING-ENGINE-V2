@@ -13,6 +13,7 @@ from .models import (
     ApiKey,
     Approval,
     Base,
+    CartProposal,
     Case,
     ExecutionAttempt,
     FunnelEvent,
@@ -79,6 +80,11 @@ from . import owners
 from . import shopping_state
 from . import memory_facts
 
+# The cart-proposal layer: model suggestion -> stored proposal -> shopper
+# approval -> execution. Imported after the models/session for the same
+# reason as the modules above.
+from . import cart_proposals
+
 __all__ = [
     "ApiKey",
     "Approval",
@@ -136,4 +142,6 @@ __all__ = [
     "ShopperEvent",
     "shopping_state",
     "memory_facts",
+    "CartProposal",
+    "cart_proposals",
 ]
