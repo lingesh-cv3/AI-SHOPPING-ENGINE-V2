@@ -1026,6 +1026,203 @@ async def product_performance(
     }
 
 
+#: Below this many completed orders in EITHER window, a percentage change
+#: is arithmetic noise, not a business signal - two orders becoming one is
+#: a "50% drop" that means nothing. Diagnosis explicitly says so rather
+#: than naming a cause for a swing this small.
+_MIN_ORDERS_FOR_DIAGNOSIS = 10
+
+#: A change smaller than this (in percentage points for a rate, or percent
+#: for a count) is treated as noise, not a real deterioration/improvement -
+#: avoids naming a "cause" for a 2% wobble.
+_MIN_MEANINGFUL_CHANGE_PCT = 10.0
+
+
+async def business_diagnosis(connection_id: str, *, days: int = 7) -> dict:
+    """Evidence-backed diagnosis of what changed and why - never "sales are
+    down" alone, and never a cause invented by the model. Every number here
+    already exists and is already shown elsewhere in the Merchant console
+    (`checkout_conversion`, `product_performance`) - this function's only
+    job is to compare the SAME real deltas against each other and name
+    which one moved the most, deterministically, so the model (if asked to
+    explain this in the Copilot) has real evidence to narrate rather than
+    a blank page to guess into.
+
+    Contributing factors considered, all real, all already computed
+    elsewhere in this file:
+    - order count (a real completed-order delta - the "did business
+      actually change" headline, more robust to price-mix noise than
+      revenue alone)
+    - cart creation ("traffic" proxy - the only visit-adjacent signal this
+      engine has, per `checkout_conversion`'s own scope_note)
+    - cart-to-checkout rate (how many carts ever reached a checkout attempt)
+    - checkout success rate (of attempts, how many actually completed)
+    - per-product revenue movers (`product_performance`'s own
+      `revenue_change_pct`, already computed)
+
+    The "primary factor" is whichever real delta has the largest magnitude
+    among the ones that clear a minimum-change and minimum-volume floor -
+    never an LLM's arbitrary pick, and never asserted as proven causation,
+    only as "the largest concurrent change" (a correlation, stated as one).
+    `confidence` is "insufficient_data" below the order-count floor, and
+    "low"/"medium" otherwise depending on how far above that floor the
+    window sits - this project has no experiment/holdout infrastructure
+    behind this specific comparison, so "high" is never used here (that
+    word is reserved for `holdout_status`'s own, differently-evidenced
+    comparison).
+    """
+    conv = await checkout_conversion(connection_id, days=days, compare=True)
+    perf = await product_performance(connection_id, days=days, limit=5, compare=True)
+
+    prior_conv = conv.get("prior") or {}
+    current_orders = conv.get("completed_orders", 0)
+    prior_orders = prior_conv.get("completed_orders", 0)
+    current_carts = conv.get("carts_created", 0)
+    prior_carts = prior_conv.get("carts_created", 0)
+
+    if not conv.get("funnel_has_history") or (current_orders == 0 and prior_orders == 0):
+        return {
+            "days": days,
+            "has_sufficient_data": False,
+            "reason": "No completed-order history in either window yet.",
+            "direction": None,
+            "factors": [],
+            "confidence": "insufficient_data",
+        }
+
+    if max(current_orders, prior_orders) < _MIN_ORDERS_FOR_DIAGNOSIS:
+        return {
+            "days": days,
+            "has_sufficient_data": False,
+            "reason": (
+                f"Only {current_orders} completed order(s) this window and "
+                f"{prior_orders} the window before - too few to attribute a "
+                f"change to any specific cause without the swing being pure "
+                f"arithmetic noise."
+            ),
+            "direction": None,
+            "factors": [],
+            "confidence": "insufficient_data",
+            "current_orders": current_orders,
+            "prior_orders": prior_orders,
+        }
+
+    orders_change_pct = _pct_change(Decimal(current_orders), Decimal(prior_orders))
+    carts_change_pct = _pct_change(Decimal(current_carts), Decimal(prior_carts))
+
+    current_cart_rate = conv.get("cart_to_checkout_rate")
+    prior_cart_rate = prior_conv.get("cart_to_checkout_rate")
+    cart_rate_delta_pp = (
+        round(current_cart_rate - prior_cart_rate, 1)
+        if current_cart_rate is not None and prior_cart_rate is not None
+        else None
+    )
+
+    current_success_rate = conv.get("checkout_success_rate")
+    prior_success_rate = prior_conv.get("checkout_success_rate")
+    success_rate_delta_pp = (
+        round(current_success_rate - prior_success_rate, 1)
+        if current_success_rate is not None and prior_success_rate is not None
+        else None
+    )
+
+    if orders_change_pct is not None:
+        direction = "down" if orders_change_pct < 0 else "up" if orders_change_pct > 0 else "flat"
+    elif prior_orders == 0 and current_orders > 0:
+        # _pct_change returns None for a zero prior value specifically to
+        # avoid a fabricated percentage - "flat" would be an equally false
+        # claim here (nothing about zero-to-something is "unchanged").
+        direction = "new"
+    else:
+        direction = "flat"
+
+    candidates: list[dict] = []
+    if carts_change_pct is not None and abs(carts_change_pct) >= _MIN_MEANINGFUL_CHANGE_PCT:
+        candidates.append({
+            "factor": "cart_creation",
+            "label": "How many carts were started (traffic proxy)",
+            "delta": carts_change_pct,
+            "unit": "pct",
+            "evidence": f"{prior_carts} carts -> {current_carts} carts",
+        })
+    if cart_rate_delta_pp is not None and abs(cart_rate_delta_pp) >= _MIN_MEANINGFUL_CHANGE_PCT / 2:
+        candidates.append({
+            "factor": "cart_to_checkout_rate",
+            "label": "How many carts ever reached a checkout attempt",
+            "delta": cart_rate_delta_pp,
+            "unit": "points",
+            "evidence": f"{prior_cart_rate}% -> {current_cart_rate}%",
+        })
+    if success_rate_delta_pp is not None and abs(success_rate_delta_pp) >= _MIN_MEANINGFUL_CHANGE_PCT / 2:
+        candidates.append({
+            "factor": "checkout_success_rate",
+            "label": "How many checkout attempts actually completed",
+            "delta": success_rate_delta_pp,
+            "unit": "points",
+            "evidence": f"{prior_success_rate}% -> {current_success_rate}%",
+        })
+
+    worst_product = None
+    for row in perf.get("top_by_revenue", []) + perf.get("lowest_performers", []):
+        change = row.get("revenue_change_pct")
+        if change is None:
+            continue
+        if worst_product is None or change < worst_product["delta"]:
+            worst_product = {
+                "factor": "product_revenue",
+                "label": f"{row['product_name']} revenue",
+                "delta": change,
+                "unit": "pct",
+                "evidence": f"{row['revenue_prior']} -> {row['revenue']}",
+                "product_id": row["product_id"],
+            }
+    if worst_product and worst_product["delta"] <= -_MIN_MEANINGFUL_CHANGE_PCT:
+        candidates.append(worst_product)
+
+    primary = None
+    if candidates:
+        # Normalized comparison across mixed units (percent vs. percentage
+        # points) is not defensible to two decimal places - this only picks
+        # the largest-MAGNITUDE mover among real, already-computed deltas
+        # that already cleared their own meaningful-change floor above, so
+        # "largest" here means "furthest past the floor it needed to clear
+        # to be named a candidate at all", not a precise cross-unit ranking.
+        primary = max(candidates, key=lambda c: abs(c["delta"]))
+
+    confidence = (
+        "medium" if min(current_orders, prior_orders) >= _MIN_ORDERS_FOR_DIAGNOSIS * 3
+        else "low"
+    )
+
+    return {
+        "days": days,
+        "has_sufficient_data": True,
+        "direction": direction,
+        "current_orders": current_orders,
+        "prior_orders": prior_orders,
+        "orders_change_pct": orders_change_pct,
+        "primary_factor": primary,
+        "all_factors": candidates,
+        "confidence": confidence,
+        "note": (
+            "Correlation, not proven causation: this names whichever real "
+            "figure moved the most alongside the order-count change in the "
+            "same window - it does not run a controlled comparison, so it "
+            "cannot prove the named factor caused the change (see Holdout "
+            "for the one comparison in this product that can defensibly "
+            "claim a causal effect)."
+        ) if primary else (
+            "The prior window has no completed orders to compare against, "
+            "so this is new activity rather than a measurable change from a "
+            "baseline - nothing to attribute a cause to yet."
+        ) if direction == "new" else (
+            "No individual factor's change was large enough, on its own, to "
+            "single out as the primary driver - the order-count change may "
+            "be broad-based rather than attributable to one measured factor."
+        ),
+    }
+
+
 async def sales_period_comparison(connection_id: str, *, days: int = 7) -> dict:
     """Total completed sales in the most recent window versus the window
     immediately before it, reusing `total_sales`'s own days-window pattern

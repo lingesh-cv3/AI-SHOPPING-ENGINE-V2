@@ -52,6 +52,7 @@ def analyze_cart(
     findings.extend(_budget_check(cart, shopping_state))
     findings.extend(_exclusion_conflicts(cart, products_by_id, shopping_state))
     findings.extend(_missing_complements(cart, products_by_id))
+    findings.extend(_return_risk(cart, products_by_id))
 
     return findings
 
@@ -161,6 +162,43 @@ def _exclusion_conflicts(
                     )
                 )
                 break
+    return out
+
+
+#: Same threshold/reasoning as engine/execution/return_risk.py - kept as an
+#: independent constant rather than importing a private module constant,
+#: since this operates on real Product objects, not the dict shape
+#: return_risk.assess_product expects (the recommendation/comparison
+#: payloads this list came from are plain dicts; a cart's fetched products
+#: are the real pydantic Product model).
+_MIN_RATING_COUNT_FOR_SIGNAL = 15
+_LOW_RATING_THRESHOLD = 3.7
+
+
+def _return_risk(cart: Cart, products_by_id: dict[str, Product]) -> list[CartFinding]:
+    """A real, evidence-grounded pre-purchase friction signal for something
+    already in the cart - a numerically low rating, from the platform's own
+    declared rating/rating_count, never invented. Never a claim about this
+    product's actual return history (no such data exists in this system -
+    see return_risk.py's own module docstring for why)."""
+    out = []
+    for line in cart.lines:
+        product = products_by_id.get(line.product_id)
+        if product is None or product.rating is None:
+            continue
+        count = product.rating_count or 0
+        if count >= _MIN_RATING_COUNT_FOR_SIGNAL and product.rating < _LOW_RATING_THRESHOLD:
+            out.append(
+                CartFinding(
+                    kind="return_risk",
+                    message=(
+                        f"{line.title} has a lower customer rating "
+                        f"({product.rating}/5 from {count} reviews) - worth a "
+                        f"second look before you check out."
+                    ),
+                    product_ids=[line.product_id],
+                )
+            )
     return out
 
 

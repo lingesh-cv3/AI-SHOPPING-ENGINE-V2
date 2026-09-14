@@ -194,6 +194,26 @@ into one vague answer:
   Any such request is answered by pointing the merchant to the "Approve" / "Reject"
   buttons in their Payments & Checkout panel - there is no path from this
   conversation to executing money movement, by design.
+- `business_diagnosis` answers "what changed" / "why did sales change" / "why is
+  business down" questions. It is a deterministic comparison already computed for
+  you - you explain the evidence it contains, you do NOT invent your own cause.
+  `has_sufficient_data: false` means too few completed orders exist in either
+  window to say anything - answer honestly that there isn't enough order history
+  yet, using the `reason` field, rather than guessing at a cause anyway.
+  When `has_sufficient_data` is true: `direction` (up/down/flat) and
+  `orders_change_pct` are the real headline; `primary_factor` (when present) names
+  the one real figure - cart creation, cart-to-checkout rate, checkout success
+  rate, or a specific product's revenue - that moved the most alongside it, with
+  its own real evidence numbers in `evidence`. State this as what it is: a
+  correlation ("orders fell 18% while checkout success rate fell 12 points in the
+  same window"), never as proven causation ("the checkout success rate drop
+  caused the sales decline") - the `note` field says this explicitly, repeat that
+  caveat rather than dropping it. When `primary_factor` is null, say plainly that
+  no single factor's change was large enough to name as the driver, rather than
+  picking one anyway. `confidence` is always "low" or "medium" here, never "high"
+  - if asked how confident this is, say so and point to Holdout for the one
+  comparison in this product that can defensibly claim a causal, high-confidence
+  effect.
 
 A question like "what can this site do" or "what are your capabilities" is answered from
 the platform-capabilities and action-types data, not brushed off as unanswerable - that
@@ -238,6 +258,7 @@ async def ask(
     product_performance: dict | None = None,
     sales_period_comparison: dict | None = None,
     checkout_conversion: dict | None = None,
+    business_diagnosis: dict | None = None,
 ) -> CopilotReply:
     """Answer one question about one merchant's store.
 
@@ -305,7 +326,7 @@ async def ask(
         report, pending, capabilities, policy, rules, actions,
         catalog_alerts, unmet_demand, product_performance,
         sales_period_comparison, question, payment_recovery,
-        checkout_conversion,
+        checkout_conversion, business_diagnosis,
     )
     return await _complete(SYSTEM_PROMPT, context)
 
@@ -362,6 +383,7 @@ def _build_context(
     question: str,
     payment_recovery: dict | None = None,
     checkout_conversion: dict | None = None,
+    business_diagnosis: dict | None = None,
 ) -> str:
     """The merchant's real figures and settings, as the model's entire world for this turn.
 
@@ -429,6 +451,9 @@ def _build_context(
         ),
         "checkout_conversion_funnel": (
             checkout_conversion if checkout_conversion is not None else "not supplied this turn"
+        ),
+        "business_diagnosis": (
+            business_diagnosis if business_diagnosis is not None else "not supplied this turn"
         ),
     }
     return (

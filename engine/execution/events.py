@@ -37,6 +37,11 @@ class EventType:
     PROPOSAL_ACCEPTED = "proposal_accepted"
     PROPOSAL_REJECTED = "proposal_rejected"
     PROPOSAL_EXECUTED = "proposal_executed"
+    #: A real, evidence-grounded return-risk finding was shown to the
+    #: shopper - see engine/execution/return_risk.py. Recorded so a future
+    #: pass could measure whether shoppers who saw a flag chose the safer
+    #: alternative more often - not measured by this pass itself.
+    RETURN_RISK_FLAGGED = "return_risk_flagged"
 
 
 async def record(

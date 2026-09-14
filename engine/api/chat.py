@@ -37,6 +37,7 @@ from engine import db
 from engine import session as session_store
 from engine.execution import events as shopper_events
 from engine.execution import mission_ranking
+from engine.execution import return_risk
 from engine.reasoning import cart_intent, explicit_extraction
 from engine.notify import confirm_order
 from shared.models import CommerceError
@@ -950,6 +951,35 @@ async def _process_turn(
                     reasons = fit_reasons.get(p.get("product_id"))
                     if reasons:
                         p["fit"] = reasons
+                    # Real, grounded pre-purchase friction signals - never a
+                    # claim about this product's actual return history (no
+                    # such data exists anywhere in this system). Advisory
+                    # only: never removes a product from the shortlist,
+                    # never blocks anything.
+                    risk_findings = return_risk.assess_product(
+                        p, shopping_state, catalog_sample=products
+                    )
+                    if risk_findings:
+                        p["return_risk"] = [
+                            {
+                                "kind": f.kind,
+                                "evidence_type": f.evidence_type,
+                                "message": f.message,
+                                "safer_alternative_id": f.safer_alternative_id,
+                            }
+                            for f in risk_findings
+                        ]
+                        try:
+                            await shopper_events.record(
+                                connection_id=req.connection_id,
+                                session_id=req.session_id,
+                                event_type=shopper_events.EventType.RETURN_RISK_FLAGGED,
+                                shopper_id=shopper_id,
+                                product_id=p.get("product_id"),
+                                detail={"kinds": [f.kind for f in risk_findings]},
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.exception("could not record return_risk_flagged; continuing")
                 # The catalog had real matches, but every one of them was
                 # ruled out by a hard constraint (an exclusion, or over
                 # budget) - a different, honest situation from "the catalog
@@ -973,6 +1003,18 @@ async def _process_turn(
         found_comparison = executed.payload.get("comparison")
         if isinstance(found_comparison, list):
             comparison = found_comparison
+            for c in comparison:
+                findings = return_risk.assess_product(c, shopping_state, catalog_sample=comparison)
+                if findings:
+                    c["return_risk"] = [
+                        {
+                            "kind": f.kind,
+                            "evidence_type": f.evidence_type,
+                            "message": f.message,
+                            "safer_alternative_id": f.safer_alternative_id,
+                        }
+                        for f in findings
+                    ]
             if comparison:
                 try:
                     await shopper_events.record(

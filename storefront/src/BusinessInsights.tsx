@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   console_api,
+  type BusinessDiagnosis,
   type CatalogAlerts,
   type Conversion,
   type MerchantReport as Report,
@@ -40,9 +41,10 @@ export function BusinessInsights({
       console_api.conversion().catch(() => null),
       console_api.productPerformance(30, 10).catch(() => null),
       console_api.unmetDemand(30, 5).catch(() => null),
+      console_api.businessDiagnosis(7).catch(() => null),
     ])
-      .then(([report, catalog, conversion, products, demand]) => {
-        setInsights(buildInsights(report, catalog, conversion, products, demand));
+      .then(([report, catalog, conversion, products, demand, diagnosis]) => {
+        setInsights(buildInsights(report, catalog, conversion, products, demand, diagnosis));
         setError(null);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Could not build insights."));
@@ -124,8 +126,26 @@ function buildInsights(
   conversion: Conversion | null,
   products: Performance | null,
   demand: UnmetDemand | null,
+  diagnosis: BusinessDiagnosis | null,
 ): Insight[] {
   const insights: Insight[] = [];
+
+  // Evidence-backed "what changed and why" - a real, deterministic
+  // comparison, never asserted as proven causation (see the `note` field
+  // this always carries, shown verbatim as the evidence line).
+  if (diagnosis?.has_sufficient_data && diagnosis.primary_factor) {
+    const f = diagnosis.primary_factor;
+    const dirWord = diagnosis.direction === "down" ? "fell" : diagnosis.direction === "up" ? "rose" : "changed";
+    insights.push({
+      text: `Completed orders ${dirWord} this week, most closely tracking a change in ${f.label.toLowerCase()}.`,
+      evidence: `${f.evidence} (${diagnosis.note ?? "correlation, not proven causation"})`,
+    });
+  } else if (diagnosis?.has_sufficient_data && diagnosis.direction === "down") {
+    insights.push({
+      text: "Completed orders fell this week, but no single measured factor's change was large enough to name as the likely driver.",
+      evidence: `${diagnosis.prior_orders} orders -> ${diagnosis.current_orders} orders`,
+    });
+  }
 
   if (report.supports_payment_recovery && report.recovery_opportunities > 0) {
     const pending = report.recovery_opportunities - report.recovery_count;

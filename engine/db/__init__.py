@@ -29,6 +29,7 @@ from .models import (
     ShopperEvent,
 )
 from .repository import (
+    business_diagnosis,
     cart_proposal_activity,
     checkout_conversion,
     decide_approval,
@@ -132,6 +133,7 @@ __all__ = [
     "daily_revenue_series",
     "checkout_conversion",
     "cart_proposal_activity",
+    "business_diagnosis",
     "FunnelEvent",
     "record_funnel_event",
     "MerchantTask",

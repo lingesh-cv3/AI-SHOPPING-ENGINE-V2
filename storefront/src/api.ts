@@ -975,6 +975,15 @@ export const console_api = {
       `/api/cart-proposals/${getConnection()}?days=${days}`,
     ),
 
+  /** Evidence-backed diagnosis of what changed and why - a deterministic
+   *  comparison of real figures already shown elsewhere in this console,
+   *  never a model-invented cause. See BusinessDiagnosis's own fields for
+   *  what "not enough data yet" and "no single factor" look like. */
+  businessDiagnosis: (days = 7) =>
+    merchantCall<BusinessDiagnosis>(
+      `/api/diagnosis/${getConnection()}?days=${days}`,
+    ),
+
   askCopilot: (question: string) =>
     merchantCall<CopilotAnswer>(`/api/copilot/${getConnection()}`, {
       method: "POST",
@@ -1170,6 +1179,34 @@ export interface CartProposalActivity {
   executed: number;
   acceptance_rate: number | null;
   most_suggested_products: { product_id: string; times_suggested: number }[];
+}
+
+/** A single real, already-computed factor whose change moved alongside the
+ *  order-count change this window - a correlation, never asserted as the
+ *  proven cause. */
+export interface DiagnosisFactor {
+  factor: string;
+  label: string;
+  delta: number;
+  unit: "pct" | "points";
+  evidence: string;
+  product_id?: string;
+}
+
+/** Evidence-backed diagnosis of what changed and why - see
+ *  db.business_diagnosis's own docstring for the full reasoning. */
+export interface BusinessDiagnosis {
+  days: number;
+  has_sufficient_data: boolean;
+  reason?: string;
+  direction: "up" | "down" | "flat" | "new" | null;
+  current_orders?: number;
+  prior_orders?: number;
+  orders_change_pct?: number | null;
+  primary_factor?: DiagnosisFactor | null;
+  all_factors?: DiagnosisFactor[];
+  confidence: "insufficient_data" | "low" | "medium";
+  note?: string;
 }
 
 export interface MerchantReport {

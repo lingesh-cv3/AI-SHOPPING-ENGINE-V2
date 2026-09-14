@@ -723,6 +723,22 @@ async def cart_proposal_activity_route(
     return await db.cart_proposal_activity(connection_id, days=days)
 
 
+@app.get(f"{API}/diagnosis/{{connection_id}}")
+async def business_diagnosis_route(
+    connection_id: str,
+    days: int = 7,
+    _=Depends(merchant_scoped()),
+) -> dict:
+    """Evidence-backed diagnosis of what changed and why - real deltas
+    already shown elsewhere in this console (checkout_conversion,
+    product_performance), compared deterministically against each other.
+    Never a model-invented cause; see db.business_diagnosis's own
+    docstring for exactly what "primary_factor" does and does not claim.
+    """
+    _adapter(connection_id)
+    return await db.business_diagnosis(connection_id, days=days)
+
+
 @app.get(f"{API}/products/{{connection_id}}")
 async def product_performance_route(
     connection_id: str,
@@ -1005,6 +1021,7 @@ async def merchant_copilot(
         product_performance=await db.product_performance(connection_id, days=30),
         sales_period_comparison=await db.sales_period_comparison(connection_id, days=7),
         checkout_conversion=await db.checkout_conversion(connection_id, days=30),
+        business_diagnosis=await db.business_diagnosis(connection_id, days=7),
     )
     return CopilotAnswer(answer=reply.answer, used_model=reply.used_model)
 

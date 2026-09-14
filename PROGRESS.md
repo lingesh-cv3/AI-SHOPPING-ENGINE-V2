@@ -917,6 +917,128 @@ these first:**
 
 **Not blocked:**
 
+- [~] **Return-Risk Prevention - implemented, integrated, live-verified;
+      NOT yet independently value-audited.** New `engine/execution/
+      return_risk.py::assess_product` computes two kinds of real,
+      evidence-grounded pre-purchase friction signal - never a claim about
+      actual return history, because no return/RMA data model exists
+      anywhere in this codebase (see the module's own docstring): (1)
+      `low_rating` (`known_fact`) - a real, platform-declared `rating`
+      below 3.7 with at least 15 reviews to be meaningful, optionally
+      naming a real, same-category, in-stock, better-rated alternative
+      from the same already-fetched result set; (2) `unconfirmed_
+      requirement` (`inferred_concern`) - reuses `mission_ranking`'s
+      already-shipped "related-but-not-equivalent" logic (the "waterproof"
+      vs "water-resistant" distinction already used for exclusions),
+      applied here to a shopper's *positive* stated requirement instead.
+      Wired into `RECOMMEND_PRODUCTS`/`COMPARE_PRODUCTS` reply payloads
+      (`engine/api/chat.py`) as an additive `return_risk` key per product -
+      never removes a product, never blocks a purchase - and into
+      `cart_intelligence.py` for the low-rating check on products already
+      in the cart. A new `ShopperEvent` type `RETURN_RISK_FLAGGED` records
+      when a finding was shown. `invariant-guard`: SAFE (confirmed
+      advisory-only, no fabrication - every message field traces to a real
+      product field or the shopper's own stated words, no cross-catalog
+      invention for the safer-alternative suggestion, no new execution/
+      risk-gate surface). Live-verified against the real Northfield
+      catalog, not a synthetic fixture: a real 3.6-rated product (Cork
+      Massage Ball, 82 reviews) correctly flagged; a real "water-resistant"
+      product (Winter Road Shoe) correctly flagged as an inferred concern
+      against a shopper who stated "waterproof" mattered, while three
+      other real shoes with no such conflict were correctly left
+      unflagged. `healthcheck.py` 115/116 (the one failure is the
+      long-documented, unrelated Kettle recovery `why()` model-variance
+      flake), `fuzz.py` 20/20 sequences/1200 assertions every invariant
+      held, `auditroutes.py` clean - none of the three suites touch this
+      feature directly, but none regressed either.
+
+      **Not moved to Completed.md**: a dedicated `value-auditor` pass was
+      started for this feature and did not complete (hit a session rate
+      limit mid-run) - do not treat the description above as an
+      independent VALUABLE verdict, it is this session's own direct
+      testing only. Also genuinely unintegrated per the original spec:
+      cart-proposal and checkout-continuity integration (points 8/9 of the
+      original ask) were not attempted - the finding is currently visible
+      only in the recommend/compare/cart-intelligence surfaces, not
+      threaded into a `PROPOSE_CART_CHANGE` proposal's own evidence or the
+      checkout-continuity reply. Re-run `value-auditor` and close those two
+      integration points before considering this complete.
+
+- [~] **AI Store Diagnosis (Merchant) - implemented, integrated, live-
+      verified; NOT yet independently value-audited.** New `engine/db/
+      repository.py::business_diagnosis(connection_id, days=7)` - a purely
+      deterministic function (no model call in the computation itself)
+      that compares real current-vs-prior-window figures ALREADY produced
+      by the existing, already-verified `checkout_conversion(compare=True)`
+      and `product_performance(compare=True)` (completed orders, cart
+      creation, cart-to-checkout rate, checkout success rate, per-product
+      revenue) and names whichever real delta is largest in magnitude as a
+      `primary_factor` - gated by a minimum-order-count floor (10) and a
+      minimum-meaningful-change floor (10%/10 points) before anything is
+      named, explicitly labeled correlation and never causation (an
+      always-present `note` field says so). Exposed via `GET /api/
+      diagnosis/{connection_id}` (`merchant_scoped()`-gated, identical
+      pattern to `/api/report`). Wired into the Merchant Copilot
+      (`engine/copilot/service.py` - new system-prompt rule instructing
+      the model to explain the already-computed evidence, never invent a
+      cause, and never claim more than "low"/"medium" confidence - "high"
+      is reserved for Holdout's differently-evidenced comparison) and into
+      the existing deterministic "Business Insights" synthesis panel
+      (`storefront/src/BusinessInsights.tsx`). `invariant-guard`: SAFE
+      (read-only, no new write path, every number traced to an existing
+      already-correct repository function's own output, the primary-factor
+      floors genuinely gate before naming anything, no PII in the
+      payload). Live-verified against real data on Northfield: correctly
+      returned `has_sufficient_data: false` with an honest reason at low
+      order volume; correctly distinguished `direction: "new"` (zero prior
+      orders) from a fabricated "flat" (a real bug found and fixed this
+      same session); correctly named a real primary factor (cart_creation,
+      125->656 carts, +424.8%) when one cleared the threshold at a
+      one-day window; correctly returned no factor with an honest note at
+      a wider window where nothing cleared it. The Merchant Copilot, asked
+      live "Why did my sales change this week? What is the evidence?",
+      answered using the real diagnosis data verbatim ("there isn't enough
+      data to attribute this change to a specific cause... considered new
+      activity rather than a measurable change from a baseline... The
+      confidence in this observation is low") rather than inventing a
+      cause. A real Playwright browser test (`storefront/tests/
+      business-diagnosis.spec.ts`) confirms the Business Insights panel
+      loads real data without erroring. `healthcheck.py`/`fuzz.py`/
+      `auditroutes.py` all re-run clean, unrelated to this addition.
+
+      **Not moved to Completed.md**, same reason as Return-Risk Prevention
+      above: the dedicated `value-auditor` pass for this feature did not
+      complete (session rate limit). Also genuinely unbuilt per the
+      original ask: Merchant C (Opportunity/Risk prioritization), D (the
+      full actionable-intelligence loop with a MerchantTask/action
+      attached to a diagnosis), E (Holdout/incrementality completion
+      beyond what already existed), F (ROI measurement), and I (Returns
+      intelligence) were not attempted this session - see the "Explicitly
+      not attempted this session" note below for why.
+
+**Explicitly not attempted this session** (the original request asked for
+essentially the entire remaining Shopper and Merchant roadmap in one pass;
+after confirming the real current state, most of Merchant A/C/D/E/F/G/H/I/J
+turned out to already be substantially built in earlier sessions - Merchant
+Copilot, the dashboard rebuild, and the `_scan_catalog` real-volume fix are
+all already in Completed.md - and the remaining genuinely-unstarted roadmap
+items (AI Store Diagnosis, Recovery Opportunity Radar, Catalog Intelligence,
+Inventory Intelligence from the roadmap list a few lines below) were
+triaged by value/effort rather than attempted exhaustively, per the user's
+own explicit choice when asked how to proceed on a scope this size):
+- Shopper Proactive Assistance, Multimodal, and a full Shopper UI redesign -
+  none attempted; the first needs a deterministic eligibility/suppression
+  design of its own scope, the second has no vision infrastructure to build
+  from (confirmed again this session - no image-capable model client, no
+  image upload path anywhere in this codebase), the third was not found to
+  be architecturally necessary by anything discovered this session.
+- Recovery Opportunity Radar, Catalog Intelligence (deeper than the already-
+  fixed real-volume alert scan), Inventory Intelligence, deep Customer
+  Insights (CLV/cohorts/segments - the schema still cannot support these
+  honestly), Returns Intelligence (no adapter declares a returns
+  capability, unchanged), Holdout/Incrementality beyond what already
+  exists, and ROI measurement - none attempted this session.
+
 - [x] **Smart Cart & Checkout Recovery - Cart Intelligence and Cart
       Proposals, both the shopper-facing loop and the merchant-measurement
       half.** Moved to `Completed.md` in full (#49, #51). Nothing about
