@@ -707,6 +707,22 @@ async def merchant_report(
     return report
 
 
+@app.get(f"{API}/cart-proposals/{{connection_id}}")
+async def cart_proposal_activity_route(
+    connection_id: str,
+    days: int = 30,
+    _=Depends(merchant_scoped()),
+) -> dict:
+    """What the AI's cart-change suggestions actually did - how many were
+    shown, accepted, rejected, or carried out, and which products get
+    suggested most - from the real ShopperEvent rows those suggestions
+    write. Deliberately not a claim about revenue or business value; see
+    `db.cart_proposal_activity`'s own docstring for why.
+    """
+    _adapter(connection_id)
+    return await db.cart_proposal_activity(connection_id, days=days)
+
+
 @app.get(f"{API}/products/{{connection_id}}")
 async def product_performance_route(
     connection_id: str,

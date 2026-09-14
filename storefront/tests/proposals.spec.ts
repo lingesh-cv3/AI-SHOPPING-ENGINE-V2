@@ -107,4 +107,33 @@ test.describe('Cart proposals', () => {
     // one more line than before.
     await expect(page.locator('.panel .line')).toHaveCount(linesBefore + 1, { timeout: 10000 });
   });
+
+  // Unlike the two tests above, this one does NOT use make_test_proposal.py -
+  // it drives the real chat turn a shopper would type, to prove the actual
+  // gap found by an earlier value-auditor pass (the model did not reliably
+  // choose CART_INTELLIGENCE for phrasing that plainly asked about the
+  // cart) is now closed by the deterministic bridge in
+  // engine/reasoning/cart_intent.py - not just closed in a backend script,
+  // but reachable by a real shopper typing a real sentence in this UI.
+  // Costs one real Groq model call (the turn's own reasoning pass runs
+  // regardless of what the deterministic bridge adds).
+  test('a real chat question about the cart produces a real, visible suggestion', async ({ page }) => {
+    await page.goto(NORTHFIELD, { waitUntil: 'networkidle' });
+    await addFirstProduct(page);
+
+    const chatlaunch = page.locator('.chatlaunch');
+    if (await chatlaunch.isVisible()) await chatlaunch.click();
+
+    const composer = page.getByPlaceholder(/Type a message|message/i);
+    await composer.fill('Is there anything wrong with my cart, or anything I should know?');
+    await composer.press('Enter');
+
+    // The assistant's own reply, then the Suggestions panel appearing from
+    // the same turn - both driven by the real request/response cycle, no
+    // reload and no injected row.
+    await expect(page.locator('.bubble.assistant').last()).toBeVisible({ timeout: 45000 });
+
+    const suggestions = page.locator('.panel', { hasText: 'Suggestions' });
+    await expect(suggestions).toBeVisible({ timeout: 15000 });
+  });
 });

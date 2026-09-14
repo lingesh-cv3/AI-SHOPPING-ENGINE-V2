@@ -3037,3 +3037,134 @@ below; `npm run build` now exits 0.)
     one failure ("a successful recovery still explains what it did not
     do") the same chat-reply-wording class already diagnosed elsewhere
     in this file as model-variance flaky.
+
+49. **Smart Cart & Checkout Recovery (Shopper Roadmap item 5) - Cart
+    Intelligence and the shopper-facing half of Cart Proposals, moved to
+    `value-auditor` VALUABLE this session, closing the gap left open at
+    the end of the entry under "Not blocked" in PROGRESS.md.** Three real
+    changes landed on top of the already-committed `43f3bf4`
+    (`CART_INTELLIGENCE` + `PROPOSE_CART_CHANGE`, previously THIN/
+    DEMO-GRADE):
+
+    - **`engine/reasoning/cart_intent.py` (new).** A deterministic
+      phrase-match bridge, the same "narrow supplement, unioned not
+      replacing" shape as the existing `explicit_extraction.py`: when the
+      shopper's own message plainly asks about their cart ("what am I
+      missing", "can you fix my cart", "is there anything wrong with my
+      cart", etc - a curated phrase list, not a semantic model),
+      `CART_INTELLIGENCE` is appended to the model's own proposed actions
+      before the Decision Engine ranks them - never forcing selection,
+      never bypassing ranking or capability filtering (`invariant-guard`
+      confirmed SAFE). This closes the specific reliability gap the prior
+      `value-auditor` pass named as the biggest problem with the feature.
+      Live-verified: all 8 of the exact example phrasings from the
+      product spec, sent against a real cart missing a real declared
+      complement, selected `CART_INTELLIGENCE` 8/8 times, confirmed as a
+      genuine additional candidate alongside whatever the model itself
+      proposed, not a forced override.
+    - **A real Playwright browser test with no shortcut**
+      (`storefront/tests/proposals.spec.ts`, third test: "a real chat
+      question about the cart produces a real, visible suggestion") -
+      unlike the file's other two tests (which use a direct-DB-insert
+      helper, `scripts/make_test_proposal.py`, to avoid a model call),
+      this one types a real sentence into the real chat UI and asserts a
+      real Suggestions-panel proposal appears from that real turn.
+      Passing.
+    - **`engine/db/repository.py::cart_proposal_activity` + `GET
+      /api/cart-proposals/{connection_id}`** (`engine/api/routes.py`) - a
+      real, tenant-scoped, PII-free merchant-facing aggregate over the
+      `PROPOSAL_*` `ShopperEvent` rows: counts of created/accepted/
+      rejected/executed, an acceptance rate that is `None` rather than a
+      fake 0% when nothing has been decided yet, and top-suggested
+      products. Gated by the same `merchant_scoped()` dependency
+      `merchant_report` already uses. A `days` param is clamped to a max
+      365 to bound query size on a high-volume merchant. A real bug found
+      by the fresh `value-auditor` pass and fixed the same session:
+      `has_history` was derived only from whether a `proposal_created`
+      event existed, which could be silently missing (a best-effort
+      try/except swallowing it, or a proposal seeded directly via
+      `db.cart_proposals.create`, which is exactly what
+      `scripts/make_test_proposal.py` does) - producing a live-reproduced
+      contradiction (`has_history: false` next to non-zero `accepted`/
+      `executed` counts on the real Kettle connection). Fixed to derive
+      `has_history` from any of the four event kinds, all-time.
+      Re-verified live on the exact connection that showed the bug (now
+      correctly `has_history: true` alongside the same non-zero counts)
+      and on a connection with zero proposal activity ever (correctly
+      still `has_history: false`, all-zero). `invariant-guard`
+      re-confirmed SAFE after the fix.
+
+    **Fresh, independent `value-auditor` verdict, superseding the earlier
+    THIN/DEMO-GRADE one against `43f3bf4`:**
+    - **Cart Intelligence: VALUABLE.** The read-only-twin/Q&A-panel
+      anti-pattern is genuinely closed (a real finding produces a real,
+      acceptable, cart-changing proposal, verified end to end) and the
+      reliability gap is closed with reproducible live evidence (8/8
+      exact spec phrasings), not just a description.
+    - **Cart Proposals: VALUABLE for the shopper-facing loop**
+      (trigger → diagnose → propose → accept/reject → real execution →
+      real cart state) - directly reproduced live, real adapter write
+      confirmed, real shopper control (nothing executes without explicit
+      accept).
+    - The merchant-measurement half is explicitly **not** included in this
+      VALUABLE verdict - see PROGRESS.md; it stays open.
+
+    **Value-bar answers for what moved:**
+    1. *Whose decision changes?* A shopper mid-session who asks a plain
+       question about their own cart, or whose cart already has a gap the
+       engine can see (a missing declared complement, an item that went
+       out of stock, a budget overrun).
+    2. *What can they do now that they could not before?* Before this
+       session, the exact spec phrasings the roadmap item names did not
+       reliably reach `CART_INTELLIGENCE` at all - the model chose a
+       different action often enough that the capability existed in code
+       but wasn't reachable from ordinary words. Now it is, 8/8 on the
+       tested phrasings, and the resulting finding is a real, one-tap
+       accept/reject proposal, not a description with nothing attached.
+    3. *What does it cost if this is wrong?* A false-positive "missing
+       complement" nudge costs a shopper an unwanted suggestion they can
+       reject with no mutation (verified: reject leaves the cart
+       untouched); a false negative costs a missed upsell/completeness
+       nudge, not a financial or data-integrity error - `accept_proposal`
+       always re-validates against live data before executing, so a stale
+       or wrong proposal cannot silently execute something no longer true.
+    4. *Where is the action?* The same turn's reply names the Suggestions
+       panel; `ProposalsPanel.tsx`'s real Accept/No-thanks buttons call
+       the real `/api/chat/proposals/{id}/accept|reject` routes, which run
+       through the identical Decision Engine + Risk Gate +
+       `execute_case()` pipeline the existing tap-execution route uses.
+    5. *What figure moves?* `PROPOSAL_CREATED`/`ACCEPTED`/`REJECTED`/
+       `EXECUTED` `ShopperEvent` rows now exist and are aggregated
+       correctly and honestly by `cart_proposal_activity` - reachable at
+       the API level. **Not yet reachable by a merchant on any screen** -
+       see PROGRESS.md; this is the one specific reason the measurement
+       half stays open rather than moving here too.
+    6. *Real-client conditions actually exercised:* zero-cart/zero-history
+       handled and verified (a connection with no proposal activity
+       correctly returns `has_history: false`, no fake percentage); both
+       demo merchants (Northfield, Kettle) verified. **Not** separately
+       exercised this session: a platform-cannot or platform-down
+       condition specific to `CART_INTELLIGENCE`/`PROPOSE_CART_CHANGE`
+       themselves (the accept path's re-validation and the general
+       adapter-failure handling are inherited from the existing execution
+       pipeline and were not independently forced down for these two
+       action types this session).
+
+    **Verification this session:** `invariant-guard` SAFE across five
+    separate passes (the cart-intent bridge, the merchant route, and the
+    `has_history` fix, each independently reviewed). `healthcheck.py`: ran
+    multiple times, 112-116 of 116 passed across different runs (Groq-
+    throttle-dependent variance), every failure matching one of two
+    already-documented pre-existing classes (`PAYMENT_DECLINED`
+    model-proposal variance; the days=1-window funnel timing artifact) -
+    never a failure touching either of these two features. `fuzz.py`:
+    20/20 sequences, 1200 assertions, every invariant held, every run.
+    `auditroutes.py`: clean every run; the new
+    `/api/cart-proposals/{connection_id}` route is not yet in its own
+    curated route list (a minor follow-up, not a blocker), so its lock and
+    tenant isolation were confirmed by a separate manual live check instead
+    (no key refused, own key works, wrong merchant's key refused).
+    `npm run build`/`npm run lint`: clean, 0 new errors against the
+    existing baseline. Three real Playwright browser tests passing in
+    `storefront/tests/proposals.spec.ts`, one of which drives the actual
+    chat UI with no test shortcut.

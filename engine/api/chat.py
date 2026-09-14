@@ -37,7 +37,7 @@ from engine import db
 from engine import session as session_store
 from engine.execution import events as shopper_events
 from engine.execution import mission_ranking
-from engine.reasoning import explicit_extraction
+from engine.reasoning import cart_intent, explicit_extraction
 from engine.notify import confirm_order
 from shared.models import CommerceError
 
@@ -771,6 +771,32 @@ async def _process_turn(
     # shopper saying "yes please" does not accidentally choose a size.
     for candidate in reasoning.actions:
         candidate.parameters.setdefault("said", req.message[:80])
+
+    # Deterministic bridge from plain cart-question phrasing to
+    # CART_INTELLIGENCE, closing the exact gap live testing found: the
+    # model does not reliably propose this action type for phrasing that
+    # obviously calls for it. Added as an extra candidate, unioned
+    # alongside whatever the model itself proposed - never a replacement,
+    # never forced to win. The Decision Engine's own ranking
+    # (engine/decision/ranking.py) still decides what actually runs; this
+    # only guarantees the option exists to be ranked when a shopper's own
+    # words plainly ask about their actual cart and a cart exists to look
+    # at. See engine/reasoning/cart_intent.py for the exact phrase set.
+    if cart is not None and cart_intent.wants_cart_intelligence(req.message):
+        already_proposed = any(
+            str(c.action_type) == "CART_INTELLIGENCE" for c in reasoning.actions
+        )
+        if not already_proposed:
+            reasoning.actions.append(
+                ProposedAction(
+                    action_type=ActionType.CART_INTELLIGENCE,
+                    operation=operation_for(ActionType.CART_INTELLIGENCE),
+                    parameters={"said": req.message[:80]},
+                    rationale="the shopper's own words plainly asked about their cart",
+                    confidence=1.0,
+                )
+            )
+
     trace = await engine.decision.decide(
         reasoning.actions, connection_id=req.connection_id, friction=friction_type
     )

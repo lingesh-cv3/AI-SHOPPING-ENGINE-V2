@@ -29,6 +29,7 @@ from .models import (
     ShopperEvent,
 )
 from .repository import (
+    cart_proposal_activity,
     checkout_conversion,
     decide_approval,
     decide_merchant_task,
@@ -130,6 +131,7 @@ __all__ = [
     "sales_period_comparison",
     "daily_revenue_series",
     "checkout_conversion",
+    "cart_proposal_activity",
     "FunnelEvent",
     "record_funnel_event",
     "MerchantTask",

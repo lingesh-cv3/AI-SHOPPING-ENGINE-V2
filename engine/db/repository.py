@@ -33,6 +33,7 @@ from .models import (
     OrderLine,
     SentMail,
     SessionHoldout,
+    ShopperEvent,
 )
 from .session import session_scope
 
@@ -1562,6 +1563,109 @@ async def merchant_report(connection_id: str, *, days: int = 30) -> dict:
             }
             for c in sorted(case_rows, key=lambda c: c.created_at, reverse=True)[:8]
         ],
+    }
+
+
+async def cart_proposal_activity(connection_id: str, *, days: int = 30) -> dict:
+    """What the AI-suggested cart-change proposals actually did, from the
+    real `ShopperEvent` rows those proposals write
+    (engine/execution/events.py's PROPOSAL_CREATED/ACCEPTED/REJECTED/
+    EXECUTED) - never a claim about business value, only a count of what
+    was observed to happen.
+
+    Deliberately narrow: an acceptance rate here answers "of the
+    suggestions shown, how many did a shopper act on" - it does NOT claim
+    those accepted changes caused a sale, prevented a return, or improved
+    anything measurable about the business. That would need a controlled
+    comparison this single count cannot provide (the same caution
+    `shortlist_engagement` in engine/execution/events.py already states
+    for a structurally similar metric). `has_history` is False rather than
+    a confusing 0/0% when no proposal has ever been created for this
+    connection - the same "zero data reads as zero data, not as a launch
+    failure" rule `checkout_conversion`'s `funnel_has_history` already
+    follows.
+    """
+    # Clamped rather than trusted from the caller - an unbounded window on a
+    # high-volume merchant would pull an unbounded row count into memory
+    # before aggregation, the same real-volume risk class CLAUDE.md's
+    # `_catalog_alerts` worked example already names.
+    days = max(1, min(days, 365))
+    since = datetime.now(UTC) - timedelta(days=days)
+    async with session_scope() as db:
+        rows = await db.execute(
+            select(ShopperEvent.event_type, ShopperEvent.product_id).where(
+                ShopperEvent.connection_id == connection_id,
+                ShopperEvent.event_type.in_(
+                    [
+                        "proposal_created",
+                        "proposal_accepted",
+                        "proposal_rejected",
+                        "proposal_executed",
+                    ]
+                ),
+                ShopperEvent.created_at >= since,
+            )
+        )
+        event_rows = list(rows.all())
+
+        # All-time, not windowed, and across all four event kinds - not
+        # `proposal_created` alone. A hardening-pass fix: keying this on one
+        # event kind only produced a live, reproducible contradiction
+        # (`has_history: false` sitting next to non-zero accepted/executed
+        # counts) whenever a proposal's own `proposal_created` write was
+        # lost - either a swallowed exception in the best-effort recording
+        # call, or a proposal seeded directly through
+        # `db.cart_proposals.create` without going through the normal
+        # PROPOSE_CART_CHANGE execution path at all (this project's own
+        # `scripts/make_test_proposal.py` does exactly that). Any one of
+        # the four kinds ever having been recorded is real evidence
+        # proposal activity happened for this connection, whichever kind
+        # survived to be written.
+        earliest = await db.scalar(
+            select(func.min(ShopperEvent.created_at)).where(
+                ShopperEvent.connection_id == connection_id,
+                ShopperEvent.event_type.in_(
+                    [
+                        "proposal_created",
+                        "proposal_accepted",
+                        "proposal_rejected",
+                        "proposal_executed",
+                    ]
+                ),
+            )
+        )
+
+    counts = {"created": 0, "accepted": 0, "rejected": 0, "executed": 0}
+    by_product: dict[str, int] = {}
+    for event_type, product_id in event_rows:
+        key = event_type.replace("proposal_", "")
+        if key in counts:
+            counts[key] += 1
+        if event_type == "proposal_created" and product_id:
+            by_product[product_id] = by_product.get(product_id, 0) + 1
+
+    decided = counts["accepted"] + counts["rejected"]
+    acceptance_rate = (
+        round(counts["accepted"] / decided * 100, 1) if decided else None
+    )
+
+    return {
+        "days": days,
+        "has_history": earliest is not None,
+        "created": counts["created"],
+        "accepted": counts["accepted"],
+        "rejected": counts["rejected"],
+        "executed": counts["executed"],
+        # None rather than 0% when nothing has been decided yet - an
+        # undecided proposal is not the same fact as a rejected one.
+        "acceptance_rate": acceptance_rate,
+        # The products most often suggested, most-suggested first - a
+        # real signal about which complement relationships actually get
+        # surfaced, not a claim about which ones are good.
+        "most_suggested_products": sorted(
+            ({"product_id": pid, "times_suggested": n} for pid, n in by_product.items()),
+            key=lambda x: -x["times_suggested"],
+        )[:10],
     }
 
 
