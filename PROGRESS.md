@@ -324,17 +324,33 @@ belongs in the model-side extraction reliability work already tracked
 above, not in this narrow rescue path.
 
 **The larger request this discovery-routing fix was extracted from remains
-almost entirely open** - only the one defect above was fixed and verified
-this pass:
-- Mission Shopping structured state and a dedicated trade-off UI - untouched
-  this session.
-- Return-Risk Prevention's frontend integration - `return_risk` is computed
-  and sent by the API (`engine/api/chat.py`, per the `[~]` entry above) but
-  `storefront/src/ChatWidget.tsx` still never renders it anywhere. Confirmed
-  still true by reading `ChatWidget.tsx` this session; not touched, not
-  re-verified beyond that read.
-- A Merchant-side functional verification pass - not attempted this
+mostly open** - a follow-up session (see `Completed.md` #53) closed two more
+pieces of it (a same-word-only false-positive fix plus honest budget
+relaxation in discovery, priority-only follow-ups now preserving the
+mission, and Return-Risk Prevention's frontend rendering gap). Still open:
+- Mission Shopping structured state and a dedicated trade-off UI - untouched.
+- A Merchant-side functional verification pass - not attempted.
+
+**Residual limitations left open by `Completed.md` #53, stated honestly
+rather than claimed closed:**
+- The relevance fix (`engine/execution/relevance.py::best_matches`) is a
+  deterministic word-overlap re-scoring heuristic, not semantic
+  understanding - it cannot match a synonym or use-case phrase to a product
+  whose title/description/categories share no literal word with it. This is
+  the same underlying limitation as the Kettle "fruity coffee"/varietal-
+  naming gap described below; it narrows the problem (a weaker keyword match
+  no longer stands in as if it were as good as a stronger one) without
+  solving it.
+- The mission-preservation backfill only carries `goal` (as a search query)
+  and `budget_amount` (as max_price) forward from `ShoppingState` into
+  retrieval. It does not backfill `must_have`/`exclusions`/`category` into
+  retrieval's own query/category parameters - those still only feed
+  mission_ranking's later filtering step, unchanged from before this
   session.
+- Cart-line-level return-risk in `cart_intelligence.py` was not touched or
+  re-verified this session (it already existed as plain text from an
+  earlier session's work) - only the product-card/comparison rendering gap
+  was closed.
 
 ### Why the tests did not used to catch these
 
@@ -977,16 +993,23 @@ these first:**
       held, `auditroutes.py` clean - none of the three suites touch this
       feature directly, but none regressed either.
 
+      **The frontend rendering gap this entry used to name is now closed**
+      (`Completed.md` #53): `storefront/src/ChatWidget.tsx` now renders
+      `return_risk` on both product cards and the comparison table,
+      live-verified in a real browser against a real 3.6-rated Northfield
+      product. That was a rendering fix, not a fresh value-auditor pass on
+      the feature as a whole.
+
       **Not moved to Completed.md**: a dedicated `value-auditor` pass was
       started for this feature and did not complete (hit a session rate
       limit mid-run) - do not treat the description above as an
-      independent VALUABLE verdict, it is this session's own direct
-      testing only. Also genuinely unintegrated per the original spec:
-      cart-proposal and checkout-continuity integration (points 8/9 of the
-      original ask) were not attempted - the finding is currently visible
-      only in the recommend/compare/cart-intelligence surfaces, not
-      threaded into a `PROPOSE_CART_CHANGE` proposal's own evidence or the
-      checkout-continuity reply. Re-run `value-auditor` and close those two
+      independent VALUABLE verdict, it is direct testing only. Also
+      genuinely unintegrated per the original spec: cart-proposal and
+      checkout-continuity integration (points 8/9 of the original ask) were
+      not attempted - the finding is currently visible only in the
+      recommend/compare/cart-intelligence surfaces, not threaded into a
+      `PROPOSE_CART_CHANGE` proposal's own evidence or the checkout-
+      continuity reply. Re-run `value-auditor` and close those two
       integration points before considering this complete.
 
 - [~] **AI Store Diagnosis (Merchant) - implemented, integrated, live-

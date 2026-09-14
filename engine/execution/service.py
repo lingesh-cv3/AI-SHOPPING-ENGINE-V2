@@ -33,7 +33,7 @@ from typing import Any
 from engine import db
 from engine import session as session_store
 from engine.decision import CapabilityRegistry
-from engine.execution import cart_intelligence, product_relations
+from engine.execution import cart_intelligence, product_relations, relevance
 from shared.models import (
     ActionType,
     CapabilityUnsupported,
@@ -444,12 +444,64 @@ class ExecutionService:
                 # resets category/query/top_rated, because a phrase this
                 # generic cannot itself be naming a category to keep.
                 said = str(params.get("said") or "").strip().lower()
-                if action_type is ActionType.RECOMMEND_PRODUCTS and any(
+                is_generic_browse_phrase = action_type is ActionType.RECOMMEND_PRODUCTS and any(
                     phrase in said for phrase in _GENERIC_BROWSE_PHRASES
-                ):
+                )
+                if is_generic_browse_phrase:
                     category = ""
                     query = ""
                     top_rated = False
+
+                # A follow-up turn inside an already-active mission ("comfort
+                # is more important to me") correctly states no new product,
+                # category or price itself - repeating the whole original
+                # request every turn would be absurd, and the model is told
+                # not to. But "nothing new this turn" is not "no active
+                # mission": ShoppingState already holds exactly what was
+                # previously stated (goal, budget_amount), and discarding it
+                # here is what turned "comfort matters more" into a bare
+                # browse offering unrelated categories, as if the shopper
+                # had never mentioned running shoes at all. Seeding
+                # retrieval from the persisted mission - never from
+                # anything invented, and never overriding what this turn
+                # DID state - keeps the actual product intent alive across
+                # turns; mission_ranking below still re-ranks by whatever
+                # priority was just restated. Skipped for an explicit
+                # generic-browse phrase above: a shopper asking "what do
+                # you have" mid-mission is deliberately asking to browse
+                # outside it, not restating the same request.
+                # Not gated on category/price/top_rated also being blank
+                # this turn: a message can legitimately restate one part of
+                # the mission ("under 2000") while leaving the product
+                # itself implicit ("lightweight running shoes" already said
+                # last turn) - each piece is backfilled independently, and
+                # only for what this turn genuinely left blank, so a value
+                # this turn DID state is never overridden by an older one.
+                # Also gated on the message actually saying something - a
+                # bare "hi" partway through a session must still read as a
+                # fresh greeting, not as "continue the last mission",
+                # however active that mission still is; the same
+                # real-word floor the rescue search below already applies.
+                said_has_real_word = any(len(w) > 2 for w in said.split())
+                if (
+                    action_type is ActionType.RECOMMEND_PRODUCTS
+                    and not is_generic_browse_phrase
+                    and said_has_real_word
+                    and (not query or not price_bounded)
+                    and case.session_id
+                ):
+                    mission_state = await db.shopping_state.get(
+                        case.session_id, case.connection_id
+                    )
+                    if mission_state:
+                        if not query and mission_state.get("goal"):
+                            query = str(mission_state["goal"])
+                        if not price_bounded and mission_state.get("budget_amount") is not None:
+                            try:
+                                max_price = float(mission_state["budget_amount"])
+                                price_bounded = True
+                            except (TypeError, ValueError):
+                                pass
 
                 # A general "what do you have" - no keyword, no category, no
                 # price or rating narrowing - used to mean six products picked
@@ -491,9 +543,10 @@ class ExecutionService:
                     # unrelated slice of the catalog.
                     has_real_word = any(len(w) > 2 for w in said.split())
                     if said and has_real_word:
-                        rescued = await adapter.search_products(said, limit=6)
-                        if rescued.products:
-                            titles = [p.title for p in rescued.products[:6]]
+                        rescued = await adapter.search_products(said, limit=30)
+                        rescued_relevant = relevance.best_matches(rescued.products, said)
+                        if rescued_relevant:
+                            titles = [p.title for p in rescued_relevant[:6]]
                             return Executed(
                                 succeeded=True,
                                 action_type=str(action_type),
@@ -514,7 +567,7 @@ class ExecutionService:
                                             "rating": p.rating,
                                             "rating_count": p.rating_count,
                                         }
-                                        for p in rescued.products[:6]
+                                        for p in rescued_relevant[:6]
                                     ],
                                 },
                             )
@@ -556,9 +609,28 @@ class ExecutionService:
                 # match exists further in.
                 narrowed = price_bounded or top_rated or bool(category)
                 found = await adapter.search_products(query, limit=30 if narrowed else 6)
-                candidates = [
-                    p for p in found.products if _within_price(p) and _within_category(p)
-                ]
+                # Re-score what the adapter's own keyword search already
+                # found and keep only the best-matching tier - a product
+                # sharing one word with the query (a "Running Cap" for
+                # "running shoes") no longer rides along just because it
+                # cleared the price filter, when a stronger match (sharing
+                # both words) exists in the same result set. See
+                # engine/execution/relevance.py for what this does and does
+                # not do; it never touches the empty-query browse below.
+                relevant = relevance.best_matches(found.products, query)
+                relevant = [p for p in relevant if _within_category(p)]
+                in_budget = [p for p in relevant if _within_price(p)]
+
+                # The hard product/category intent must never be discarded
+                # just because applying a hard price constraint on top of
+                # it produces zero results. Real running shoes existing,
+                # all over budget, is a different, honest situation from
+                # no running shoes existing at all - and a world apart from
+                # substituting an unrelated cheap product as if it matched.
+                # `budget_relaxed` lets the reply say which is true.
+                budget_relaxed = bool(query) and bool(relevant) and price_bounded and not in_budget
+                candidates = relevant if budget_relaxed else in_budget
+
                 if top_rated:
                     # Never invented: a product with no rating on this platform
                     # is excluded from "top rated" rather than treated as a
@@ -566,6 +638,12 @@ class ExecutionService:
                     # gave it.
                     candidates = [p for p in candidates if p.rating is not None]
                     candidates.sort(key=lambda p: p.rating, reverse=True)
+                elif budget_relaxed:
+                    # Cheapest-first, so the closest-to-affordable real
+                    # match leads rather than an arbitrary catalog order.
+                    candidates.sort(
+                        key=lambda p: p.price.amount if p.price else Decimal("inf")
+                    )
                 titles = [p.title for p in candidates[:6]]
                 # Recommending is not searching. If the model's invented term
                 # finds nothing, there is still a catalogue to show - and telling
@@ -642,6 +720,8 @@ class ExecutionService:
                     payload={
                         "query": query,
                         "relevance_relaxed": relevance_relaxed,
+                        "budget_relaxed": budget_relaxed,
+                        "max_price": max_price,
                         "products": [
                             {
                                 "product_id": p.product_id,

@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { api, shopperMessage, type ChatReply, type ChatTurn } from "./api";
+import {
+  api,
+  shopperMessage,
+  type ChatReply,
+  type ChatTurn,
+  type ReturnRiskFinding,
+} from "./api";
 import { type Account } from "./account";
 
 /**
@@ -465,6 +471,9 @@ export function ChatWidget({
                       // the shortlist mechanism itself.
                       <span className="cpfit">Why this: {p.fit.join(" · ")}</span>
                     )}
+                    {p.return_risk && p.return_risk.length > 0 && (
+                      <ReturnRiskNotice findings={p.return_risk} />
+                    )}
                   </button>
                 ))}
               </div>
@@ -523,6 +532,24 @@ export function ChatWidget({
                         {turn.comparison.map((p) => (
                           <td key={p.product_id} className="cpdesc">
                             {p.description}
+                          </td>
+                        ))}
+                      </tr>
+                    )}
+                    {turn.comparison.some(
+                      (p) => p.return_risk && p.return_risk.length > 0,
+                    ) && (
+                      <tr>
+                        <th scope="row">Return risk</th>
+                        {turn.comparison.map((p) => (
+                          <td key={p.product_id}>
+                            {p.return_risk && p.return_risk.length > 0 ? (
+                              <ReturnRiskNotice findings={p.return_risk} />
+                            ) : (
+                              <span className="cpreturnrisk-none">
+                                Nothing flagged
+                              </span>
+                            )}
                           </td>
                         ))}
                       </tr>
@@ -718,5 +745,35 @@ export function ChatWidget({
         </button>
       </form>
     </div>
+  );
+}
+
+/** Renders engine/execution/return_risk.py's findings for one product - a
+ *  real, evidence-grounded pre-purchase friction signal, never a claim
+ *  about actual return history (no such data exists anywhere in this
+ *  system). Advisory only: it never removes the product from the list
+ *  above it or blocks the "Buy Now"/tap action next to it, and it
+ *  distinguishes what the platform actually declared (a real rating) from
+ *  what the engine merely could not confirm (a stated requirement with no
+ *  matching declared attribute) rather than presenting both the same way. */
+function ReturnRiskNotice({ findings }: { findings: ReturnRiskFinding[] }) {
+  return (
+    <span className="cpreturnrisk">
+      {findings.map((f, i) => (
+        <span
+          key={i}
+          className={
+            f.evidence_type === "known_fact"
+              ? "cpreturnrisk-fact"
+              : "cpreturnrisk-inferred"
+          }
+        >
+          <span className="cpreturnrisk-label">
+            {f.evidence_type === "known_fact" ? "Known: " : "Unconfirmed: "}
+          </span>
+          {f.message}
+        </span>
+      ))}
+    </span>
   );
 }

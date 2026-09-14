@@ -528,6 +528,62 @@ if model_on:
         f"category_choices={bare_browse.get('category_choices')}",
         "engine/execution/service.py RECOMMEND_PRODUCTS category offer",
     )
+    # Real bug found by manual browser testing: a multi-word product query
+    # returned a product sharing only ONE word with it (a "Running Cap"
+    # for "running shoes") with no disclaimer, as if it matched. Fixed by
+    # engine/execution/relevance.py re-scoring the adapter's own keyword
+    # results and keeping only the best-matching tier.
+    relevance_session = f"hc_relevance_{uuid.uuid4().hex[:6]}"
+    shoes = call(
+        "POST",
+        "/api/chat",
+        {
+            "connection_id": NORTHFIELD,
+            "session_id": relevance_session,
+            "message": "I need running shoes.",
+        },
+    )
+    shoe_titles = {p.get("title") for p in (shoes.get("products") or [])}
+    check(
+        "a same-word-only unrelated product is never shown as a match",
+        bool(shoe_titles) and shoe_titles.isdisjoint(
+            {"Running Cap", "Recovery Slide", "Everyday Canvas Sneaker"}
+        ),
+        f"titles={shoe_titles}",
+        "engine/execution/relevance.py::best_matches",
+    )
+    # Real bug found by manual testing: a follow-up that only restates a
+    # priority ("comfort matters more") correctly states no new product or
+    # budget itself, but the retrieval logic used to discard the whole
+    # mission and fall back to the category offer, as if "running shoes"
+    # and the stated budget had never been said. Fixed by backfilling
+    # query/max_price from the persisted ShoppingState when this turn's
+    # own value is blank.
+    call(
+        "POST",
+        "/api/chat",
+        {
+            "connection_id": NORTHFIELD,
+            "session_id": relevance_session,
+            "message": "I need lightweight running shoes under 2000",
+        },
+    )
+    followup = call(
+        "POST",
+        "/api/chat",
+        {
+            "connection_id": NORTHFIELD,
+            "session_id": relevance_session,
+            "message": "Comfort is more important to me.",
+        },
+    )
+    check(
+        "a priority-only follow-up keeps the mission's product intent alive",
+        not followup.get("category_choices"),
+        f"reply={followup.get('reply', '')[:100]!r} "
+        f"category_choices={followup.get('category_choices')}",
+        "engine/execution/service.py ShoppingState goal/budget backfill",
+    )
 else:
     print("  SKIP  model checks (no key configured)")
 

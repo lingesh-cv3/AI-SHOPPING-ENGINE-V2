@@ -1940,6 +1940,38 @@ select.card-picker {
   font-style: italic;
 }
 
+/* Advisory, never a block - styled to be noticed, not to alarm. A known,
+ * platform-declared fact (a real low rating) and an unconfirmed inferred
+ * concern (a stated requirement the catalog cannot confirm) are colored
+ * differently so a shopper never reads a guess with the same weight as a
+ * fact. See engine/execution/return_risk.py. */
+.cpreturnrisk {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  max-width: 220px;
+  text-align: left;
+}
+
+.cpreturnrisk-fact {
+  color: var(--friction, #b45309);
+}
+
+.cpreturnrisk-inferred {
+  color: var(--ink-3);
+}
+
+.cpreturnrisk-label {
+  font-weight: 600;
+}
+
+.cpreturnrisk-none {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
 /* One per column, so comparing never dead-ends a shopper who has already
  * decided - the whole point of the table is to reach this. */
 .cpbuy {

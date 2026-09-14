@@ -149,6 +149,7 @@ export interface StoredTurn {
      *  never model-invented. Absent when no shopping mission has been
      *  captured yet. */
     fit?: string[];
+    return_risk?: ReturnRiskFinding[];
   }[];
   comparison: {
     product_id: string;
@@ -156,6 +157,7 @@ export interface StoredTurn {
     description: string | null;
     price: string | null;
     availability: string;
+    return_risk?: ReturnRiskFinding[];
   }[];
   payment: PaymentOffer | null;
   category_choices: string[];
@@ -258,6 +260,7 @@ export interface ChatTurn {
     price: string | null;
     categories: string[];
     fit?: string[];
+    return_risk?: ReturnRiskFinding[];
   }[];
   /** Exactly two products, fetched fresh, when the shopper asked to compare
    *  them - never more, never recalled from earlier in the conversation. */
@@ -267,12 +270,29 @@ export interface ChatTurn {
     description: string | null;
     price: string | null;
     availability: string;
+    return_risk?: ReturnRiskFinding[];
   }[];
   awaitingPerson?: boolean;
   usedModel?: boolean;
   /** The shop's real categories, offered when a browse had nothing to narrow
    *  it. Rendered as tappable buttons, same reasoning as `choices`. */
   categoryChoices?: string[];
+}
+
+/** A real, evidence-grounded pre-purchase friction signal - never a claim
+ *  about the product's actual return history, since no such data exists
+ *  anywhere in this system. See engine/execution/return_risk.py. Advisory
+ *  only: never removes a product from a list, never blocks a purchase. */
+export interface ReturnRiskFinding {
+  /** "known_fact" (a real, platform-declared rating below threshold) or
+   *  "inferred_concern" (a stated requirement the catalog cannot confirm
+   *  is met - e.g. "waterproof" when the platform only declares
+   *  "water-resistant"). Shown to the shopper so the two are never
+   *  presented with the same confidence. */
+  kind: string;
+  evidence_type: string;
+  message: string;
+  safer_alternative_id: string | null;
 }
 
 export interface PaymentOffer {
@@ -331,6 +351,7 @@ export interface ChatReply {
     price: string | null;
     categories: string[];
     fit?: string[];
+    return_risk?: ReturnRiskFinding[];
   }[];
   comparison: {
     product_id: string;
@@ -338,6 +359,7 @@ export interface ChatReply {
     description: string | null;
     price: string | null;
     availability: string;
+    return_risk?: ReturnRiskFinding[];
   }[];
   awaiting_person: boolean;
   payment: PaymentOffer;

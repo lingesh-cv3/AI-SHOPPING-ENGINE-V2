@@ -3437,3 +3437,144 @@ below; `npm run build` now exits 0.)
     frontend integration in `ChatWidget.tsx`, a Merchant-side functional
     verification pass) remains entirely unstarted beyond this one discovery-
     routing defect - see PROGRESS.md.
+
+53. **Fixed two more real user-reported discovery/mission bugs on top of #52,
+    and closed the Return-Risk Prevention frontend gap #52 left open.** Both
+    reported by the user testing the shopper chat UI directly, both
+    reproduced and root-caused before fixing.
+
+    **Bug 1 - a same-word-only false positive.** "I need lightweight running
+    shoes under 2000" returned a "Recovery Slide" and an "Everyday Canvas
+    Sneaker" - both merely cheap, neither a running shoe - with the reply
+    "Nothing matched 'running shoes' exactly, so here's what's available
+    instead:". Root cause: the adapter's keyword search accepted any product
+    sharing even one word with a multi-word query (a "Running Cap" shares
+    "running" with "running shoes" but is not a shoe), and separately, when a
+    hard price constraint emptied the real matches, the code fell straight
+    to an unfiltered, unrelated browse. Fixed with a new pure function,
+    `engine/execution/relevance.py::best_matches(products, query)`, that
+    re-scores whatever the adapter's own keyword search already returned by
+    word-overlap against the query and keeps only the top-scoring tier,
+    dropping same-word-only matches like "Running Cap". Applied in
+    `engine/execution/service.py` to both the primary RECOMMEND_PRODUCTS/
+    SUGGEST_ALTERNATIVE candidate list and the raw-message rescue search
+    added in #52. Deliberately does not touch the existing, deliberately-
+    unfiltered whole-catalog browse fallback (kept for the documented Kettle
+    "fruity coffee" regression already described in `service.py`'s own
+    comments) - re-verified live that "I need a fruity coffee" on Kettle
+    still returns real matches after this change.
+
+    A new `budget_relaxed` payload flag handles the price-constraint case
+    honestly instead of silently broadening to an unrelated browse: when
+    relevant (keyword-matched) products exist but none clear the stated
+    price limit, `service.py` now returns those relevant-but-over-budget
+    products, cheapest first, and `engine/api/chat.py` shows a deterministic
+    disclaimer ('No exact matches for "X" under N. Here are the closest real
+    matches, cheapest first - all currently over that budget:') instead of
+    the generic "here's what's available" text. The call to
+    `mission_ranking.rank_and_filter` for that one reply uses a shallow copy
+    of `shopping_state` with `budget_amount` set to `None` only for that
+    call, so mission_ranking's own separate budget filter doesn't
+    immediately re-discard the same over-budget products `service.py` just
+    chose to show - never persisted, must_have/exclusions filtering
+    untouched.
+
+    **Bug 2 - a priority-only follow-up discarded the whole mission.**
+    "Comfort is more important to me." and "Actually, durability is more
+    important." both fell back to the bare category-choice offer, as if
+    "running shoes" and the ₹2000 budget from the opening message had never
+    been said. Root cause: RECOMMEND_PRODUCTS's retrieval query/price came
+    only from the current turn's own model-extracted parameters, never from
+    the already-persisted `ShoppingState` (which already stores `goal` and
+    `budget_amount` for exactly this purpose) - so a follow-up turn that
+    correctly leaves those blank (per the model's own prompt instructions,
+    since it stated nothing new that turn) discarded the whole mission
+    instead of carrying it forward. Fixed with a backfill in `service.py`:
+    when RECOMMEND_PRODUCTS's own query is blank, backfill it from
+    `ShoppingState.goal`; when max_price is blank, backfill from
+    `ShoppingState.budget_amount` - each independently, only for what the
+    turn left blank, never overriding what the turn did state. Gated on the
+    incoming message actually containing a real word, after an early version
+    of the backfill was found live, during this session's own testing, to
+    make a bare "hi" mid-conversation repeat the previous turn's reply
+    verbatim - fixed by requiring a real word in the message before the
+    backfill applies, so a fresh greeting mid-session still reads as a fresh
+    greeting rather than "continue the last mission".
+
+    **Return-Risk Prevention's frontend gap, tracked open since #52 and in
+    PROGRESS.md before that, is now closed.** The backend
+    (`engine/execution/return_risk.py`, built earlier) already computed and
+    sent a `return_risk` field on products/comparisons; `ChatWidget.tsx`
+    never rendered it. `storefront/src/api.ts` gained a `ReturnRiskFinding`
+    interface and a `return_risk?` field on `ChatTurn.products`,
+    `ChatTurn.comparison`, `ChatReply.products`, `ChatReply.comparison`, and
+    `StoredTurn.products`/`comparison`. `ChatWidget.tsx` gained a
+    `ReturnRiskNotice` component, rendered on each product card and as a new
+    "Return risk" row in the two-product comparison table, distinguishing
+    `evidence_type === "known_fact"` (styled "Known:", e.g. a real declared
+    low rating) from `"inferred_concern"` (styled "Unconfirmed:", e.g. a
+    stated requirement the catalog can't confirm) - never presented with the
+    same confidence. Advisory only: never disables the tap/Buy-now action
+    next to it. New `.cpreturnrisk*` rules in `styles.css`. A real bug found
+    during this session's own browser verification: the component initially
+    checked `f.kind === "known_fact"` when the discriminating field is
+    actually `f.evidence_type` (`kind` holds `"low_rating"`/
+    `"unconfirmed_requirement"`; `evidence_type` holds `"known_fact"`/
+    `"inferred_concern"`) - found via a debug Playwright test inspecting the
+    live network payload, fixed, re-verified.
+
+    Verified end to end against the running services. `invariant-guard`:
+    SAFE, twice (once for the relevance/mission-state diff - confirmed no
+    Decision Engine/Risk Gate bypass, `db.shopping_state.get()` read-only,
+    the `budget_amount=None` shallow copy a local transient dict never
+    persisted, no cart/payment/checkout path touched). `healthcheck.py`: ran
+    3 times; two new checks ("a same-word-only unrelated product is never
+    shown as a match", "a priority-only follow-up keeps the mission's
+    product intent alive") passed every time; the only failures were 2-3
+    pre-existing, already-documented model-variance/timing flakes ("a
+    successful recovery still explains what it did not do", "a cart taken to
+    a successful checkout does not count as abandoned", once a webhook-
+    pipeline-timing flake) - none related to this session's changes, none
+    new. `fuzz.py`: 20/20 sequences, every invariant held (one prior run
+    failed only because the engine process was mid-restart, not a real
+    failure - confirmed clean on rerun). `auditroutes.py`: clean. Live-
+    verified via direct API calls on both merchants: Northfield (running
+    shoes, budget relaxation, follow-up preservation) and Kettle (fruity
+    coffee still works, dark-roast-under-500 budget_relaxed disclaimer, and
+    the "hi" mid-conversation regression found and fixed). Browser-verified
+    via three Playwright test files against the real running stack:
+    `storefront/tests/relevance-and-intent.spec.ts` (new, 3 tests: no
+    same-word-only false positive, intent/budget survive a priority-only
+    follow-up, category browsing still works for a genuine bare request),
+    `storefront/tests/return-risk-ui.spec.ts` (new, 1 test: a real seeded
+    low-rating product - Northfield's Merino Base Layer Tee, deterministic
+    3.6/32 reviews - shows the "Known:" notice and remains tappable),
+    `storefront/tests/discovery-routing.spec.ts` (from #52, re-run to
+    confirm no regression). `npm run build` clean, 0 new errors. Merchant
+    side untouched by this session (only `engine/execution/service.py`,
+    `engine/execution/relevance.py`, `engine/api/chat.py`, and the three
+    storefront files above changed, confirmed via `git status`); a
+    spot-check of `/api/report/{connection_id}` and
+    `/api/diagnosis/{connection_id}` returned normal data, and
+    `healthcheck.py`'s own Merchant-side checks all passed unaffected.
+
+    This is a bug fix restoring correctness of already-completed, already-
+    integrated Shopper capabilities (Advanced Product Discovery,
+    Mission-Based Shopping, Return-Risk Prevention) - not a new roadmap
+    feature, so no fresh `value-auditor` pass was run against it.
+
+    **Explicitly not done this pass, left open:** the relevance fix is a
+    deterministic word-overlap re-scoring heuristic, not true semantic
+    understanding - it cannot match a synonym or use-case phrase to a
+    product whose title/description/categories share no literal word with
+    it (the same keyword-search limitation already documented elsewhere in
+    this codebase, e.g. the Kettle "fruity coffee"/varietal-naming gap); it
+    only fixes the narrower problem of a weaker match standing in as if it
+    were as good as a stronger one among products a keyword search already
+    found. Cart-line-level return-risk in `cart_intelligence.py` was not
+    touched or re-verified this session. The mission-preservation backfill
+    covers only `goal` (as a search query) and `budget_amount` (as
+    max_price) - it does not backfill `must_have`/`exclusions`/`category`
+    into retrieval's own query/category parameters, only into
+    mission_ranking's later filtering step, which was already the case
+    before this session.

@@ -948,6 +948,14 @@ async def _process_turn(
         # anti-pattern, just reached through a different action.
         relevance_relaxed = bool(executed.payload.get("relevance_relaxed"))
         relaxed_query = str(executed.payload.get("query") or "")
+        # True when real, relevant matches exist for the stated product
+        # intent but none clear the shopper's own stated price limit - the
+        # product/category intent must never be discarded just because a
+        # hard constraint on top of it produces zero results. Distinct from
+        # relevance_relaxed: these products DO match what was asked, they
+        # are simply over budget, and are shown as that, cheapest first.
+        budget_relaxed = bool(executed.payload.get("budget_relaxed"))
+        budget_relaxed_max = executed.payload.get("max_price")
         if isinstance(found, list):
             products = found
             # Mission-aware shortlist - deterministic, never a model call.
@@ -957,8 +965,21 @@ async def _process_turn(
             # Category-choice offers (handled separately below) never reach
             # here since `found` would be None for that branch.
             if executed.action_type == "RECOMMEND_PRODUCTS" and products:
+                # budget_relaxed means service.py already made a deliberate,
+                # honest choice: these are the real relevant matches for
+                # the stated product intent, shown specifically BECAUSE none
+                # fit the price limit - re-applying the same budget as a
+                # hard filter here would just discard them again and lose
+                # the one thing this response exists to say. must_have/
+                # exclusions still apply; only the redundant budget re-check
+                # is skipped, and only for this one response.
+                ranking_state = (
+                    {**shopping_state, "budget_amount": None}
+                    if budget_relaxed and shopping_state
+                    else shopping_state
+                )
                 shortlisted, fit_reasons = mission_ranking.rank_and_filter(
-                    products, shopping_state, memory_facts=memory_facts
+                    products, ranking_state, memory_facts=memory_facts
                 )
                 for p in shortlisted:
                     reasons = fit_reasons.get(p.get("product_id"))
@@ -1398,6 +1419,21 @@ async def _process_turn(
                 reply = (
                     f"I found options, but nothing fits {constraint}. "
                     "Want me to loosen one of those and look again?"
+                )
+            elif budget_relaxed and products:
+                # Real matches for what was actually asked exist - they are
+                # simply over the price limit stated this turn. Named
+                # explicitly rather than silently substituting a cheaper,
+                # unrelated product, or silently showing the over-budget
+                # ones as if they fit. Deterministic, not model-written -
+                # same reasoning as relevance_relaxed below.
+                price_note = (
+                    f" under {budget_relaxed_max:g}" if budget_relaxed_max else ""
+                )
+                reply = (
+                    f'No exact matches for "{relaxed_query}"{price_note}. '
+                    "Here are the closest real matches, cheapest first - "
+                    "all currently over that budget:"
                 )
             elif relevance_relaxed and products:
                 # Deterministic, not model-written - the model's reply is
