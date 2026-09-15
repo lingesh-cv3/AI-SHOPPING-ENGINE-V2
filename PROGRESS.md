@@ -621,6 +621,114 @@ rather than claimed closed:**
   earlier session's work) - only the product-card/comparison rendering gap
   was closed.
 
+**Value-auditor findings from the prior hardening pass, fixed this session
+(commits `2b7b5a9`, `7f9959b`, `ee70c84`, on top of `1564299`..`c5db5a4`).**
+A `value-auditor` pass on that hardening batch found four concrete,
+specific defects rather than vague concerns - each is fixed and
+live-verified here, not just re-analyzed:
+
+1. **`shop_carries` real-volume sampling gap (`2b7b5a9`).** It decided
+   "does this shop carry X" from a catalog-order sample of only 6-30
+   items - the audit named this the same shape as `_catalog_alerts`'s
+   `limit=100` anti-pattern, likely to false-negative on a real 40k-SKU
+   catalog. Bumped to 200 with the residual real-volume risk stated
+   honestly in the code comment (the commerce interface has no
+   category-filtered or paginated search primitive to do better with -
+   adding one is new adapter-interface surface, out of scope for a
+   hardening pass, not attempted).
+
+2. **The actual kayak case, untouched by the prior fix.** The audit
+   reproduced live that "do you sell kayaks?" still slipped through: the
+   model narrows "kayak" to a proxy query like "water", scoring a
+   coincidental single-word hit against an unrelated product (e.g. an
+   "Insulated Water Bottle") via the narrow keyword search - a path
+   `shop_carries` never gated, since it only fired on the zero-match
+   browse fallback. New `relevance.best_matches_with_score`/
+   `weak_single_word_match`: a match whose entire justification is one
+   shared word from a single-word query now gets the same wider
+   category/description re-verification the browse fallback already
+   uses. Live-verified: "do you sell kayaks?" and "I need a tent for
+   camping" on Northfield now correctly degrade to an honest "couldn't
+   find" instead of substituting an unrelated product; "a fruity coffee"
+   and "something smooth and not too bitter" on Kettle unaffected (the
+   coffee case is unbroken); legitimate single-word queries against a
+   real category (bare "coffee", "shoes") still return real results.
+
+3. **`_honest_synthesis`'s third attribution-bypass gap (`7f9959b`).**
+   The audit found the second version (gating on `any_term_mentioned` -
+   any real stored term appearing ANYWHERE in the text) still passable: a
+   reply can mention a true term as filler while its actual causal claim
+   names something never stated ("Since you said durability matters most
+   to you (though it's also nice and light)..." mentions the real term
+   "light" as an aside while falsely claiming durability was the reason).
+   New `_causal_claim_terms()`: a narrow, named-pattern extraction (same
+   trade-off `explicit_extraction.py` already makes) that pulls the
+   SPECIFIC term a reply claims as its reason ("since you said X",
+   "because X matters", "your priority of X", "you prioritized X") and
+   checks that term individually against `shopping_state`'s real terms.
+   Verified against 5 fresh adversarial phrasings: two specifically
+   demonstrate the gap this closes (the true term present as filler, a
+   false term claimed as the reason) and are now correctly rejected; two
+   genuinely grounded phrasings still pass through unmodified; the
+   zero-state case still always falls back.
+
+   This is now the THIRD documented iteration of this exact function
+   (blocklist -> `any_term_mentioned` floor -> per-claim term check).
+   Each round has been adversarially re-tested and each round has found a
+   new bypass shape. This one has not itself been through a fourth
+   adversarial pass - the next session should not assume it is the last
+   gap without checking.
+
+4. **Multi-item queue: named figure + fixed a real silent-drop bug
+   (`ee70c84`).** The audit called the pending-proposal queue
+   (`Completed.md`-bound, `3884ef0`) the one item that actually cleared
+   VALUABLE, pending a named metric and a 3+-item test. New
+   `events.py::multi_item_completion_rate(connection_id)` - queued
+   second-item proposals vs. actually completed, joined by
+   `proposal_id`. Building it surfaced a real, previously-unknown bug:
+   a queued item left in `NEEDS_CHOICE` state (needs its own size pick)
+   is resolved through the ORDINARY tap/typed-follow-up path, not
+   `accept_proposal` again, so nothing closed the loop back to the
+   proposal - the metric read `completed: 0` against 13-15 queued real
+   proposals until this was fixed. Fixed by linking both real completion
+   paths (`act()` and the typed-message `ADD_TO_CART` branch) back to a
+   matching `NEEDS_CHOICE` proposal. Live-verified end to end: a genuine
+   two-item add-with-a-size-choice flow, driven through the real chat and
+   tap routes, now correctly reads `completed: 1`.
+
+   The same live 3+-item test also found a second, real, previously
+   undocumented bug: a THIRD named item in one message was silently
+   dropped with no disclosure at all - worse than the already-known
+   one-at-a-time limitation. `_find_second_item` generalized to
+   `_find_extra_items` (finds every extra named product, not just the
+   first); still only the first is ever queued (queuing more than one at
+   once is a bigger, separately-scoped change, not attempted), but every
+   further item is now named honestly in the reply rather than
+   disappearing. Live-verified with a genuine three-item message.
+
+**Verification run across all four fixes:** `fuzz.py` 8/8 sequences, 480
+assertions, every invariant held, re-run after each fix and again at the
+end. `auditroutes.py` fully clean (30/30). `healthcheck.py`: 117 passed, 2
+FAILED - both are the already-documented Groq-throttle model-variance
+class (directly reproduced by hand: "add the Trailblazer Running Shoe to
+my cart" with no size returned `ADD_TO_CART` with 3 choices on one retry
+and a different valid action with `used_model` differing on others,
+across three back-to-back identical calls with no code changes in
+between), not a regression from this diff. `invariant-guard` was run
+earlier in this same session against the state before these four fixes
+(SAFE - tap-trust preserved, no fabrication, no risk-gate bypass, no
+idempotency change) but has **not** been re-run against these four fixes
+specifically - worth doing before treating this as fully closed.
+
+**Not done, and explicitly not self-certified:** no `value-auditor` pass
+has been run against these four fixes themselves. Per this file's own
+maintenance rule and CLAUDE.md's value bar, nothing here should move to
+`Completed.md` on the strength of this write-up alone - a fresh
+`value-auditor` pass against `2b7b5a9`/`7f9959b`/`ee70c84` (and ideally a
+fourth adversarial round specifically against `_honest_synthesis`,
+per the note in item 3 above) is the next step before any of this session's
+work is considered fully closed.
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived
