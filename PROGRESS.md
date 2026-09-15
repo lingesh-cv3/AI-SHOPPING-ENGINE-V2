@@ -111,6 +111,26 @@ own docstring, closing two real bypass shapes found by `value-auditor` and
 further live testing - not re-audited a third time this session, since no
 new bypass was found).
 
+**A later session (commit `8275610`) re-spot-checked `_honest_synthesis`
+manually - one fresh adversarial live turn, not a formal `value-auditor`
+run.** A zero-shopping-state comparison ("compare the Trailblazer Running
+Shoe and the Marathon Pro Racing Shoe" with nothing stated first)
+correctly returned the plain "Here's how they compare." fallback with no
+fabricated personalization claim. This is one spot-check, not an
+independent adversarial audit - the `value-auditor`/`invariant-guard`/
+`progress-scribe` agents were not available to be invoked in the session
+that made this note (an execution-environment constraint, not a decision
+to skip them), so none of the four fixes committed this session
+(`1564299`, `3884ef0`, `1b20cc4`+`8275610`, and the relevance fix above)
+have had a genuine independent `value-auditor` pass. **This is the honest
+reason none of them have moved to `Completed.md`** - each is invariant-
+sound by direct inspection and live-verified against the test suites and
+several fresh phrasings, but per this file's own maintenance note, that is
+necessary and not sufficient. The next session with agent access should
+run `value-auditor` against all four before considering any of them done,
+and `invariant-guard` as a formal (not manual) pass on the two newest
+diffs (the multi-item queue and the relevance/extraction commit).
+
 **Still open, not attempted this session given the size of a real fix:**
 multi-item add in one message still only adds the first item - the
 documented fix (a pending-item queue surviving the tap round-trip across
@@ -338,6 +358,27 @@ limitation and should keep being described that way, not as fixed.
 untouched (no new regexes added) since the fix target was the general
 extraction call, not the stopgap layered on top of it.
 
+**Second update, a later session (commit `8275610`).** Investigated exactly
+which phrasing shapes the 3/10 misses above had in common: constraints
+stated as a trailing clause or aside rather than their own sentence
+("...and honestly I'm not really into anything too flashy looking
+either"), and constraints implied by a stated reason rather than given as
+a bare instruction ("my old shoes gave me blisters so cushioning is what I
+care about now"). Added two more worked few-shot examples to
+`prompts.py` covering exactly these two shapes, rather than guessing.
+Re-tested against 10 brand-new fresh phrasings (not reused from this or
+any prior test), read directly from `shopping_states`: **9/10 now capture
+at least one field correctly (up from 7/10), and only 1/10 captures
+nothing at all (down from 3/10).** Two of the nine still miss a secondary
+constraint stated in the same message (a caffeine-level exclusion, an
+acidity exclusion) - genuine, real improvement, still not a fix. Free-text
+extraction reliability from an LLM call remains an open limitation; this
+narrows it further and should be described as narrowed, not solved.
+`healthcheck.py` 119/120 (1 pre-existing unrelated flake), `fuzz.py` 8/8
+sequences (480 assertions), no invariant violations - this fix shares a
+commit with the relevance fix below, and both were verified together.
+No `value-auditor` pass has been run on this specific change.
+
 **One real user-reported chat bug, still open** (the original list had
 seven; seven were addressed this session - see `Completed.md` #34, both its
 original four and its later continuation covering the button-recovery
@@ -481,6 +522,54 @@ could check against (which does not exist as a data model anywhere in this
 codebase today). Verification for this pass: no code changed
 (`git diff` is empty for this investigation), so no suite was re-run;
 confirmed live only via the four fresh chat turns described above.
+
+**Fixed, a later session (commit `8275610`), correcting the "no fix
+exists" conclusion above with a narrower mechanism than either prior
+session considered.** The prior session's inspection checked whether the
+query word appeared anywhere in Kettle's catalog text and found "coffee"
+absent - but only checked product names/story text as a whole, not
+per-product; a direct re-check found "coffee" *does* appear once, literally,
+in one product's own description ("Swiss Water Decaf": *"Tastes like
+coffee, not like decaf"*) - the earlier claim that the legitimate and
+illegitimate query words "each score zero against the real catalog's own
+text" is corrected by this: the coffee word is not entirely absent, it is
+merely sparse (one occurrence among the whole catalog), which is why a
+`limit=100`-wide unfiltered browse's description-text scan can still see
+it while a narrower per-title keyword search cannot.
+
+New `relevance.shop_carries(query, catalog_sample)` gates
+`RECOMMEND_PRODUCTS`'s whole-catalog substitution fallback specifically
+(never the narrower keyword-matched path that already found something
+real, and never `SUGGEST_ALTERNATIVE`, which was already confirmed above
+to already degrade honestly): before substituting an unrelated product, it
+checks whether the query's significant words overlap *any* product's
+category **or description/title text** across the already-fetched wide
+browse sample - not just the narrow candidate set that already failed to
+match. Live-verified explicitly, both directions, on the actual reported
+regression cases: "a fruity coffee" and "something smooth and not too
+bitter" on Kettle continue to return real coffee matches (no regression);
+"do you sell kayaks?", "I need a tent for camping", and "do you have ski
+goggles?" on both merchants now correctly answer "I couldn't turn anything
+up for that" instead of substituting an unrelated real product ("something
+smooth and not too bitter" also degraded honestly rather than substituting
+- an acceptable outcome, not a regression, since Kettle's catalog text
+genuinely has no signal for "smooth"/"bitter" either).
+`healthcheck.py` 119/120 (1 pre-existing unrelated flake), `fuzz.py` 8/8
+sequences (480 assertions), no invariant violations.
+
+**Still genuinely open, honestly:** this closes the specific reported
+regression shape (a query whose word is entirely absent from a shop's
+catalog vocabulary) but remains keyword-based, not semantic - a query
+using a true synonym with literally zero shared substring anywhere in the
+catalog (title, description, or category) would still be indistinguishable
+from a genuinely-absent category, because `shop_carries` has nothing else
+to check. The narrower "kayak" → "water" → water bottle case identified in
+the prior session's investigation (a model-chosen single weak word
+association surviving as the *only* candidate via the narrower keyword
+path, not this fallback) is untouched by this fix and remains open - it
+would need a genuine semantic relevance judgment, not a keyword check, per
+the prior session's own conclusion. No `value-auditor` pass has been run
+on this specific fix.
 
 **The `engine/reasoning/llm.py` logging crash found during Phase 2 smoke
 testing is now fixed, as part of the hardening pass** (see item 0 above for
