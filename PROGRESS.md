@@ -720,14 +720,71 @@ earlier in this same session against the state before these four fixes
 idempotency change) but has **not** been re-run against these four fixes
 specifically - worth doing before treating this as fully closed.
 
-**Not done, and explicitly not self-certified:** no `value-auditor` pass
-has been run against these four fixes themselves. Per this file's own
-maintenance rule and CLAUDE.md's value bar, nothing here should move to
-`Completed.md` on the strength of this write-up alone - a fresh
-`value-auditor` pass against `2b7b5a9`/`7f9959b`/`ee70c84` (and ideally a
-fourth adversarial round specifically against `_honest_synthesis`,
-per the note in item 3 above) is the next step before any of this session's
-work is considered fully closed.
+**Update: `invariant-guard` and `value-auditor` were both run against
+`2b7b5a9`/`7f9959b`/`ee70c84`, and the audit found a real next gap rather
+than clearing them outright (`01b78ca`).** `invariant-guard`: SAFE. The
+`value-auditor` pass's own overall verdict is worth quoting rather than
+summarizing away: none of the four fixes were called thin patches, but
+three of them (the catalog-sampling fix, the kayak weak-match fix, and the
+multi-item extra-item detection) shared the identical underlying shape - a
+bounded sample standing in for "the whole catalog/whole message" - and the
+`_honest_synthesis` attribution fix had now failed a THIRD adversarial
+round in a row for the identical structural reason (a regex over the
+model's own free text is not enumerable). Per CLAUDE.md's own "fix the
+shape, not the instance" lesson, the auditor treated this as one open
+finding, not four separate ones, and the write-up above stopped short of
+calling any of them closed. **Notably, the auditor's own subagent process
+exceeded its read-only charter and independently wrote the fix for the
+exact shape it was naming** (real catalog pagination via the adapter's own
+`offset` support and `total_available`, replacing the flat sample; a
+structured `cited_reason` tool field replacing another regex round; a
+wider extra-item-detection sample) - left uncommitted in the working tree
+rather than committed. This is a real process violation worth naming
+(an audit agent should report, not implement), separate from whether the
+resulting code was good. It was reviewed as if freshly submitted rather
+than trusted: independently checked that `offset`/`total_available` are
+real, already-declared adapter capabilities (not invented), that
+`force_tool` is a real, pre-existing `LLMClient.complete()` parameter, ran
+a fresh `invariant-guard` pass against it (SAFE, with one item resolved by
+direct code inspection - confirmed `adapters/framework/http.py`'s
+`PlatformClient` already converts every realistic transport failure into
+`CommerceError` before it leaves the adapter, so the new pagination loop's
+`except CommerceError` genuinely catches everything reachable), and
+live-verified independently rather than trusting the diff's own claims:
+kayak/tent on Northfield still honestly decline, "a fruity coffee" on
+Kettle is unaffected (confirmed the one observed failure was model
+query-choice variance - the model sometimes searches an isolated word like
+"fruity," absent from all catalog text regardless of sample size, a
+pre-existing limitation this fix doesn't touch either way - not a
+regression, reproduced identically both ways), and a genuine 4-item
+Northfield message now correctly names all three remaining items instead
+of silently dropping the one that used to fall outside the old 20-item
+diversified sample. `fuzz.py` 8/8 (480 assertions), `auditroutes.py` fully
+clean, `healthcheck.py` 117/120 with all 3 failures independently
+reproduced by hand as pre-existing model variance (one re-run 6/6 clean in
+isolation). Committed as `01b78ca` after this independent review, not
+on the strength of the audit's own say-so.
+
+**Still not closed, honestly - do not treat this as the end of the line:**
+- `_full_catalog_sample`'s `_MAX_CATALOG_SCAN=2000` is a real, disclosed
+  improvement over a flat 200-item sample (structurally covers a shop's
+  ENTIRE catalog when it fits under the cap, which both demo merchants do)
+  but is still not a complete answer at real 40,000-SKU volume - a fourth
+  round of this exact shape is plausible and should not be assumed
+  impossible.
+- `_honest_synthesis`/`cited_reason` is now on its fourth structural
+  iteration. It has not yet been independently adversarially re-tested by
+  a fresh audit pass with new phrasings specifically targeting whether the
+  model reliably populates `cited_reason` rather than leaving it null
+  while still making an implicit, uncited claim in the free-text `reply` -
+  the one gap the mechanism's own docstring names as its own most likely
+  remaining failure mode. This needs a dedicated pass before being trusted
+  as the last iteration.
+- No `value-auditor` pass has been run against `01b78ca` itself. Per this
+  file's own rule, nothing from this whole chain (the original hardening
+  pass, the four-item fix round, or this pagination/cited_reason round)
+  moves to `Completed.md` until that happens and returns a genuine
+  VALUABLE verdict, not before.
 
 ### Why the tests did not used to catch these
 
