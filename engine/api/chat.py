@@ -85,72 +85,66 @@ def _decline_fact(reason: DeclineReason | None) -> str:
     return "That card was declined, so nothing has been charged."
 
 
-def _find_second_item(
+def _find_extra_items(
     message: str,
     catalog_sample: list | None,
     handled_product_id: str | None,
-):
-    """Find a second real product the shopper named this turn that this
-    turn's single action did not handle - see `_second_item_note`, which
-    turns this into the queued-suggestion reply. Returns the matched
-    product (from `catalog_sample`) or None.
+) -> list:
+    """Find every real product the shopper named this turn that this turn's
+    single action did not handle. The engine only ever executes one action
+    per turn (the Decision Engine picks exactly one candidate, by design -
+    see `engine/decision/engine.py`'s own docstring: "answers exactly one
+    question"), so a shopper naming two or more products in one message
+    ("the Trailblazer size 8, the Marathon Pro size 8, and the Fell Runner
+    size 8") only ever gets the first one handled by this turn's own
+    action. The caller queues the first of this function's results as a
+    real, tap-acceptable `CartProposal` and now also honestly names any
+    THIRD-or-later item rather than silently dropping it.
 
-    The engine only ever executes one action per turn - the Decision Engine
-    picks exactly one candidate, by design (see `engine/decision/engine.py`'s
-    own docstring: "answers exactly one question"). A shopper who names two
-    products to add in one message ("the Trailblazer size 8 and the Marathon
-    Pro size 8") gets only the first one handled.
-
-    Genuinely adding both in the SAME turn is not attempted - that would mean
-    either loosening variant matching (the double-add bug a looser rule
-    already caused once, Completed.md #15) or guessing which variant the
-    second item wants without a tap, which the tap-trust invariant forbids.
-    Instead the second, real, named-but-unhandled product is queued as a
-    `CartProposal` (the same tap-accept/revalidate-before-execute mechanism
-    already used for cart_intelligence's and PROPOSE_CART_CHANGE's
-    suggestions) so the shopper can pick it up with one tap in the
-    Suggestions panel - including its own size prompt if it needs one -
-    rather than being told to type the request again from scratch.
-
-    Detecting the second product is done here, directly against the
-    shopper's own words and the real catalog - NOT by checking whether the
-    model happened to propose a second ADD_TO_CART. Measured directly
-    against this codebase's actual model (gpt-4o-mini): asked to propose one
-    ADD_TO_CART per named product, in 0 of 8 identical trials did it
+    Detecting extra products is done here, directly against the shopper's
+    own words and the real catalog - NOT by checking whether the model
+    happened to propose more than one ADD_TO_CART. Measured directly
+    against this codebase's actual model (gpt-4o-mini): asked to propose
+    one ADD_TO_CART per named product, in 0 of 8 identical trials did it
     propose more than one, even with an explicit instruction to. Relying on
-    that to detect a dropped second item would mean this note almost never
-    fires - silently, the same failure this function exists to stop. Instead
-    every catalog product's title is checked against the shopper's raw
-    message directly: if a product they clearly named is not the one that
-    just ran, they asked for something this turn did not handle, regardless
-    of what the model's proposal happened to contain.
+    that to detect a dropped item would mean this note almost never fires -
+    silently, the same failure this function exists to stop.
+
+    Genuinely adding more than one item in the SAME turn is not attempted -
+    that would mean either loosening variant matching (the double-add bug
+    a looser rule already caused once, Completed.md #15) or guessing which
+    variant a later item wants without a tap, which the tap-trust invariant
+    forbids.
+
+    Live-tested this session with a genuine three-item message ("add the
+    Trailblazer size 8, the Marathon Pro size 8, and the Fell Runner size
+    8"): only the first extra match used to be surfaced at all - the
+    second extra item (the third product overall) was silently dropped
+    with no disclosure whatsoever, the exact "generic reply"/silent-loss
+    shape this project's own standards single out. Only the single
+    first-found extra item is ever queued as a real, tap-acceptable
+    `CartProposal` (still exactly one queued item at a time - deliberately
+    not attempting to queue multiple simultaneously, which is a bigger,
+    separately-scoped change); every further named item beyond that is
+    named honestly in the reply instead of disappearing.
     """
     if not catalog_sample or not message:
-        return None
+        return []
     said = message.lower()
+    out = []
     for product in catalog_sample:
         if product.product_id == handled_product_id:
             continue
         title_words = [w for w in product.title.lower().split() if len(w) > 3]
         if not title_words:
             continue
-        # A shopper names a product colloquially - "the Marathon Pro", not
-        # "the Marathon Pro Racing Shoe" - so the bar is the title's own
-        # first distinctive word (almost always the actual product name on
-        # this catalog: Trailblazer, Marathon, Everyday), not most of the
-        # full title. A short, generic first word ("GPS Watch Series 4")
-        # falls back to needing two words in common instead, so "shoe" or
-        # "watch" alone still cannot false-positive on half the catalog.
         first = title_words[0]
-        # >5, not >4 - "Watch" (5) is a generic-enough word to show up in an
-        # unrelated sentence ("what a nice watch"); "Trailblazer"/"Marathon"/
-        # "Everyday" (8-11) are not.
         matched = first in said if len(first) > 5 else (
             sum(1 for w in title_words if w in said) >= 2
         )
         if matched:
-            return product
-    return None
+            out.append(product)
+    return out
 
 
 #: Causal-claim phrasings the model uses to attribute a recommendation to a
@@ -1170,9 +1164,11 @@ async def _process_turn(
                 + str(first.get("product_title", "that"))
                 + ". Which would you like?"
             )
-            needs_choice_second_item = _find_second_item(
+            extra_items = _find_extra_items(
                 req.message, catalog_sample, first.get("product_id")
             )
+            needs_choice_second_item = extra_items[0] if extra_items else None
+            still_unhandled = extra_items[1:]
             if needs_choice_second_item is not None and req.cart_id:
                 try:
                     created = await db.cart_proposals.create(
@@ -1213,6 +1209,12 @@ async def _process_turn(
                         "\n\nI can only take one item at a time right now - ask me "
                         "for the other one next and I'll add that too."
                     )
+            if still_unhandled:
+                names = ", ".join(p.title for p in still_unhandled)
+                reply += (
+                    f"\n\nI can only queue one item at a time - once these are "
+                    f"sorted, ask me for {names} next and I'll take care of it."
+                )
         elif executed.action_type == "CLEAR_CART":
             # Written by the engine, not the model.
             #
@@ -1453,16 +1455,41 @@ async def _process_turn(
                 removed = executed.payload.get("removed")
                 try:
                     if executed.action_type == "ADD_TO_CART":
+                        added_product_id = trace.selected.action.parameters.get(
+                            "chosen_product"
+                        ) or trace.selected.action.parameters.get("product_id")
                         await shopper_events.record(
                             connection_id=req.connection_id,
                             session_id=req.session_id,
                             event_type=shopper_events.EventType.ADD_TO_CART,
                             shopper_id=shopper_id,
-                            product_id=trace.selected.action.parameters.get(
-                                "chosen_product"
-                            )
-                            or trace.selected.action.parameters.get("product_id"),
+                            product_id=added_product_id,
                         )
+                        # Same linkage as the tap endpoint (`act()` above): a
+                        # multi-item queue's second item left in NEEDS_CHOICE
+                        # state can also be resolved by the shopper typing a
+                        # follow-up message ("the 8") rather than tapping,
+                        # which reaches here, not `act()`. Without this, that
+                        # path also would never let
+                        # `multi_item_completion_rate` see the completion.
+                        if req.cart_id and added_product_id:
+                            stuck = await db.cart_proposals.needs_choice_for_cart_product(
+                                req.connection_id, req.cart_id, added_product_id
+                            )
+                            if stuck:
+                                await db.cart_proposals.set_state(
+                                    req.connection_id,
+                                    stuck["proposal_id"],
+                                    state="EXECUTED",
+                                )
+                                await shopper_events.record(
+                                    connection_id=req.connection_id,
+                                    session_id=req.session_id,
+                                    event_type=shopper_events.EventType.PROPOSAL_EXECUTED,
+                                    shopper_id=shopper_id,
+                                    product_id=added_product_id,
+                                    detail={"proposal_id": stuck["proposal_id"]},
+                                )
                     elif executed.action_type == "REMOVE_CART_LINE":
                         await shopper_events.record(
                             connection_id=req.connection_id,
@@ -1479,15 +1506,17 @@ async def _process_turn(
                 done_sentence = done + (
                     f". Your cart is now {count} item(s), {total}." if count is not None else "."
                 )
-                second_item = (
-                    _find_second_item(
+                extra_add_items = (
+                    _find_extra_items(
                         req.message,
                         catalog_sample,
                         trace.selected.action.parameters.get("product_id"),
                     )
                     if executed.action_type == "ADD_TO_CART" and req.cart_id
-                    else None
+                    else []
                 )
+                second_item = extra_add_items[0] if extra_add_items else None
+                still_unhandled_add = extra_add_items[1:]
                 second_note = ""
                 if second_item is not None:
                     # A genuine second product was named this turn and not
@@ -1538,6 +1567,12 @@ async def _process_turn(
                             "\n\nI can only take one item at a time right now - ask me "
                             "for the other one next and I'll add that too."
                         )
+                if still_unhandled_add:
+                    names = ", ".join(p.title for p in still_unhandled_add)
+                    second_note += (
+                        f"\n\nI can only queue one item at a time - once that's "
+                        f"sorted, ask me for {names} next and I'll take care of it."
+                    )
                 if second_note:
                     # Drop the model's own pre-written sentence rather than
                     # prefixing it, when a second item was genuinely named.
@@ -1963,6 +1998,41 @@ async def act(
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("could not record cart event; continuing")
+            # A multi-item queue's second item is only ever left in
+            # NEEDS_CHOICE state (see accept_proposal below) when it needs
+            # its own size/variant pick - the actual add then happens
+            # through this ordinary tap, not through the proposal mechanism
+            # itself, so nothing previously closed the loop back to the
+            # proposal it came from. Without this, `multi_item_completion_
+            # rate` could never see a completion for the (common) case
+            # where the queued item has more than one variant - found live
+            # this session: the two-item test case above completed the
+            # cart correctly but the metric stayed at 0 completed until
+            # this link was added.
+            try:
+                stuck = (
+                    await db.cart_proposals.needs_choice_for_cart_product(
+                        req.connection_id, req.cart_id, req.product_id
+                    )
+                    if req.cart_id
+                    else None
+                )
+                if stuck:
+                    await db.cart_proposals.set_state(
+                        req.connection_id, stuck["proposal_id"], state="EXECUTED"
+                    )
+                    await shopper_events.record(
+                        connection_id=req.connection_id,
+                        session_id=req.session_id,
+                        event_type=shopper_events.EventType.PROPOSAL_EXECUTED,
+                        shopper_id=await who.shopper_id_for(req.connection_id),
+                        product_id=req.product_id,
+                        detail={"proposal_id": stuck["proposal_id"]},
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "could not close out a needs-choice proposal via tap; continuing"
+                )
             count = executed.payload.get("item_count")
             total = executed.payload.get("grand_total")
             chosen = next(

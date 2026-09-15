@@ -93,6 +93,30 @@ async def pending_for_cart(connection_id: str, cart_id: str) -> list[dict]:
     return [_as_dict(r) for r in rows]
 
 
+async def needs_choice_for_cart_product(
+    connection_id: str, cart_id: str, product_id: str
+) -> dict | None:
+    """The most recent NEEDS_CHOICE proposal for this exact cart+product, if
+    any - used only to link an eventual ordinary tap-add (resolving the
+    size/variant a NEEDS_CHOICE proposal itself could not capture) back to
+    the multi-item queue it came from, so `events.multi_item_completion_rate`
+    can count it as completed. Read-only lookup; never mutates state itself
+    - the caller decides what, if anything, to do with the match."""
+    async with session_scope() as db:
+        result = await db.execute(
+            select(CartProposal)
+            .where(
+                CartProposal.connection_id == connection_id,
+                CartProposal.cart_id == cart_id,
+                CartProposal.product_id == product_id,
+                CartProposal.state == "NEEDS_CHOICE",
+            )
+            .order_by(CartProposal.created_at.desc())
+        )
+        row = result.scalars().first()
+    return _as_dict(row) if row else None
+
+
 async def set_state(
     connection_id: str,
     proposal_id: str,

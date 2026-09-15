@@ -160,6 +160,64 @@ async def shortlist_engagement(
     }
 
 
+async def multi_item_completion_rate(connection_id: str, days: int = 30) -> dict:
+    """Of the second-item proposals queued by a multi-item add-in-one-message
+    (`engine/api/chat.py`'s `_find_second_item`, tagged
+    `detail.source == "multi_item_add"` on their `PROPOSAL_CREATED` event),
+    how many were actually completed (`PROPOSAL_EXECUTED`, joined on the
+    same `proposal_id`) - the named figure CLAUDE.md's value bar requires
+    for this feature: before it, a second item named in the same message
+    was silently dropped with no queue at all; now it is reachable in one
+    tap, and this is what lets anyone actually check whether shoppers take
+    that tap.
+
+    Same standing caveat as `shortlist_engagement`: instrumentation, not
+    proof - sample sizes in practice are small and mostly test traffic
+    during development. Do not read a rate out of this and call it
+    business evidence without a real sample first.
+    """
+    since = datetime.now(UTC) - timedelta(days=days)
+    async with session_scope() as db:
+        created_rows = (
+            await db.execute(
+                select(ShopperEvent.detail).where(
+                    ShopperEvent.connection_id == connection_id,
+                    ShopperEvent.event_type == EventType.PROPOSAL_CREATED,
+                    ShopperEvent.created_at >= since,
+                )
+            )
+        ).all()
+        queued_ids = {
+            row.detail.get("proposal_id")
+            for row in created_rows
+            if row.detail and row.detail.get("source") == "multi_item_add"
+            and row.detail.get("proposal_id")
+        }
+        if not queued_ids:
+            return {"queued": 0, "completed": 0, "rate": None}
+
+        executed_rows = (
+            await db.execute(
+                select(ShopperEvent.detail).where(
+                    ShopperEvent.connection_id == connection_id,
+                    ShopperEvent.event_type == EventType.PROPOSAL_EXECUTED,
+                    ShopperEvent.created_at >= since,
+                )
+            )
+        ).all()
+        executed_ids = {
+            row.detail.get("proposal_id") for row in executed_rows if row.detail
+        }
+
+    completed = len(queued_ids & executed_ids)
+    total = len(queued_ids)
+    return {
+        "queued": total,
+        "completed": completed,
+        "rate": (completed / total) if total else None,
+    }
+
+
 async def record_many(
     *,
     connection_id: str,
