@@ -59,6 +59,65 @@ operator key must be typed rather than built in.
 Reported after a walkthrough. **Not a complete list** - walk the product before
 trusting anything.
 
+**A general-hardening pass, prompted directly by the user calling out a real
+pattern: features that were only ever verified against the one example
+phrasing used to build them, not the general case a real shopper will
+actually type.** Not a new feature - a fix to how one existing mechanism
+generalizes. `engine/execution/service.py`'s "is this a bare, generic browse
+request" check (`RECOMMEND_PRODUCTS`'s context-reset guard) was a hardcoded
+list of eleven exact phrases ("what do you have", "what's available", ...) -
+literal string containment, so it matched only those eleven sentences
+verbatim and missed any real paraphrase ("what else you got", "what other
+stuff do you sell", "got anything else in stock" all failed it, live-
+confirmed against the pre-fix code before changing anything). Replaced with
+`_GENERIC_BROWSE_WORDS`, a closed vocabulary of "meta-shopping" words (have,
+sell, got, carry, stock, available, everything, else, stuff, browse, ...):
+a message is treated as a generic browse request iff *every* word in it
+belongs to that vocabulary - the moment any real word appears ("shoes",
+"waterproof", "kayak"), the check correctly falls through to naming
+something specific. This is compositional rather than enumerative - it
+covers any wording built from that vocabulary, not just the sentences
+someone happened to test - while staying exactly as deterministic and
+inspectable as the phrase list it replaced (no model call, no fuzzy
+matching, no new I/O). Still honestly narrow in one respect, stated
+plainly rather than oversold: a genuinely new *word* for browsing that
+isn't in the set (e.g. "peruse") still needs adding, same as before - what
+changed is that whole new *sentences* built from already-known words no
+longer need to be individually anticipated.
+
+Live-verified against both demo merchants with fresh phrasings not used to
+build the fix: "what else you got" (Northfield) and "what other stuff do
+you sell" (Kettle) both correctly returned the full category list rather
+than a stale or wrong result. `fuzz.py`: 8/8 sequences, 480 assertions,
+every invariant held (model-free, so it does not exercise this specific
+code path, but confirms nothing else regressed from touching
+`engine/execution/service.py`). `healthcheck.py`/`auditroutes.py` were not
+re-run this session (services were only brought up for this pass, not left
+running for a full suite pass under the Groq throttle) - re-run both before
+trusting this beyond the two live checks above.
+
+The other narrow-example spots looked at this session and found already
+reasonably general, not left as further work: `engine/execution/
+relevance.py`'s word-overlap re-scoring (already a from-scratch algorithm
+over arbitrary words, not a hardcoded per-example list, and its "kayak
+searches turn up an unrelated water bottle" limitation is already disclosed
+to the shopper honestly via `relevance_relaxed`, not hidden - see the
+`elif relevance_relaxed and products` branch in `chat.py`); `mission_ranking.py`'s
+intensifier/related-term handling (already generalized past the single
+"waterproof" example via `_INTENSIFIER_PREFIXES` and an explicit, honestly-
+scoped `_RELATED_NOT_EQUIVALENT` table); and `_honest_synthesis` in
+`chat.py` (already been through two rounds of adversarial hardening per its
+own docstring, closing two real bypass shapes found by `value-auditor` and
+further live testing - not re-audited a third time this session, since no
+new bypass was found).
+
+**Still open, not attempted this session given the size of a real fix:**
+multi-item add in one message still only adds the first item - the
+documented fix (a pending-item queue surviving the tap round-trip across
+turns) is a real architecture change, not a generalization of existing
+code, and was correctly left for its own dedicated session rather than
+rushed here.
+
 **Occasional near-duplicate assistant messages** from the poll's deduplication -
 the last real behaviour bug, browser-only. One reproduction attempt so far
 (see `Completed.md`'s standing-lesson entries for the general practice this

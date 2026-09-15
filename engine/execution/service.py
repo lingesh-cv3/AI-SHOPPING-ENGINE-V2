@@ -66,23 +66,41 @@ _RECOVERY_METHOD = {
 
 logger = logging.getLogger(__name__)
 
-#: Deliberately narrow and literal - phrases that cannot themselves be naming
-#: a category or a rating request, only ever a bare "show me what you sell".
-#: Does NOT include "top rated" phrasing: a bare "what are the top rated
-#: products" is its own, already-correct case (rating-sorted, every category)
-#: and must keep that signal rather than being flattened to a plain browse.
-_GENERIC_BROWSE_PHRASES = (
-    "what products are available",
-    "what products do you have",
-    "what do you have",
-    "what do you sell",
-    "what's available",
-    "what is available",
-    "show me everything",
-    "show me what you have",
-    "what can i buy",
-    "what's in the store",
-    "what is in the store",
+#: A closed vocabulary of "meta-shopping" words - words that talk *about*
+#: browsing/buying in general without ever naming a specific product,
+#: category, brand or attribute. A message is a generic browse request iff
+#: every one of its words is in this set - the moment a real word appears
+#: ("shoes", "waterproof", "kayak", "cheap"), the check fails and the
+#: message is treated as naming something specific, correctly.
+#:
+#: This replaced a literal list of eleven exact phrases (see git history),
+#: which only matched a shopper saying one of those eleven sentences
+#: verbatim - "what else you got", "what other stuff do you sell", "got
+#: anything else in stock" all failed it even though they are the same
+#: request in different words. A closed word-set is compositional: it
+#: covers any ordering/subset of these words, not just the exact phrasings
+#: someone happened to test against. Still deliberately not semantic
+#: understanding - a genuinely new way of asking ("do you stock things")
+#: needs its words added here too - but it no longer requires the whole
+#: sentence to be pre-anticipated, only the individual words.
+#: Does NOT include "top rated"/"rated"/"best": a bare "what are the top
+#: rated products" is its own, already-correct case (rating-sorted, every
+#: category) and must keep that signal rather than being flattened to a
+#: plain browse.
+_GENERIC_BROWSE_WORDS = frozenset(
+    {
+        "what", "whats", "do", "you", "have", "has", "having", "sell",
+        "sells", "selling", "sold", "got", "get", "carry", "carries",
+        "offer", "offers", "stock", "stocks", "stocked", "available",
+        "availability", "show", "showing", "me", "us", "everything",
+        "anything", "else", "other", "others", "product", "products",
+        "item", "items", "thing", "things", "stuff", "store", "shop",
+        "shops", "is", "in", "at", "the", "a", "an", "your", "can", "i",
+        "we", "buy", "buying", "browse", "browsing", "look", "looking",
+        "catalog", "catalogue", "range", "selection", "any", "list",
+        "listing", "all", "there", "around", "here", "on", "for", "to",
+        "of", "and", "or", "please", "just",
+    }
 )
 
 #: Actions that finish without touching the merchant's backend. Answering a
@@ -444,8 +462,12 @@ class ExecutionService:
                 # resets category/query/top_rated, because a phrase this
                 # generic cannot itself be naming a category to keep.
                 said = str(params.get("said") or "").strip().lower()
-                is_generic_browse_phrase = action_type is ActionType.RECOMMEND_PRODUCTS and any(
-                    phrase in said for phrase in _GENERIC_BROWSE_PHRASES
+                _said_words = [w.strip(".,!?'\"") for w in said.split()]
+                _said_words = [w for w in _said_words if w]
+                is_generic_browse_phrase = (
+                    action_type is ActionType.RECOMMEND_PRODUCTS
+                    and bool(_said_words)
+                    and all(w in _GENERIC_BROWSE_WORDS for w in _said_words)
                 )
                 if is_generic_browse_phrase:
                     category = ""
