@@ -639,7 +639,9 @@ class ExecutionService:
                 # both words) exists in the same result set. See
                 # engine/execution/relevance.py for what this does and does
                 # not do; it never touches the empty-query browse below.
-                relevant = relevance.best_matches(found.products, query)
+                match_score, relevant = relevance.best_matches_with_score(
+                    found.products, query
+                )
                 relevant = [p for p in relevant if _within_category(p)]
                 in_budget = [p for p in relevant if _within_price(p)]
 
@@ -652,6 +654,27 @@ class ExecutionService:
                 # `budget_relaxed` lets the reply say which is true.
                 budget_relaxed = bool(query) and bool(relevant) and price_bounded and not in_budget
                 candidates = relevant if budget_relaxed else in_budget
+
+                # A "match" whose entire justification is one coincidentally
+                # shared word ("kayak" narrowed by the model to "water",
+                # landing on an "Insulated Water Bottle") has had no real
+                # discrimination applied - best_matches only ever compares
+                # candidates against each other, and with a single-word
+                # query there is nothing to compare against. Re-verify a
+                # weak single-word hit against the same wider category/
+                # description signal `shop_carries` already uses for the
+                # zero-match browse fallback below, so a shop that plainly
+                # doesn't sell anything like the query cannot present a
+                # coincidental word overlap as if it answered the question.
+                # Never applied to a multi-word query or a score>1 match -
+                # those already survived real word-overlap discrimination.
+                weak_match_rejected = False
+                if candidates and relevance.weak_single_word_match(query, match_score):
+                    wide_sample = await adapter.search_products("", limit=200)
+                    if not relevance.shop_carries(query, wide_sample.products):
+                        candidates = []
+                        relevant = []
+                        weak_match_rejected = True
 
                 if top_rated:
                     # Never invented: a product with no rating on this platform
@@ -687,10 +710,24 @@ class ExecutionService:
                 # "nothing matched, these are what's available instead"
                 # rather than getting a confident-looking list either way.
                 relevance_relaxed = False
-                shop_carries_query = True
+                shop_carries_query = not weak_match_rejected
                 if not titles and action_type is ActionType.RECOMMEND_PRODUCTS:
                     relevance_relaxed = bool(query)
-                    found = await adapter.search_products("", limit=30 if narrowed else 6)
+                    # Sampled, not exhaustive: on a real 40k-SKU catalog this
+                    # 200-item catalog-order slice can still miss a genuinely
+                    # carried category with no representative among the
+                    # first 200 items - the same real-volume risk CLAUDE.md
+                    # names for _catalog_alerts's limit=100. The commerce
+                    # interface (shared/interfaces/commerce.py) has no
+                    # category-filtered or paginated search primitive to do
+                    # better with; adding one is new adapter-interface
+                    # surface, out of scope for this hardening pass. Bumped
+                    # from 30/6 to 200 (this project's own existing
+                    # precedent for a "list real categories" browse a few
+                    # lines above already uses 100) specifically because a
+                    # false "not carried" is an active wrong claim, not a
+                    # neutral gap - worth a wider, still-bounded sample.
+                    found = await adapter.search_products("", limit=200)
                     candidates = [
                         p for p in found.products if _within_price(p) and _within_category(p)
                     ]

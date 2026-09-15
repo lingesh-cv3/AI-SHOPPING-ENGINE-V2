@@ -65,6 +65,27 @@ def _overlap(words: list[str], text: str) -> int:
     return sum(1 for w in words if w in text or w.rstrip("s") in text)
 
 
+def best_matches_with_score(products: list, query: str) -> tuple[int, list]:
+    """Same as `best_matches`, but also returns the winning overlap score.
+
+    A score of 0 with a non-empty `products` return never happens (see
+    `best_matches`); a score of 0 with an empty return means the query had
+    significant words but nothing shared even one. The score itself lets a
+    caller distinguish a single-word coincidental hit ("water" matching an
+    "Insulated Water Bottle" when the shopper actually asked about kayaks)
+    from a genuinely strong match, without hardcoding any word list.
+    """
+    words = _significant_words(query)
+    if not words:
+        return len(words), products
+    scored = [(_overlap(words, _product_text(p)), p) for p in products]
+    scored = [(s, p) for s, p in scored if s > 0]
+    if not scored:
+        return 0, []
+    top = max(s for s, _ in scored)
+    return top, [p for s, p in scored if s == top]
+
+
 def best_matches(products: list, query: str) -> list:
     """Keep only the products that best match `query`'s significant words.
 
@@ -77,15 +98,25 @@ def best_matches(products: list, query: str) -> list:
     what was actually asked - the caller's job, not this function's, to
     decide what to say about that.
     """
+    _, matches = best_matches_with_score(products, query)
+    return matches
+
+
+def weak_single_word_match(query: str, top_score: int) -> bool:
+    """True when a match's entire justification is one shared word.
+
+    A query with more than one significant word that only achieves a
+    top score of 1 already went through the ordinary multi-word
+    discrimination `best_matches` provides. A query that is itself a
+    single significant word (often the model's own paraphrase of what the
+    shopper actually said, e.g. "kayak" narrowed to "water") scoring 1 has
+    had no discrimination applied at all - one coincidental shared word is
+    the entire basis for the match. Used to decide when a narrow-search
+    "hit" is weak enough to need the wider `shop_carries` category check
+    applied to it too, not just to the zero-match browse fallback.
+    """
     words = _significant_words(query)
-    if not words:
-        return products
-    scored = [(_overlap(words, _product_text(p)), p) for p in products]
-    scored = [(s, p) for s, p in scored if s > 0]
-    if not scored:
-        return []
-    top = max(s for s, _ in scored)
-    return [p for s, p in scored if s == top]
+    return len(words) <= 1 and top_score == 1
 
 
 def shop_carries(query: str, catalog_sample: list) -> bool:
