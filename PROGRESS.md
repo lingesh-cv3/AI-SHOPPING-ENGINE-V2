@@ -321,6 +321,23 @@ in isolation; whether the model can be prompted into consistently
 populating every field across arbitrary phrasing has not been exhaustively
 tested and should not be assumed.
 
+**Update, a later session:** the `propose_actions` prompt in
+`engine/reasoning/prompts.py` was rewritten to explicitly instruct
+checking the message against every field in turn rather than stopping at
+the first match, with three new worked examples covering compound
+multi-constraint sentences. Measured honestly against 10 fresh phrasings
+this session did not reuse from any prior test (5 Northfield, 5 Kettle,
+read directly from the `shopping_states` table rather than inferred from
+the reply text): 7/10 correctly captured multiple/all of the stated
+constraints in one call, 3/10 captured nothing at all. This is a real
+improvement over the roughly-50%-landing-nothing-usable baseline an
+earlier `value-auditor` pass measured, but it is not solved - free-text
+extraction reliability from an LLM call remains a genuine, open
+limitation and should keep being described that way, not as fixed.
+`engine/reasoning/explicit_extraction.py`'s narrow regex stopgap was left
+untouched (no new regexes added) since the fix target was the general
+extraction call, not the stopgap layered on top of it.
+
 **One real user-reported chat bug, still open** (the original list had
 seven; seven were addressed this session - see `Completed.md` #34, both its
 original four and its later continuation covering the button-recovery
@@ -328,24 +345,53 @@ re-test finding, the comparison UI, and category-first browsing, all now
 fixed and verified. This one item is a deliberate partial mitigation, not a
 full fix):
 
-- **Multi-item add in one message.** "Add the X size 8 and the Y size 8"
-  still only ever adds the first item in one turn - `Completed.md` #34's
-  continuation added an honest note telling the shopper the second item
-  wasn't dropped silently ("ask me for the other one next and I'll add that
-  too"), but both items are still not added simultaneously. A real
-  architecture gap, not a quick fix: `engine/decision/engine.py`'s Decision
-  Engine selects exactly one action per turn by design (its own docstring
-  says as much), and the existing anti-double-add rule only trusts an exact
-  tap or an exact whole-message match, never a parsed multi-item free-text
-  guess - loosening that matching is the same fuzzy-matching trap
-  `Completed.md` #15 already documents as tried and removed for causing
-  double-adds. A real fix needs a pending-item queue that survives the tap
-  round-trip across turns (propose item one, wait for the shopper's size tap,
-  then automatically re-offer item two rather than requiring the shopper to
-  ask again) - deliberately not attempted this session to avoid risking a
-  half-built state machine that could reopen the double-add bug class.
-  Whoever picks this up next should design that queue explicitly, not patch
-  around the single-action-per-turn constraint.
+- **Multi-item add in one message - fixed, live-verified, NOT yet
+  value-audited.** "Add the X size 8 and the Y size 8" used to only ever
+  add the first item and tell the shopper to ask again for the second. A
+  pending-item queue now exists, built as orchestration around the
+  existing `CartProposal` mechanism rather than a new `ActionType`: the
+  second, real, catalog-named product the shopper mentioned in the same
+  message and that this turn's single action did not handle is queued as
+  a real `CartProposal` (`engine/api/chat.py`, both the plain-ADD success
+  path and the needs-choice path), appearing in the shopper's Suggestions
+  panel with one tap. `accept_proposal` gained a `NEEDS_CHOICE` terminal
+  state (distinct from `FAILED`) for a queued item that itself needs a
+  size/option pick - the proposal is retired (never left `PENDING`) and
+  returns the same `choices` shape a normal size question already uses,
+  so the shopper finishes it with one more ordinary trusted tap
+  (`/api/chat/act`, `chosen_variant` from the tap, never a model guess) -
+  never by re-accepting the same proposal, which now correctly 409s.
+  `storefront/src/ProposalsPanel.tsx` renders those choices as real
+  buttons. The exact-match/tap-trust discipline that prevents fuzzy-match
+  double-adds (`Completed.md` #15) is untouched - only the "what to offer
+  next" orchestration is new, and no variant is ever guessed from parsed
+  free text.
+
+  Live-verified end to end against Northfield: "Add the Trailblazer
+  Running Shoe size 8 and the Marathon Pro Racing Shoe size 8" asked for
+  the Trailblazer's size (multi-variant), queued the Marathon Pro as a
+  proposal; tapping the Trailblazer's size 8 added it; accepting the
+  queued proposal returned the Marathon Pro's own size choices (also
+  multi-variant); tapping its size 8 added it too - both ended up in the
+  cart at quantity 1 each. Re-accepting the same (now-terminal) proposal
+  id correctly returned 409 with no cart change - no double-add path
+  found. `invariant-guard`: SAFE (verified the proposal path reuses the
+  identical `db.cart_proposals.create`/risk-gate/revalidate-at-accept
+  mechanism existing `PROPOSE_CART_CHANGE` proposals already use, the tap
+  is the only trusted source of `chosen_variant`, and the try/except
+  around proposal creation degrades to the old honest text on failure
+  rather than crashing the turn). `fuzz.py`: 8/8 sequences, 480
+  assertions, every invariant held. `healthcheck.py`/`auditroutes.py`: no
+  regression (the only failures across two runs were the pre-existing,
+  already-documented Groq-throttle model-variance flakes, different ones
+  each run).
+
+  **Not yet done:** a genuinely simultaneous three-or-more-item message is
+  untested (only two named items was tried); no `value-auditor` pass has
+  been run against this specific capability yet, so it stays here rather
+  than moving to `Completed.md` even though it is functionally complete
+  and verified - per this file's own maintenance note, a feature needs the
+  value bar cleared, not just a passing test, before it moves.
 
 **Weak relevance judgment in `SUGGEST_ALTERNATIVE`'s whole-catalog browse
 fallback, pre-existing and unresolved** (found again, not newly introduced,
