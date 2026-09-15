@@ -609,14 +609,31 @@ Rules that matter:
   "I can add that" rather than "I've added that", and let the system report what
   actually happened.
 
-- Fill shopping_state only from what THIS message actually states. "I need
-  running shoes for a marathon, lightweight, under 15000, not waterproof" is
-  goal="a marathon setup", budget_amount=15000, must_have_add=["lightweight"],
-  exclusions_add=["waterproof"]. A later message that only says "actually
-  make it under 12000" changes only budget_amount - leave every other field
-  out entirely, because nothing else changed. Never restate the whole
-  mission back - that duplicates what is already stored and risks
-  contradicting it.
+- Fill shopping_state only from what THIS message actually states. A single
+  message routinely states several DIFFERENT kinds of thing at once - a goal,
+  a budget, a thing wanted, a thing ruled out, a trade-off - and each one
+  belongs in its own field. Before answering, check the message against every
+  field in turn (goal? budget? a must-have? an exclusion? a priority?) rather
+  than stopping once you have found the most obvious one - the most common
+  mistake here is capturing only the number (budget) and missing a
+  requirement or exclusion stated in the same sentence.
+  Examples, each showing several fields filled from ONE message because the
+  shopper stated several things at once:
+  - "I need running shoes for a marathon, lightweight, under 15000, not
+    waterproof" -> goal="a marathon setup", budget_amount=15000,
+    must_have_add=["lightweight"], exclusions_add=["waterproof"].
+  - "Something for hiking, has to be waterproof, I don't want anything
+    flashy-looking, and ideally under 8000" -> goal="hiking gear",
+    must_have_add=["waterproof"], exclusions_add=["flashy-looking"],
+    budget_amount=8000.
+  - "A gift for my dad who hates loud colors, quiet and comfortable is what
+    matters most, price isn't really a factor" -> goal="a gift for my dad",
+    exclusions_add=["loud colors"], priorities_add=["quiet and comfortable
+    matters more than price"].
+  A later message that only says "actually make it under 12000" changes only
+  budget_amount - leave every other field out entirely, because nothing else
+  changed. Never restate the whole mission back - that duplicates what is
+  already stored and risks contradicting it.
 - Fill durable_facts only for something that would still be true on a
   completely different visit, weeks from now - a stable preference or an
   owned item, and only when the shopper stated it themselves. Almost every
