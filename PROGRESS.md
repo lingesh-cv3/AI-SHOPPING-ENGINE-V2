@@ -1311,6 +1311,110 @@ should extend the Playwright suite to them rather than reach for
    Broader webhook support across real merchant/platform adapters remains
    future work where required by a platform.
 
+9. **Shopper-assistant real-world-hardening session — five rounds, honest
+   final state.** A long session (commits `1564299` through `4017eaf`)
+   attempted to generalize several shopper-assistant behaviors past the
+   narrow example phrasings they were originally built and tested against,
+   at the user's explicit request. The pattern worth recording for whoever
+   picks this up: **every one of the first three "fixed" claims in this
+   session was independently found still broken on adversarial re-testing**
+   by a `value-auditor` pass instructed to try to break it the same way a
+   real shopper's varied phrasing would. Two mechanical bugs found by the
+   fourth audit round are now fixed and verified (below); two deeper items
+   are genuinely still open and should not be attempted again with the same
+   kind of patch - they need real architecture, named explicitly below.
+
+   **Fixed and verified this final round:**
+   - **Stock-error silent drop** (`engine/api/chat.py`, commit `4fb161a`):
+     a multi-item add whose first named product failed (out of stock, price
+     changed) fell through to the generic failure reply and silently
+     dropped every other named item - the extra-item disclosure logic only
+     ran on the success branch. Reproduced 3/3 with "Court Classic size 9,
+     Studio Training Flat size 9, Recovery Slide size 9" on Northfield
+     (Court Classic out of stock). Fixed by running the same extra-item
+     detection on the failure branch too. Live-verified 3/3: both remaining
+     items are now named rather than silently gone. (`_find_extra_items`'s
+     own word-overlap matching is somewhat over-inclusive here - it also
+     named two unrelated products in testing - but over-disclosure is a
+     much smaller problem than the silent loss this closes, and is a
+     pre-existing property of that helper, not new.)
+   - **Doubled catalog fetch per turn** (`engine/execution/service.py`,
+     commit `4017eaf`): `_full_catalog_sample` was called twice for the
+     same failed `RECOMMEND_PRODUCTS` query in one turn (the weak-single-
+     word-match re-check, then again in the zero-match browse fallback),
+     roughly doubling real adapter round-trips for a negative query (up to
+     ~20 instead of ~10 at `_MAX_CATALOG_SCAN`). Now cached and reused.
+   - Both verified with `fuzz.py` (every invariant held) and
+     `auditroutes.py` (every probe held) against the restarted engine.
+     `healthcheck.py` was not re-run this specific round (the two fixes
+     touch narrow branches already covered by the invariant/fuzz suites,
+     and this session had already established `healthcheck.py`'s
+     documented Groq-throttle instability makes single extra runs low-
+     signal) - a full three-suite pass is still owed before anything here
+     is considered for Completed.md.
+
+   **Genuinely open - do not patch again with text-matching, needs real
+   architecture:**
+   - **`_honest_synthesis`'s structural null-citation bypass**
+     (`engine/api/chat.py`). Four successive rounds added a `cited_reason`
+     field to the synthesis tool schema so the model states its reason
+     structurally - but the field is optional/nullable, and nothing forces
+     the model to populate it. When left null, a false personalization
+     claim in free prose (a true stored term mentioned as filler, while the
+     actual causal claim names something never stated) passes through
+     completely uncaught - confirmed 5/5 on fresh adversarial phrasings the
+     4th audit round constructed, none reused from any prior round. This is
+     structurally unfixable by enumerating more phrasings, per the
+     function's own docstring history (blocklist, then a term-presence
+     floor, then per-claim regex extraction - each defeated in turn). The
+     real fix: make citation **mandatory**, not optional, whenever
+     `shopping_state` has any stated priority/constraint - reject any
+     synthesized reply that makes an implicit personalization claim with no
+     `cited_reason` at all, rather than only checking `cited_reason` when
+     the model bothers to fill it in. Not attempted this round; flagged
+     explicitly as the next real step rather than left ambiguous.
+   - **Semantic relevance gap** (`engine/execution/relevance.py`). Two
+     separate live-reproduced failure shapes with no available fix using
+     category/keyword-overlap matching: (a) "do you sell kayaks?" on
+     Northfield still substitutes an unrelated real product (an Insulated
+     Water Bottle) in roughly 1 of 5 trials - the model's own query choice
+     ("water") coincidentally overlaps a real product with no actual
+     relevance; (b) "something smooth and not too bitter" on Kettle - an
+     entirely ordinary coffee-shop preference question that never names the
+     product noun - failed 100% of trials (5/5 both this round and a prior
+     round), because there is no lexical bridge between a taste-quality
+     phrase and Kettle's category/description text. Both require a genuine
+     semantic-similarity signal (embedding similarity against product
+     text, or a dedicated LLM relevance-judgment call) rather than more
+     text/category-overlap logic - not attempted, since a bounded pass
+     cannot responsibly close this without risking a sixth round of the
+     same overclaiming pattern already documented five times in this
+     session's history. Catalog-sampling itself (`_full_catalog_sample`,
+     paginating via the adapter's real `total_available`, capped at
+     `_MAX_CATALOG_SCAN=2000`) is real and not the bottleneck for either of
+     these two cases - confirmed directly, since both failures reproduce
+     regardless of sample completeness; the root cause is the lack of a
+     semantic (not lexical) matching signal.
+
+   **Also still open from earlier in this same session, unchanged:**
+   mission-state extraction still misses a constraint entirely on a
+   nontrivial minority of fresh compound-constraint phrasings (last
+   measured 1/10 with zero capture, 9/10 capturing something but not
+   necessarily every stated constraint); real-volume real-client conditions
+   for the relevance/discovery matching path have been reasoned about and
+   partially exercised (catalog pagination) but not tested against
+   anything resembling a true 40,000-SKU catalog, since none exists in this
+   environment.
+
+   **Nothing from this entire session (`1564299` through `4017eaf`) has
+   moved to Completed.md, and nothing should until:** a fresh, full
+   `invariant-guard` + `healthcheck.py`/`fuzz.py`/`auditroutes.py` pass runs
+   against the final state (`4017eaf`), AND a `value-auditor` pass
+   specifically re-audits the two newly-fixed mechanical bugs above (not
+   yet independently re-audited), AND the two named architecture items
+   above get their own dedicated implementation-and-audit pass rather than
+   being declared solved by inference from the mechanical fixes being real.
+
 ---
 
 ## Research-Backed Product Work
