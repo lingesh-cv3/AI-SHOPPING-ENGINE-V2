@@ -728,6 +728,13 @@ class ExecutionService:
                 # Never applied to a multi-word query or a score>1 match -
                 # those already survived real word-overlap discrimination.
                 weak_match_rejected = False
+                # Cached and reused below (the `if not titles` browse-fallback
+                # branch) rather than fetched a second time - both branches
+                # page the same real catalog for the same failed query in the
+                # same turn, and doing it twice roughly doubled the adapter
+                # round-trips a single negative query cost (up to ~20 instead
+                # of ~10 at `_MAX_CATALOG_SCAN`), found live this session.
+                wide_sample = None
                 if candidates and relevance.weak_single_word_match(query, match_score):
                     wide_sample = await _full_catalog_sample(adapter)
                     if not relevance.shop_carries(query, wide_sample):
@@ -783,7 +790,7 @@ class ExecutionService:
                     # 40,000-SKU catalog is still not fully covered by
                     # `_MAX_CATALOG_SCAN` - that residual gap is real,
                     # disclosed, and not claimed solved.
-                    wide_products = await _full_catalog_sample(adapter)
+                    wide_products = wide_sample if wide_sample is not None else await _full_catalog_sample(adapter)
                     candidates = [
                         p for p in wide_products if _within_price(p) and _within_category(p)
                     ]
