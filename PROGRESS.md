@@ -407,6 +407,81 @@ literal "coffee" keyword match against varietal-named products like
 keyword overlap, not attempted here to avoid re-introducing the same
 regression.
 
+**Follow-up investigation, a later session — re-attempted deliberately, live-
+tested first before writing any code, and reverted again with a sharper,
+evidence-based account of why a deterministic fix does not exist here.**
+Before touching code, the exact reported shape was re-driven live against
+the running engine to confirm it still reproduces as described. It does not
+reproduce the way the existing writeup assumes:
+
+- "do you have a kayak?" on Northfield does **not** go through the
+  whole-catalog blind-browse fallback at all. The model itself chose
+  `query="water"` (associating "kayak" with water sports), which is a
+  genuine, if weak, literal title match against "Insulated Water Bottle
+  750ml" - `relevance.best_matches` correctly keeps it as the (only, hence
+  top-scoring) result. This is a **reasoning-layer word-association choice**
+  passed through a working relevance re-score, not a broken relevance
+  re-score - a different bug shape than the one this item names.
+- Two fresh genuinely-absent-category phrasings constructed for this
+  session - "do you sell tents for camping?" and "I need ski goggles", both
+  on Northfield - were **not** mis-routed to an unrelated substitute at all.
+  Both were routed by the model to `SUGGEST_ALTERNATIVE`, which already has
+  an honest empty-result path (`"I couldn't turn anything up for that."`,
+  zero products), and both returned it correctly. The specific failure mode
+  this item describes (a confidently-offered *irrelevant* product) did not
+  reproduce for either.
+- "I want something fruity and not too acidic" on Kettle was re-verified to
+  still work, and *why* it works was traced precisely this time: the
+  model's extracted query ("fruity") has **zero literal overlap** with any
+  product's title, description, or category text in Kettle's own catalog
+  (checked directly against `sample_merchant_two/seed/catalog.py` - the
+  word "coffee" itself never appears in any product's title, description,
+  or department/collection name either). The whole-catalog browse fallback
+  returns real, relevant coffee here for one reason only: **Kettle's entire
+  catalog is coffee-adjacent**, so an unfiltered browse of everything is
+  never actually irrelevant on this specific shop. It is not evidence that
+  any relevance signal - literal, category-level, or stemmed - is
+  distinguishing this case from a genuinely-absent one.
+
+This directly confirms, with concrete evidence rather than the earlier
+session's reasoning-from-the-name, why the previously-reverted
+keyword-overlap guard could not work and why no deterministic replacement
+(category-level overlap, word-stemming, broader synonym tables) can work
+either: **on both demo catalogs, the query word for the legitimate case
+("fruity"/"coffee") and the query word for the illegitimate case ("kayak")
+each score zero against the real catalog's own text.** There is no literal
+signal, at any level of generality this codebase's other relevance code
+already uses, that is present for one and absent for the other - the
+catalogs simply do not contain the vocabulary either query would need to
+match on. Telling these two cases apart requires knowing that "coffee" *is*
+what this shop sells and "kayak" *is not*, which is knowledge about the
+shop's own identity, not about any product's text - a keyword/stem/category
+matcher has nothing to read that fact off of.
+
+**Not fixed, deliberately, a second time - not for lack of trying but
+because the two live-tested candidate mechanisms (category-text overlap,
+broader stemming) were shown by direct catalog inspection to be
+insufficient before any code was written, avoiding a repeat of building and
+then reverting.** The two live-tested "problem" phrasings that started this
+item (kayak, tent/goggles-style absence) turn out to already be handled
+correctly or to be a narrower reasoning-layer issue than a relevance-gate
+issue. What remains genuinely open is narrower than the item's original
+framing: a model-chosen weak single-word association (like "kayak" →
+"water" → water bottle) surviving `relevance.best_matches` as the only
+candidate, with no signal available to it that "the only reason this
+scored above zero is a coincidental generic word" rather than a real
+match. Closing this narrow remainder would need either a genuine semantic
+judgment (an LLM relevance check on the specific single-candidate result,
+following the same "second small model call after the real result exists"
+shape `ReasoningService.synthesize()` already uses elsewhere - not
+attempted this session, since it is a real architectural addition deserving
+its own dedicated pass and value-bar answers, not a same-session bolt-on)
+or a merchant-declared "what this shop actually sells" fact the matcher
+could check against (which does not exist as a data model anywhere in this
+codebase today). Verification for this pass: no code changed
+(`git diff` is empty for this investigation), so no suite was re-run;
+confirmed live only via the four fresh chat turns described above.
+
 **The `engine/reasoning/llm.py` logging crash found during Phase 2 smoke
 testing is now fixed, as part of the hardening pass** (see item 0 above for
 the full account): `extra={"name": ...}` renamed to `extra={"tool_call_name":
