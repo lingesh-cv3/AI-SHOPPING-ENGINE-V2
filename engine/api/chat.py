@@ -29,6 +29,7 @@ from shared.models import (
     ProposedAction,
 )
 import logging
+import re
 
 from fastapi import Depends, APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -152,6 +153,50 @@ def _find_second_item(
     return None
 
 
+#: Causal-claim phrasings the model uses to attribute a recommendation to a
+#: specific stated reason - "since you said X", "because X matters",
+#: "your priority of X", "you prioritized X", "X is what you need most".
+#: Captures the specific claimed term/phrase (group 1) so it can be checked
+#: against `shopping_state`'s real stored terms on its own, not just
+#: whether *some* stored term appears anywhere else in the same sentence.
+#: A third `value-auditor`-style adversarial pass found the second version
+#: of `_honest_synthesis` (the `any_term_mentioned`-over-the-whole-text
+#: floor) still passable: a reply can mention a true stored term as an
+#: aside while its actual causal claim names a different, unstored one -
+#: "Since you said durability matters most to you (though it's also nice
+#: and light), here's our pick" mentions the real term "light[weight]" but
+#: *claims* "durability", which was never stated. `any_term_mentioned`
+#: alone cannot see that distinction; this patterns-list extracts what the
+#: text specifically claims was the reason, so that claim - not just the
+#: sentence around it - can be checked.
+_CAUSAL_CLAIM_PATTERNS = [
+    r"since you (?:said|mentioned|stated|noted)\s+(?:that\s+)?(.+?)\s+(?:matters|is what|are what|is your|was your|is important|comes first)",
+    r"because\s+(.+?)\s+(?:matters most|is what you need|is your priority|is important to you)",
+    r"your (?:stated |main |top )?priority (?:of|is|being)\s+(.+?)(?:[,.]|$)",
+    r"you (?:prioriti[sz]ed|care most about|only care about)\s+(.+?)(?:[,.]| above| over|$)",
+    r"(?:since|as|because)\s+(.+?)\s+is what (?:you|matters) (?:need|most)",
+]
+_CAUSAL_CLAIM_RE = re.compile(
+    "|".join(f"(?:{p})" for p in _CAUSAL_CLAIM_PATTERNS), re.IGNORECASE
+)
+
+
+def _causal_claim_terms(text: str) -> list[str]:
+    """Every specific reason `text` explicitly claims to be attributing a
+    recommendation to, extracted via `_CAUSAL_CLAIM_PATTERNS`. Deliberately
+    a narrow, named-pattern extraction (not a second NLP system) - the same
+    honest trade-off `explicit_extraction.py` already makes elsewhere: it
+    catches an explicit "since you said X" shape, not every conceivable way
+    a model could phrase the same claim, and returns an empty list rather
+    than guessing when no such phrase is present."""
+    out = []
+    for match in _CAUSAL_CLAIM_RE.finditer(text):
+        claimed = next((g for g in match.groups() if g), None)
+        if claimed:
+            out.append(claimed.strip(" .,"))
+    return out
+
+
 def _honest_synthesis(text: str | None, shopping_state: dict | None, fallback: str) -> str:
     """The central hardening-pass fix, in one place - and, after a
     `value-auditor` pass caught a real gap in this function's first version,
@@ -216,6 +261,27 @@ def _honest_synthesis(text: str | None, shopping_state: dict | None, fallback: s
             terms,
         )
         return fallback
+    # THIRD gap, found by further adversarial testing after the second fix
+    # above shipped: "some real term appears somewhere in the text" is not
+    # the same as "the specific thing the text says was the reason is a
+    # real term." A reply can mention a true stored term as filler while
+    # its actual causal claim ("since you said X matters most") names a
+    # different, unstored X - passing the check above because the true
+    # term shows up elsewhere in the same sentence. Every explicit causal
+    # claim the text makes is checked individually now; if even one names
+    # something not actually stored, the whole reply is untrusted, the
+    # same "not just relocated, not partially trusted" standard the first
+    # two fixes already apply.
+    for claimed in _causal_claim_terms(text):
+        if not mission_ranking.any_term_mentioned(claimed, terms):
+            logger.warning(
+                "synthesis claimed a reason (%r) not among actual stored "
+                "terms (%r); falling back rather than trusting a false "
+                "attribution",
+                claimed,
+                terms,
+            )
+            return fallback
     return text
 
 
