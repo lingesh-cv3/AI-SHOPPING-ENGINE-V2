@@ -749,6 +749,66 @@ def _synthesis_prompt(
     parts.append(f"{label}:\n" + "\n".join(lines))
 
     parts.append(
-        "Write the reply now - two to three sentences, grounded only in the facts above."
+        "Write the reply now - two to three sentences, grounded only in the facts above. "
+        "Then call write_synthesis with that reply and, if you personalized it to "
+        "something the shopper stated, the exact stated phrase you based it on."
     )
     return "\n\n".join(parts)
+
+
+def synthesis_tool() -> dict[str, Any]:
+    """The synthesis pass's own tool schema - a third, deliberately narrow
+    structural fix after two rounds of regex-based attempts at the same
+    problem were each defeated by adversarial rephrasing (see
+    `engine/api/chat.py::_honest_synthesis`'s own docstring for the full
+    history: a phrase blocklist, then an any-term-mentioned floor, then a
+    causal-claim-pattern extractor - all three eventually bypassed by a
+    reply worded around whatever the current check specifically looked for).
+
+    Rather than inferring what the model's free text claims from the text
+    itself, the model is now asked to state its own claimed reason directly,
+    in a field the code can check exactly: `cited_reason` must be the shopper's
+    own stated phrase, verbatim or near-verbatim, or null if this reply makes
+    no personalization claim at all. `_honest_synthesis` then checks THIS
+    field against `shopping_state`'s real stored terms - not the prose - so
+    there is no phrasing space left to search for a bypass in; the only way
+    to defeat this check is for the model to leave `cited_reason` null while
+    the `reply` text still makes an implicit, uncited personalization claim,
+    which is a materially harder and rarer failure than free-form rephrasing
+    a known regex, and is worth verifying empirically rather than assuming.
+
+    Deliberately has NO action-type, variant, or risk field of any kind - it
+    cannot propose an action, cannot be classified by the risk gate, and
+    remains exactly the "strictly narrower than reason()" capability the
+    synthesis call has always been (see `ReasoningService.synthesize`'s own
+    docstring), confirmed by `invariant-guard` for this exact reason each
+    time this file changes.
+    """
+    return {
+        "name": "write_synthesis",
+        "description": (
+            "Give the final shopper-facing reply and, if it personalizes the "
+            "recommendation to something the shopper stated, the exact stated "
+            "reason it is based on."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reply": {
+                    "type": "string",
+                    "description": "The two-to-three sentence reply, grounded only in the given facts.",
+                },
+                "cited_reason": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "The shopper's own stated phrase (verbatim or near-verbatim from "
+                        "THEIR CURRENT MISSION above) that this reply's personalization is "
+                        "actually based on. Null if the reply makes no claim about what the "
+                        "shopper specifically said - e.g. it just describes real differences "
+                        "without attributing the choice to a stated preference."
+                    ),
+                },
+            },
+            "required": ["reply"],
+        },
+    }

@@ -45,6 +45,7 @@ from .prompts import (
     _SYNTHESIS_SYSTEM_PROMPT,
     _synthesis_prompt,
     propose_tool,
+    synthesis_tool,
 )
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,15 @@ class Synthesis:
     model_name: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    #: The shopper's own stated phrase this reply claims to be personalized
+    #: to, per the model's own `write_synthesis` tool call - `None` means the
+    #: model made no personalization claim (or, on the plain-text fallback
+    #: path below, that no structured claim exists to check at all). Checked
+    #: by `engine/api/chat.py::_honest_synthesis` against real stored
+    #: `shopping_state` terms - a structural fix, see `synthesis_tool()`'s
+    #: own docstring for why the prior two rounds of prose-scanning were each
+    #: defeated by adversarial rephrasing.
+    cited_reason: str | None = None
 
 
 class ReasoningService:
@@ -362,18 +372,44 @@ class ReasoningService:
             result = await self._client.complete(
                 system=_SYNTHESIS_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
+                tools=[synthesis_tool()],
+                force_tool=True,
             )
         except LLMUnavailable as exc:
             logger.info("synthesis pass unavailable, falling back: %s", exc)
             return Synthesis(text=None, used_model=False)
 
-        text = (result.text or "").strip() or None
+        call = next(
+            (c for c in result.tool_calls if c["name"] == "write_synthesis"), None
+        )
+        if call is None:
+            # The model answered in prose instead of calling the tool (open
+            # models do this occasionally, same as `reason()` above). There is
+            # no `cited_reason` to check in that case - treat it the same as
+            # "no personalization claim was structurally made" rather than
+            # inventing one, since `_honest_synthesis` already refuses to
+            # trust free text it cannot verify.
+            text = (result.text or "").strip() or None
+            return Synthesis(
+                text=text,
+                used_model=text is not None,
+                model_name=result.model,
+                prompt_tokens=result.prompt_tokens,
+                completion_tokens=result.completion_tokens,
+                cited_reason=None,
+            )
+
+        args = call["arguments"] if isinstance(call.get("arguments"), dict) else {}
+        text = str(args.get("reply", "")).strip() or None
+        cited = args.get("cited_reason")
+        cited_reason = str(cited).strip()[:300] if isinstance(cited, str) and cited.strip() else None
         return Synthesis(
             text=text,
             used_model=text is not None,
             model_name=result.model,
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
+            cited_reason=cited_reason,
         )
 
     # -- parsing -----------------------------------------------------------

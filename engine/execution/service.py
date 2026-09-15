@@ -145,6 +145,65 @@ CART_MUTATING: frozenset[ActionType] = frozenset(
 )
 
 
+#: Hard ceiling on how far `_full_catalog_sample` will page, even when a
+#: platform reports a much larger real catalog. An explicit, stated bound -
+#: not a silent one - per CLAUDE.md's own naming of `_catalog_alerts`'s
+#: `limit=100` as the anti-pattern to not repeat: covers a real ~40k-SKU
+#: catalog only partially, and that residual gap is real and disclosed
+#: (see `_full_catalog_sample`'s own docstring), not claimed solved.
+_MAX_CATALOG_SCAN = 2000
+
+
+async def _full_catalog_sample(adapter, page_size: int = 200) -> list:
+    """Page through as much of the real catalog as `_MAX_CATALOG_SCAN` allows,
+    using the platform's own reported `total_available` to know how much is
+    really out there - rather than a single fixed-size page presented as if
+    it were the whole catalog.
+
+    Both demo merchants' backends (`sample_merchant/store.py`,
+    `sample_merchant_two/store.py`) report `total_available`/`matchCount` as
+    the true match count across their ENTIRE catalog, not the size of the
+    page returned - a real, already-available signal this function uses to
+    decide how many more pages are actually worth fetching, rather than
+    guessing.
+
+    Third round of the same fix: earlier versions used a single
+    `limit=100`, then `limit=200`, each presented as "wider" without ever
+    checking how much of the real catalog that actually covered - both were
+    silently wrong on any catalog bigger than the page itself, which is
+    exactly the `_catalog_alerts`-style anti-pattern CLAUDE.md names. This
+    version pages until either the whole catalog is covered or
+    `_MAX_CATALOG_SCAN` is reached, and is honest that the second case is
+    still a real residual gap on a genuinely large catalog (a real
+    40,000-SKU client is not fully covered by 2000 items either) - not
+    claimed as a complete fix, just a materially larger and now
+    self-aware bound instead of an arbitrary small one.
+    """
+    first = await adapter.search_products("", limit=page_size)
+    products = list(first.products)
+    total = first.total_available
+    if total is None:
+        return products
+    cap = min(total, _MAX_CATALOG_SCAN)
+    offset = len(products)
+    while offset < cap:
+        try:
+            page = await adapter.search_products("", limit=page_size, offset=offset)
+        except TypeError:
+            # A platform that cannot page (offset is a real extension both
+            # demo adapters support, not part of the standard interface -
+            # see shared/interfaces/commerce.py) degrades to whatever the
+            # first page already returned rather than raising.
+            break
+        except CommerceError:
+            break
+        if not page.products:
+            break
+        products.extend(page.products)
+        offset += len(page.products)
+    return products
+
+
 @dataclass
 class Executed:
     """What happened when an action ran.
@@ -670,8 +729,8 @@ class ExecutionService:
                 # those already survived real word-overlap discrimination.
                 weak_match_rejected = False
                 if candidates and relevance.weak_single_word_match(query, match_score):
-                    wide_sample = await adapter.search_products("", limit=200)
-                    if not relevance.shop_carries(query, wide_sample.products):
+                    wide_sample = await _full_catalog_sample(adapter)
+                    if not relevance.shop_carries(query, wide_sample):
                         candidates = []
                         relevant = []
                         weak_match_rejected = True
@@ -713,23 +772,20 @@ class ExecutionService:
                 shop_carries_query = not weak_match_rejected
                 if not titles and action_type is ActionType.RECOMMEND_PRODUCTS:
                     relevance_relaxed = bool(query)
-                    # Sampled, not exhaustive: on a real 40k-SKU catalog this
-                    # 200-item catalog-order slice can still miss a genuinely
-                    # carried category with no representative among the
-                    # first 200 items - the same real-volume risk CLAUDE.md
-                    # names for _catalog_alerts's limit=100. The commerce
-                    # interface (shared/interfaces/commerce.py) has no
-                    # category-filtered or paginated search primitive to do
-                    # better with; adding one is new adapter-interface
-                    # surface, out of scope for this hardening pass. Bumped
-                    # from 30/6 to 200 (this project's own existing
-                    # precedent for a "list real categories" browse a few
-                    # lines above already uses 100) specifically because a
-                    # false "not carried" is an active wrong claim, not a
-                    # neutral gap - worth a wider, still-bounded sample.
-                    found = await adapter.search_products("", limit=200)
+                    # Third round of the same fix. `_full_catalog_sample`
+                    # pages through the platform's own real, reported total
+                    # match count (up to `_MAX_CATALOG_SCAN`) instead of
+                    # trusting a single fixed-size page to stand in for the
+                    # whole catalog - see that function's own docstring for
+                    # why the two prior versions of this exact comment
+                    # (limit=100, then limit=200) were each still silently
+                    # wrong on anything bigger than the page itself. A real
+                    # 40,000-SKU catalog is still not fully covered by
+                    # `_MAX_CATALOG_SCAN` - that residual gap is real,
+                    # disclosed, and not claimed solved.
+                    wide_products = await _full_catalog_sample(adapter)
                     candidates = [
-                        p for p in found.products if _within_price(p) and _within_category(p)
+                        p for p in wide_products if _within_price(p) and _within_category(p)
                     ]
                     if top_rated:
                         candidates = [p for p in candidates if p.rating is not None]
@@ -747,8 +803,8 @@ class ExecutionService:
                     #
                     # relevance.shop_carries checks a wider, still-real
                     # signal instead - the shop's own declared product
-                    # categories (already fetched in `found`, no new data
-                    # model) plus product description text, not just
+                    # categories (already fetched in `wide_products`, no
+                    # extra call) plus product description text, not just
                     # titles. "Coffee" overlaps Kettle's real "Coffee"
                     # category; "kayak" overlaps nothing in a running-shoe
                     # or coffee shop's real categories. Only gates this
@@ -757,7 +813,7 @@ class ExecutionService:
                     # found something real.
                     if query and not relevant:
                         shop_carries_query = relevance.shop_carries(
-                            query, found.products
+                            query, wide_products
                         )
                         if not shop_carries_query:
                             titles = []

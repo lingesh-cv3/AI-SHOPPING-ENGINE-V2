@@ -131,14 +131,20 @@ def shop_carries(query: str, catalog_sample: list) -> bool:
     exact regression.
 
     This checks a wider, already-real signal instead: every product's own
-    declared `categories` field, aggregated across `catalog_sample` (the
-    same wide, unfiltered browse the caller already fetches for this
-    fallback - no new data model, no new fetch). "A fruity coffee" and
-    "coffee" both overlap Kettle's real "Coffee" category even though
-    neither is a literal title match; "kayak" overlaps nothing in a running-
-    shoe or coffee shop's real category set. Also checks description text
-    (broader than titles alone) for the same reason category alone might
-    still miss a genuine but undercategorized product.
+    declared `categories` field, aggregated across `catalog_sample`, plus
+    description text (broader than titles alone) for the same reason
+    category alone might still miss a genuine but undercategorized product.
+    "A fruity coffee" and "coffee" both overlap Kettle's real "Coffee"
+    category even though neither is a literal title match; "kayak" overlaps
+    nothing in a running-shoe or coffee shop's real category set.
+
+    `catalog_sample` is the caller's job to make as complete as the catalog
+    size honestly allows - see `engine/execution/service.py::_full_catalog_sample`,
+    which pages through the adapter's own real `total_available` count up to
+    an explicit, stated bound rather than a single fixed-size page. This
+    function itself has no opinion on catalog size; it only ever sees
+    whatever sample it is given, and a query genuinely absent from that
+    sample - however large - still reads as "not carried."
 
     Returns True (never blocks) when the query has no significant words, or
     when `catalog_sample` carries no category data at all - a platform that

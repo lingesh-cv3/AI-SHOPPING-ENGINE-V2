@@ -191,7 +191,12 @@ def _causal_claim_terms(text: str) -> list[str]:
     return out
 
 
-def _honest_synthesis(text: str | None, shopping_state: dict | None, fallback: str) -> str:
+def _honest_synthesis(
+    text: str | None,
+    shopping_state: dict | None,
+    fallback: str,
+    cited_reason: str | None = None,
+) -> str:
     """The central hardening-pass fix, in one place - and, after a
     `value-auditor` pass caught a real gap in this function's first version,
     now a structural gate rather than a phrase blocklist.
@@ -222,6 +227,21 @@ def _honest_synthesis(text: str | None, shopping_state: dict | None, fallback: s
     reply reaches a shopper as a personalization claim unless
     `shopping_state` genuinely has something to justify it.
 
+    A FOURTH gap, found live by an independent adversarial audit after the
+    third fix (below) shipped: phrasings that make the identical false
+    attribution while avoiding every trigger phrase `_CAUSAL_CLAIM_PATTERNS`
+    happens to enumerate ("Given how much you care about durability above
+    everything else, and since lightweight is nice too, the Marathon Pro
+    wins.") still passed, because a *regex over the model's own free text*
+    can only ever catch phrasings someone thought to write a pattern for -
+    the same structural limit that already defeated this function's first
+    two versions. Closed structurally this time, not with a fourth pattern:
+    `cited_reason` (see `synthesis_tool()` in prompts.py) asks the model to
+    name its own claimed reason in a checkable field instead of free prose,
+    and is checked first, below, before any of the text-scanning fallbacks
+    that remain in place underneath it for the case where the model answers
+    in plain text with no structured claim to check at all.
+
     A SECOND gap, found by further adversarial testing of this same
     function (not by `value-auditor`, but by the same standard it set):
     "some grounded state exists" is not the same as "the claim is about
@@ -240,6 +260,23 @@ def _honest_synthesis(text: str | None, shopping_state: dict | None, fallback: s
     """
     if not text:
         return fallback
+    # The structural check, first: if the model told us directly what it
+    # claims this reply is based on, that claim is checked exactly, not
+    # inferred from prose - no phrasing space left to search for a bypass in.
+    # A non-null `cited_reason` that doesn't match anything actually stored
+    # is rejected outright, regardless of what the rest of the checks below
+    # would have concluded from the free text.
+    if cited_reason:
+        terms = mission_ranking.stated_terms(shopping_state)
+        if not mission_ranking.any_term_mentioned(cited_reason, terms):
+            logger.warning(
+                "synthesis cited a reason (%r) not among actual stored "
+                "terms (%r); falling back rather than trusting a false "
+                "attribution",
+                cited_reason,
+                terms,
+            )
+            return fallback
     if not mission_ranking.has_stated_priority(shopping_state):
         logger.info(
             "no captured mission state this turn; using the plain "
@@ -678,6 +715,7 @@ async def _process_turn(
     # Commerce context. Best-effort: reasoning with less is better than a turn that
     # fails because a lookup did.
     catalog_sample = None
+    extra_item_sample = None
     cart = None
     order = None
     try:
@@ -690,7 +728,22 @@ async def _process_turn(
         # one product per category before capping means a bare "what do you
         # have" is shown breadth, not just whichever department was seeded
         # first.
-        browse = await adapter.search_products("", limit=60)
+        # Fetched at 200 (matching the bound `relevance.shop_carries` already
+        # uses) so a shopper naming several real products in one message has
+        # every one of them visible to `_find_extra_items` below - the
+        # smaller, category-diversified `catalog_sample` handed to the model
+        # for display/reasoning is a *separate* slice of this same fetch, not
+        # a second call. A prior version diversified-and-capped at 20 before
+        # extra-item detection ever ran, so a genuine third or fourth named
+        # product outside that 20-item round-robin was invisible to detection
+        # entirely - not merely undisclosed, undetectable - and silently
+        # vanished even after the "disclose extras honestly" fix, because it
+        # was never found in the first place. Live-reproduced this session:
+        # a 3-item and a 4-item Northfield message each dropped the same
+        # footwear product (its 5th-place turn in the round-robin fell
+        # outside the old 20-item cap) with zero disclosure.
+        browse = await adapter.search_products("", limit=200)
+        extra_item_sample = browse.products
         catalog_sample = _diversify_by_category(browse.products, limit=20)
         if req.cart_id:
             cart = await adapter.get_cart(req.cart_id)
@@ -1165,7 +1218,7 @@ async def _process_turn(
                 + ". Which would you like?"
             )
             extra_items = _find_extra_items(
-                req.message, catalog_sample, first.get("product_id")
+                req.message, extra_item_sample, first.get("product_id")
             )
             needs_choice_second_item = extra_items[0] if extra_items else None
             still_unhandled = extra_items[1:]
@@ -1309,7 +1362,8 @@ async def _process_turn(
                     shopping_state=shopping_state,
                 )
                 reply = _honest_synthesis(
-                    synth.text, shopping_state, "Here's how they compare."
+                    synth.text, shopping_state, "Here's how they compare.",
+                    synth.cited_reason,
                 )
             else:
                 reply = "Here's how they compare."
@@ -1509,7 +1563,7 @@ async def _process_turn(
                 extra_add_items = (
                     _find_extra_items(
                         req.message,
-                        catalog_sample,
+                        extra_item_sample,
                         trace.selected.action.parameters.get("product_id"),
                     )
                     if executed.action_type == "ADD_TO_CART" and req.cart_id
@@ -1681,7 +1735,9 @@ async def _process_turn(
                         items=products,
                         shopping_state=shopping_state,
                     )
-                    reply = _honest_synthesis(synth.text, shopping_state, reply)
+                    reply = _honest_synthesis(
+                        synth.text, shopping_state, reply, synth.cited_reason
+                    )
                 try:
                     await db.shopping_state.merge(
                         req.session_id,
