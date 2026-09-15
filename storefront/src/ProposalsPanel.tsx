@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type CartProposal } from "./api";
+import { api, type CartProposal, type ChatReply } from "./api";
 
 /**
  * What the assistant has suggested for the cart, waiting on the shopper's
@@ -28,6 +28,9 @@ export function ProposalsPanel({
   const [proposals, setProposals] = useState<CartProposal[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [noteById, setNoteById] = useState<Record<string, string>>({});
+  const [choicesById, setChoicesById] = useState<
+    Record<string, ChatReply["choices"]>
+  >({});
 
   useEffect(() => {
     // No state write here when there is no cart yet - the render guard
@@ -77,7 +80,48 @@ export function ProposalsPanel({
             <div>{describe(p)}</div>
             {p.reason && <div className="line-qty">{p.reason}</div>}
             {noteById[p.proposal_id] ? (
-              <p className="note">{noteById[p.proposal_id]}</p>
+              <>
+                <p className="note">{noteById[p.proposal_id]}</p>
+                {choicesById[p.proposal_id] && choicesById[p.proposal_id]!.length > 0 && (
+                  <div className="optionrow">
+                    {choicesById[p.proposal_id]!.map((ch) => (
+                      <button
+                        key={ch.variant_id}
+                        className="optionbtn"
+                        disabled={busyId === p.proposal_id}
+                        onClick={async () => {
+                          setBusyId(p.proposal_id);
+                          try {
+                            const r = await api.act(
+                              sessionId,
+                              ch.product_id,
+                              `The ${ch.label}, for the ${ch.product_title}`,
+                              ch.variant_id,
+                              cartId,
+                            );
+                            setNoteById((prev) => ({ ...prev, [p.proposal_id]: r.reply }));
+                            setChoicesById((prev) => ({ ...prev, [p.proposal_id]: [] }));
+                            setProposals((prev) =>
+                              prev.filter((x) => x.proposal_id !== p.proposal_id),
+                            );
+                            if (r.cart_changed) onCartChanged();
+                          } catch {
+                            setNoteById((prev) => ({
+                              ...prev,
+                              [p.proposal_id]: "That didn't go through. Try again in a moment.",
+                            }));
+                          } finally {
+                            setBusyId(null);
+                          }
+                        }}
+                      >
+                        {ch.label}
+                        {ch.left !== null && <span className="optionleft">{ch.left} left</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
             ) : (
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 <button
@@ -88,7 +132,17 @@ export function ProposalsPanel({
                     try {
                       const r = await api.acceptProposal(p.proposal_id, sessionId, cartId);
                       setNoteById((prev) => ({ ...prev, [p.proposal_id]: r.reply }));
-                      setProposals((prev) => prev.filter((x) => x.proposal_id !== p.proposal_id));
+                      if (r.choices && r.choices.length > 0) {
+                        // The product is real and available but has options
+                        // (size/grind/etc) this proposal never captured -
+                        // the proposal itself is already retired server-side
+                        // (terminal NEEDS_CHOICE state), so finishing this is
+                        // an ordinary trusted tap-to-add, identical to the
+                        // one already used for a size question in chat.
+                        setChoicesById((prev) => ({ ...prev, [p.proposal_id]: r.choices }));
+                      } else {
+                        setProposals((prev) => prev.filter((x) => x.proposal_id !== p.proposal_id));
+                      }
                       if (r.cart_changed) onCartChanged();
                     } catch {
                       setNoteById((prev) => ({

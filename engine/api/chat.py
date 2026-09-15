@@ -84,26 +84,32 @@ def _decline_fact(reason: DeclineReason | None) -> str:
     return "That card was declined, so nothing has been charged."
 
 
-def _second_item_note(
+def _find_second_item(
     message: str,
     catalog_sample: list | None,
     handled_product_id: str | None,
-) -> str:
-    """Say so, honestly, rather than silently dropping the rest.
+):
+    """Find a second real product the shopper named this turn that this
+    turn's single action did not handle - see `_second_item_note`, which
+    turns this into the queued-suggestion reply. Returns the matched
+    product (from `catalog_sample`) or None.
 
     The engine only ever executes one action per turn - the Decision Engine
     picks exactly one candidate, by design (see `engine/decision/engine.py`'s
     own docstring: "answers exactly one question"). A shopper who names two
     products to add in one message ("the Trailblazer size 8 and the Marathon
-    Pro size 8") gets only the first one handled, and used to hear nothing
-    about the second at all - it simply vanished, which is a worse outcome
-    than being told plainly that a second ask is needed.
+    Pro size 8") gets only the first one handled.
 
-    Genuinely adding both in one turn needs a pending-item queue that
-    survives the tap round-trip - real, separate engineering, not a
-    same-session patch, and one this codebase deliberately has not built
-    yet given the double-add bug a looser variant-matching rule already
-    caused once (Completed.md #15).
+    Genuinely adding both in the SAME turn is not attempted - that would mean
+    either loosening variant matching (the double-add bug a looser rule
+    already caused once, Completed.md #15) or guessing which variant the
+    second item wants without a tap, which the tap-trust invariant forbids.
+    Instead the second, real, named-but-unhandled product is queued as a
+    `CartProposal` (the same tap-accept/revalidate-before-execute mechanism
+    already used for cart_intelligence's and PROPOSE_CART_CHANGE's
+    suggestions) so the shopper can pick it up with one tap in the
+    Suggestions panel - including its own size prompt if it needs one -
+    rather than being told to type the request again from scratch.
 
     Detecting the second product is done here, directly against the
     shopper's own words and the real catalog - NOT by checking whether the
@@ -119,7 +125,7 @@ def _second_item_note(
     of what the model's proposal happened to contain.
     """
     if not catalog_sample or not message:
-        return ""
+        return None
     said = message.lower()
     for product in catalog_sample:
         if product.product_id == handled_product_id:
@@ -142,11 +148,8 @@ def _second_item_note(
             sum(1 for w in title_words if w in said) >= 2
         )
         if matched:
-            return (
-                "\n\nI can only take one item at a time right now - ask me "
-                "for the other one next and I'll add that too."
-            )
-    return ""
+            return product
+    return None
 
 
 def _honest_synthesis(text: str | None, shopping_state: dict | None, fallback: str) -> str:
@@ -1101,9 +1104,49 @@ async def _process_turn(
                 + str(first.get("product_title", "that"))
                 + ". Which would you like?"
             )
-            reply += _second_item_note(
+            needs_choice_second_item = _find_second_item(
                 req.message, catalog_sample, first.get("product_id")
             )
+            if needs_choice_second_item is not None and req.cart_id:
+                try:
+                    created = await db.cart_proposals.create(
+                        connection_id=req.connection_id,
+                        session_id=req.session_id,
+                        shopper_id=shopper_id,
+                        cart_id=req.cart_id,
+                        change_type="ADD",
+                        product_id=needs_choice_second_item.product_id,
+                        reason="you also asked for this in the same message",
+                        evidence=[req.message] if req.message else [],
+                        snapshot_price=(
+                            str(needs_choice_second_item.price.amount)
+                            if needs_choice_second_item.price
+                            else None
+                        ),
+                    )
+                    await shopper_events.record(
+                        connection_id=req.connection_id,
+                        session_id=req.session_id,
+                        event_type=shopper_events.EventType.PROPOSAL_CREATED,
+                        shopper_id=shopper_id,
+                        product_id=needs_choice_second_item.product_id,
+                        detail={
+                            "proposal_id": created.get("proposal_id"),
+                            "change_type": "ADD",
+                            "source": "multi_item_add",
+                        },
+                    )
+                    reply += (
+                        f"\n\nOnce that's picked, I've also queued "
+                        f"{needs_choice_second_item.title} as a suggestion - "
+                        f"see Suggestions to add it with one tap."
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("could not queue second-item proposal; continuing")
+                    reply += (
+                        "\n\nI can only take one item at a time right now - ask me "
+                        "for the other one next and I'll add that too."
+                    )
         elif executed.action_type == "CLEAR_CART":
             # Written by the engine, not the model.
             #
@@ -1370,15 +1413,65 @@ async def _process_turn(
                 done_sentence = done + (
                     f". Your cart is now {count} item(s), {total}." if count is not None else "."
                 )
-                second_note = (
-                    _second_item_note(
+                second_item = (
+                    _find_second_item(
                         req.message,
                         catalog_sample,
                         trace.selected.action.parameters.get("product_id"),
                     )
-                    if executed.action_type == "ADD_TO_CART"
-                    else ""
+                    if executed.action_type == "ADD_TO_CART" and req.cart_id
+                    else None
                 )
+                second_note = ""
+                if second_item is not None:
+                    # A genuine second product was named this turn and not
+                    # handled by this turn's single action. Queue it as a
+                    # real CartProposal - the same tap-accept, revalidate-
+                    # before-execute mechanism cart_intelligence and
+                    # PROPOSE_CART_CHANGE already use - so it shows up in the
+                    # Suggestions panel for one tap, including its own size
+                    # prompt via the ordinary needs_choice path if it needs
+                    # one, rather than requiring the shopper to ask again
+                    # from scratch. Never auto-added outright: a tap through
+                    # accept_proposal is what stays trusted, not a guess made
+                    # here about which variant they want.
+                    try:
+                        created = await db.cart_proposals.create(
+                            connection_id=req.connection_id,
+                            session_id=req.session_id,
+                            shopper_id=shopper_id,
+                            cart_id=req.cart_id,
+                            change_type="ADD",
+                            product_id=second_item.product_id,
+                            reason="you also asked for this in the same message",
+                            evidence=[req.message] if req.message else [],
+                            snapshot_price=(
+                                str(second_item.price.amount) if second_item.price else None
+                            ),
+                        )
+                        await shopper_events.record(
+                            connection_id=req.connection_id,
+                            session_id=req.session_id,
+                            event_type=shopper_events.EventType.PROPOSAL_CREATED,
+                            shopper_id=shopper_id,
+                            product_id=second_item.product_id,
+                            detail={
+                                "proposal_id": created.get("proposal_id"),
+                                "change_type": "ADD",
+                                "source": "multi_item_add",
+                            },
+                        )
+                        second_note = (
+                            f"\n\nI can only add one item at a time right now, so "
+                            f"I've queued {second_item.title} as a suggestion - "
+                            f"see Suggestions to add it with one tap."
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("could not queue second-item proposal; continuing")
+                        second_note = (
+                            "\n\nI can only take one item at a time right now - ask me "
+                            "for the other one next and I'll add that too."
+                        )
                 if second_note:
                     # Drop the model's own pre-written sentence rather than
                     # prefixing it, when a second item was genuinely named.
@@ -1388,10 +1481,10 @@ async def _process_turn(
                     # catalog product it never actually searched for,
                     # because its reply is written before this action ran
                     # and it only ever proposes one ADD_TO_CART. Prefixing
-                    # a false "couldn't find X" onto the honest "ask me for
-                    # the other one next" note left the shopper reading a
+                    # a false "couldn't find X" onto the honest queued-
+                    # suggestion note left the shopper reading a
                     # contradiction - told a real product does not exist,
-                    # then immediately told to ask for it. The engine has
+                    # then immediately told it was queued. The engine has
                     # already confirmed (by scanning the actual catalog)
                     # that the item is real, so that fact wins outright.
                     reply = done_sentence + second_note
@@ -2125,6 +2218,7 @@ async def accept_proposal(
     last_case_id = None
     awaiting_any = False
     step_summaries: list[str] = []
+    needs_choice_options: list[dict] = []
     for step_type, step_params in parameters_by_step:
         executed, case_id, awaiting = await _run_trusted_cart_action(
             connection_id=req.connection_id,
@@ -2143,12 +2237,18 @@ async def accept_proposal(
         if executed is not None and executed.needs_choice:
             # Honest, distinct case from a plain failure: the product has
             # options (size/grind/etc) the proposal never captured, so
-            # accepting genuinely cannot finish it - a shopper adding this
-            # one directly (where the option picker already exists) is the
-            # real next step, not a retry of this same accept.
+            # accepting cannot finish it in this one tap. Rather than
+            # dead-ending the shopper ("add it directly" with no way to do
+            # that from here), surface the real size/option buttons - the
+            # same `choices` mechanism the ordinary needs_choice path
+            # already renders as taps - so one more tap finishes it. The
+            # proposal itself is retired below (never left PENDING) so it
+            # cannot be accepted a second time once the shopper resolves it
+            # through the normal tap-to-add path, which would risk a
+            # duplicate add.
+            needs_choice_options = executed.choices or []
             step_summaries.append(
-                "that item needs a size/option choice this proposal didn't "
-                "capture - add it directly so you can pick one"
+                "that item needs a size/option choice - pick one below"
             )
             break
         if executed is None or not executed.succeeded:
@@ -2165,7 +2265,17 @@ async def accept_proposal(
     await db.cart_proposals.set_state(
         req.connection_id,
         proposal_id,
-        state="EXECUTED" if all_succeeded else "FAILED",
+        # NEEDS_CHOICE is its own terminal state, distinct from FAILED: the
+        # product is real and available, it simply has options the proposal
+        # never captured. Terminal (not PENDING) so this exact proposal
+        # cannot be accepted a second time once the shopper resolves it via
+        # the ordinary tap-to-add-a-size path below - re-accepting it after
+        # that would risk adding the item twice.
+        state=(
+            "EXECUTED" if all_succeeded
+            else "NEEDS_CHOICE" if needs_choice_options
+            else "FAILED"
+        ),
         execution_result=execution_result,
     )
     if all_succeeded:
@@ -2185,6 +2295,13 @@ async def accept_proposal(
         reply = "That change needs someone at the shop to approve first - I've passed it on."
     elif all_succeeded:
         reply = last_executed.shopper_summary or last_executed.summary or "Done."
+    elif needs_choice_options:
+        first = needs_choice_options[0] if needs_choice_options else {}
+        reply = (
+            "There's more than one option for "
+            + str(first.get("product_title", "that"))
+            + ". Which would you like?"
+        )
     else:
         reply = (
             "I couldn't finish that change. "
@@ -2205,6 +2322,7 @@ async def accept_proposal(
         speaker="assistant",
         text=reply,
         case_id=last_case_id,
+        choices=needs_choice_options,
     )
 
     return ChatReply(
@@ -2214,6 +2332,7 @@ async def accept_proposal(
         used_model=False,
         action_taken="PROPOSE_CART_CHANGE",
         action_summary=execution_result["steps"][-1] if execution_result["steps"] else None,
+        choices=needs_choice_options,
         awaiting_person=awaiting_any,
         cart_changed=all_succeeded,
         selected_action=change_type,

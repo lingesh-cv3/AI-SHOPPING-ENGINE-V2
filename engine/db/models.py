@@ -971,7 +971,13 @@ class CartProposal(Base):
     authority to mutate anything.
 
     `state` moves forward only: PENDING -> ACCEPTED|REJECTED|EXPIRED, and
-    ACCEPTED -> EXECUTED|FAILED. Never back. A proposal is revalidated
+    ACCEPTED -> EXECUTED|FAILED|NEEDS_CHOICE. Never back. NEEDS_CHOICE is its
+    own terminal outcome, not a failure: the product is real and available,
+    it simply has an option (size/grind/etc) this proposal never captured -
+    `engine/api/chat.py::accept_proposal` returns the same `choices` shape a
+    tapped size question already uses so the shopper finishes it with one
+    more ordinary trusted tap, and retires the proposal itself so it cannot
+    be accepted a second time once that tap lands. A proposal is revalidated
     against the live cart/catalog at accept time
     (`engine/api/chat.py::accept_proposal`) rather than trusted from
     creation time - the
