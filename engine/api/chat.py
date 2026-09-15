@@ -1765,6 +1765,30 @@ async def _process_turn(
                 "I couldn't turn anything up for that. Someone at the shop can "
                 "help if you'd like."
             )
+            # A failed ADD_TO_CART (out of stock, price changed, etc.) used to
+            # silently swallow every other item named in the same message -
+            # the disclosure logic above only ever ran on the success branch,
+            # so "X, Y and Z" with X out of stock reported neither the
+            # failure's cause for Y/Z nor that they were ever seen. Live-
+            # reproduced this session: "Court Classic size 9, Studio Training
+            # Flat size 9, Recovery Slide size 9" with Court Classic out of
+            # stock dropped Studio Training Flat and Recovery Slide with zero
+            # mention. Run the same extra-item detection here so a genuine
+            # second/third named product is never silently invisible just
+            # because the first one happened to fail rather than succeed.
+            if executed.action_type == "ADD_TO_CART" and extra_item_sample:
+                failed_product_id = trace.selected.action.parameters.get(
+                    "chosen_product"
+                ) or trace.selected.action.parameters.get("product_id")
+                still_named = _find_extra_items(
+                    req.message, extra_item_sample, failed_product_id
+                )
+                if still_named:
+                    names = ", ".join(p.title for p in still_named)
+                    reply += (
+                        f" I also see you mentioned {names} - want me to check "
+                        "those instead?"
+                    )
 
     await session_store.add_turn(
         session_id=req.session_id,
