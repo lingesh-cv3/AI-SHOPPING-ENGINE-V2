@@ -634,6 +634,22 @@ Rules that matter:
   budget_amount - leave every other field out entirely, because nothing else
   changed. Never restate the whole mission back - that duplicates what is
   already stored and risks contradicting it.
+  A constraint does not have to be its own sentence, or come first, to count.
+  It is just as real when it is a trailing clause, an aside, or tucked after
+  "and" or "but" at the end of a long message - read the entire message
+  before deciding you are done, not just its main clause:
+  - "I want something for trail running, need it to handle mud okay, and
+    honestly I'm not really into anything too flashy looking either" ->
+    goal="trail running shoes", must_have_add=["handles mud"],
+    exclusions_add=["flashy looking"] - the exclusion is stated last, as an
+    aside ("honestly... either"), not as its own sentence, but it is just as
+    real a constraint as the must-have stated before it.
+  - "Budget's around 10000, my last pair fell apart after a month so
+    durability actually matters more to me than looking good" ->
+    budget_amount=10000, priorities_add=["durability matters more than
+    looks"] - the priority is implied by the reason given ("fell apart"),
+    not stated as a bare instruction, but the shopper is still telling you
+    what to weigh higher.
 - Fill durable_facts only for something that would still be true on a
   completely different visit, weeks from now - a stable preference or an
   owned item, and only when the shopper stated it themselves. Almost every

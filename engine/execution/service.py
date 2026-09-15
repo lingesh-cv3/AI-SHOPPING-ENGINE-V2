@@ -687,6 +687,7 @@ class ExecutionService:
                 # "nothing matched, these are what's available instead"
                 # rather than getting a confident-looking list either way.
                 relevance_relaxed = False
+                shop_carries_query = True
                 if not titles and action_type is ActionType.RECOMMEND_PRODUCTS:
                     relevance_relaxed = bool(query)
                     found = await adapter.search_products("", limit=30 if narrowed else 6)
@@ -697,23 +698,42 @@ class ExecutionService:
                         candidates = [p for p in candidates if p.rating is not None]
                         candidates.sort(key=lambda p: p.rating, reverse=True)
                     titles = [p.title for p in candidates[:6]]
-                    # A keyword-overlap relevance guard was tried here during
-                    # Phase 2 (refuse this fallback outright when nothing in
-                    # the browse shares a literal word with the failed
-                    # query) and reverted after live-testing on Kettle
-                    # exposed a real regression: "a fruity coffee" searches
-                    # for "coffee", which matches nothing because Kettle's
-                    # products are named by varietal ("Ethiopia Guji
-                    # Natural"), never the generic category word - the exact
-                    # "search matches titles literally" pitfall this
-                    # fallback already exists to route around, documented
-                    # above. A relevance guard built on the same literal-
-                    # word assumption cannot tell that case apart from a
-                    # shop genuinely not carrying something, so it is not
-                    # done here; see PROGRESS.md for the honest state of
-                    # this gap instead of a broken fix.
+                    # A literal keyword-overlap relevance guard was tried
+                    # here once (refuse this fallback outright when nothing
+                    # in the browse shares a literal word with the failed
+                    # query) and reverted: "a fruity coffee" searches for
+                    # "coffee", which matches nothing on titles because
+                    # Kettle's products are named by varietal ("Ethiopia
+                    # Guji Natural") - a literal-word guard cannot tell that
+                    # case apart from a shop genuinely not carrying
+                    # something.
+                    #
+                    # relevance.shop_carries checks a wider, still-real
+                    # signal instead - the shop's own declared product
+                    # categories (already fetched in `found`, no new data
+                    # model) plus product description text, not just
+                    # titles. "Coffee" overlaps Kettle's real "Coffee"
+                    # category; "kayak" overlaps nothing in a running-shoe
+                    # or coffee shop's real categories. Only gates this
+                    # unfiltered-browse substitution path - never the
+                    # narrower keyword-matched result above, which already
+                    # found something real.
+                    if query and not relevant:
+                        shop_carries_query = relevance.shop_carries(
+                            query, found.products
+                        )
+                        if not shop_carries_query:
+                            titles = []
 
                 if not titles:
+                    if query and not shop_carries_query:
+                        return Executed(
+                            succeeded=False,
+                            action_type=str(action_type),
+                            summary=f'"{query}" is not something this shop carries.',
+                            payload={"query": query, "products": [], "not_carried": True},
+                            final_state=str(CaseState.FAILED),
+                        )
                     return Executed(
                         succeeded=False,
                         action_type=str(action_type),

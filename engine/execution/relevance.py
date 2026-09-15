@@ -86,3 +86,52 @@ def best_matches(products: list, query: str) -> list:
         return []
     top = max(s for s, _ in scored)
     return [p for s, p in scored if s == top]
+
+
+def shop_carries(query: str, catalog_sample: list) -> bool:
+    """Does this shop plausibly sell anything like `query` at all?
+
+    Used only to gate the whole-catalog browse fallback in
+    engine/execution/service.py, which otherwise substitutes an unrelated
+    real product when a keyword search finds nothing. That fallback exists
+    because keyword search is too literal on its own (see this module's own
+    docstring on the "fruity coffee" / varietal-naming case), so refusing it
+    outright whenever the raw query has no title hit would reopen that
+    exact regression.
+
+    This checks a wider, already-real signal instead: every product's own
+    declared `categories` field, aggregated across `catalog_sample` (the
+    same wide, unfiltered browse the caller already fetches for this
+    fallback - no new data model, no new fetch). "A fruity coffee" and
+    "coffee" both overlap Kettle's real "Coffee" category even though
+    neither is a literal title match; "kayak" overlaps nothing in a running-
+    shoe or coffee shop's real category set. Also checks description text
+    (broader than titles alone) for the same reason category alone might
+    still miss a genuine but undercategorized product.
+
+    Returns True (never blocks) when the query has no significant words, or
+    when `catalog_sample` carries no category data at all - a platform that
+    declares no categories has given this function nothing to judge
+    relevance against, and refusing on missing data would be worse than not
+    checking at all.
+    """
+    words = _significant_words(query)
+    if not words:
+        return True
+    categories = {c.lower() for p in catalog_sample for c in _categories_of(p)}
+    if not categories:
+        return True
+    category_text = " ".join(categories)
+    if _overlap(words, category_text) > 0:
+        return True
+    # Also check full product text (title+description+categories) across the
+    # sample, not just the categories - a real match one word off from the
+    # narrow keyword search's own match (already handled above by title) can
+    # still show up in a product's description even when no category names it.
+    return any(_overlap(words, _product_text(p)) > 0 for p in catalog_sample)
+
+
+def _categories_of(p: Product | dict) -> list[str]:
+    if isinstance(p, dict):
+        return list(p.get("categories") or [])
+    return list(p.categories or [])
