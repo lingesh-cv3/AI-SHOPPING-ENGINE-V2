@@ -191,6 +191,32 @@ def _causal_claim_terms(text: str) -> list[str]:
     return out
 
 
+#: Deterministic templates for the one sentence `_honest_synthesis` no
+#: longer lets the model author freely - the causal-attribution clause
+#: itself. Picking by a stable hash of `cited_reason` (not randomly) keeps
+#: a given reason phrased the same way across a session rather than
+#: reading as noise, while still avoiding one robotic, always-identical
+#: sentence.
+_ATTRIBUTION_TEMPLATES = [
+    "Since {reason} matters to you, ",
+    "Given your focus on {reason}, ",
+    "With {reason} being what you care about here, ",
+]
+
+
+def _deterministic_personalized_reply(cited_reason: str, fallback: str) -> str:
+    """Build the personalized reply's causal clause ourselves, from the one
+    field already checked against real `shopping_state` terms, instead of
+    trusting the model's own free text to state it - see the SIXTH gap note
+    in `_honest_synthesis` for why. `fallback` is always a short, plain,
+    engine-written, fact-only sentence (e.g. "Here's how they compare."),
+    so a clause can be safely prepended to it without needing to parse or
+    rewrite the model's prose."""
+    template = _ATTRIBUTION_TEMPLATES[hash(cited_reason) % len(_ATTRIBUTION_TEMPLATES)]
+    clause = template.format(reason=cited_reason)
+    return clause + fallback[0].lower() + fallback[1:] if fallback else clause.rstrip()
+
+
 def _honest_synthesis(
     text: str | None,
     shopping_state: dict | None,
@@ -278,6 +304,31 @@ def _honest_synthesis(
                 terms,
             )
             return fallback
+        # SIXTH gap, found live by a `value-auditor` round adversarially
+        # re-testing the fifth fix: a *valid* `cited_reason` only proves the
+        # model named a real stored term somewhere - it never proved the
+        # free-text `text` actually argues for that term rather than a
+        # different, unstated one. "The lightweight design is nice, but what
+        # really seals the deal here is the Marathon Pro's outstanding
+        # durability" passes `cited_reason="lightweight"` cleanly (a real
+        # term) while its actual prose argues durability - and every
+        # rhetorical shape this can take (rhetorical question, third-person,
+        # comparative framing, "X above all else") is exactly the
+        # unenumerable free-text space that already defeated four prior
+        # pattern-based attempts at this same function. Five of ten fresh
+        # phrasings reproduced this live, deterministically, in the audit.
+        #
+        # Closed structurally this time by no longer trusting the model to
+        # author the causal-attribution sentence AT ALL: the personalized
+        # clause is now built here, in code, from `cited_reason` alone - the
+        # one field already verified against real stored state - and the
+        # model's own free text is discarded rather than searched for a
+        # bypass that cannot be enumerated away. This trades the model's
+        # more natural narrative for a claim that actually holds, the same
+        # trade-off this function's docstring already made once for the
+        # "no stated priority at all" case.
+        if personalizes is not False:
+            return _deterministic_personalized_reply(cited_reason, fallback)
     # FIFTH gap's fix: `personalizes` is now a required field, and leaving it
     # null/missing is treated the same as `True` - fail-closed - so "the
     # model didn't say" can no longer stand in for "this reply doesn't
