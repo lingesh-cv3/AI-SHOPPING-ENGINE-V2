@@ -42,9 +42,12 @@ from .llm import LLMClient, LLMConfig, LLMUnavailable
 from .prompts import (
     PROPOSABLE,
     SYSTEM_PROMPT,
+    _RELEVANCE_SYSTEM_PROMPT,
     _SYNTHESIS_SYSTEM_PROMPT,
     _synthesis_prompt,
     propose_tool,
+    relevance_judgment_prompt,
+    relevance_tool,
     synthesis_tool,
 )
 
@@ -424,6 +427,52 @@ class ReasoningService:
             cited_reason=cited_reason,
             personalizes=personalizes,
         )
+
+    # -- semantic relevance judgment -----------------------------------------
+
+    async def judge_relevance(
+        self, *, need: str, categories: list[str], sample_titles: list[str]
+    ) -> bool | None:
+        """Does this shop plausibly carry something matching `need`, based on
+        real semantic/use-case fit rather than literal keyword overlap?
+
+        Used only to gate `engine/execution/relevance.py::shop_carries`'s
+        existing fallback decisions when the deterministic keyword/category
+        check itself said "no" - never to invent a product, never to bypass
+        the real adapter fetch, never to propose an action. This is strictly
+        a narrower capability than `reason()`, the same guarantee
+        `synthesize()` already carries: no tool schema field here can select
+        a variant, assert risk, or reach execution - `relevance_tool()` has
+        exactly one boolean field.
+
+        Returns `None` (not `True` or `False`) when the model is unavailable
+        or throttled - the caller must treat `None` the same as "could not
+        confirm," never as an implicit yes, and fall back to whatever the
+        deterministic check already found (the existing, safe, honest-decline
+        behavior), the same `LLMUnavailable`-degrades-safely pattern
+        `synthesize()` already established.
+        """
+        if self._client is None:
+            return None
+        prompt = relevance_judgment_prompt(need, categories, sample_titles)
+        try:
+            result = await self._client.complete(
+                system=_RELEVANCE_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[relevance_tool()],
+                force_tool=True,
+            )
+        except LLMUnavailable as exc:
+            logger.info("relevance judgment unavailable, degrading: %s", exc)
+            return None
+        call = next(
+            (c for c in result.tool_calls if c["name"] == "judge_relevance"), None
+        )
+        if call is None:
+            return None
+        args = call["arguments"] if isinstance(call.get("arguments"), dict) else {}
+        plausible = args.get("plausible")
+        return plausible if isinstance(plausible, bool) else None
 
     # -- parsing -----------------------------------------------------------
 

@@ -235,8 +235,17 @@ class Executed:
 class ExecutionService:
     """Carries out approved actions. Makes no decisions."""
 
-    def __init__(self, registry: CapabilityRegistry) -> None:
+    def __init__(self, registry: CapabilityRegistry, reasoning=None) -> None:
         self._registry = registry
+        #: Optional `ReasoningService` reference, used ONLY for the narrow
+        #: semantic relevance judgment (`ReasoningService.judge_relevance`)
+        #: that gates the RECOMMEND_PRODUCTS fallback below when the
+        #: deterministic keyword/category check already said "no" - never
+        #: for proposing or executing anything. `None` (e.g. in tests that
+        #: construct `ExecutionService` directly) simply skips the semantic
+        #: check and falls back to the deterministic-only behavior that
+        #: already existed, so nothing here is a hard dependency.
+        self._reasoning = reasoning
 
     async def execute_case(self, connection_id: str, case_id: str) -> Executed:
         """Run the action a case selected, then record the outcome.
@@ -453,6 +462,59 @@ class ExecutionService:
         result.latency_ms = int((time.perf_counter() - started) * 1000)
         return result
 
+    async def _shop_carries_semantic(self, need: str, wide_products: list) -> bool | None:
+        """Second-opinion semantic check, used ONLY when
+        `relevance.shop_carries`'s deterministic keyword/category overlap
+        already said "not carried" - never to override a deterministic
+        "yes" (that would risk re-opening exactly the false-substitution
+        shape this whole mechanism exists to prevent), only to catch the
+        two shapes literal overlap structurally cannot: a taste/use-case
+        description sharing no literal words with any product ("something
+        smooth and not too bitter" at a coffee shop), and a clearly
+        unrelated category the deterministic check might still miss on an
+        undercategorized platform.
+
+        `need` should be the shopper's own original wording when available
+        (not a narrowed search proxy the model may have substituted, e.g.
+        "kayak" rewritten to "water") - passed as such by both call sites
+        below, since judging relevance against the model's own already-
+        weak paraphrase would just repeat the paraphrase's own mistake.
+
+        Returns `None` when no `ReasoningService` was wired in (e.g. a test
+        constructing `ExecutionService` directly) or the model call itself
+        is unavailable/throttled - callers must treat `None` the same as
+        "could not confirm," i.e. keep the deterministic "not carried"
+        verdict rather than treat an unconfirmed check as permission.
+        """
+        if self._reasoning is None or not getattr(self._reasoning, "enabled", False):
+            return None
+        categories = sorted({c.lower() for p in wide_products for c in relevance._categories_of(p)})
+        sample_titles = [
+            f"{p.title} - {p.description}"[:160] if p.description else p.title
+            for p in wide_products[:40]
+        ]
+        try:
+            # A hard timeout, not just relying on `LLMClient`'s own transport
+            # timeout - found live, the hard way: an unbounded call here can
+            # stall a turn (and, worse, a batch test run hitting this path
+            # repeatedly) far longer than any shopper-facing wait should
+            # ever be. 12s matches the rough per-turn latency budget the
+            # rest of this codebase already tolerates for a single model
+            # call; a slower response degrades exactly like any other
+            # `LLMUnavailable` - to the deterministic verdict, never a hang.
+            return await asyncio.wait_for(
+                self._reasoning.judge_relevance(
+                    need=need, categories=categories, sample_titles=sample_titles
+                ),
+                timeout=12.0,
+            )
+        except TimeoutError:
+            logger.info("semantic relevance judgment timed out; degrading to deterministic verdict")
+            return None
+        except Exception:
+            logger.exception("semantic relevance judgment failed; degrading to deterministic verdict")
+            return None
+
     async def _dispatch(self, adapter, case, action_type: ActionType) -> Executed:
         """Map an action onto a commerce call.
 
@@ -521,6 +583,12 @@ class ExecutionService:
                 # resets category/query/top_rated, because a phrase this
                 # generic cannot itself be naming a category to keep.
                 said = str(params.get("said") or "").strip().lower()
+                # The shopper's own original wording, unlowered, for the
+                # semantic relevance judge below - deliberately NOT `query`,
+                # which may already be the model's own narrowed proxy term
+                # ("kayak" rewritten to "water"). Judging relevance against
+                # the paraphrase would just repeat the paraphrase's mistake.
+                raw_said = str(params.get("said") or "").strip() or query
                 _said_words = [w.strip(".,!?'\"") for w in said.split()]
                 _said_words = [w for w in _said_words if w]
                 is_generic_browse_phrase = (
@@ -737,7 +805,30 @@ class ExecutionService:
                 wide_sample = None
                 if candidates and relevance.weak_single_word_match(query, match_score):
                     wide_sample = await _full_catalog_sample(adapter)
-                    if not relevance.shop_carries(query, wide_sample):
+                    # NOT gated on `relevance.shop_carries(query, wide_sample)`
+                    # here, deliberately - checking the deterministic
+                    # category/description overlap of `query` (the model's
+                    # own narrowed proxy term, e.g. "water") against a
+                    # catalog sample that BY CONSTRUCTION includes the very
+                    # candidate that proxy term matched is close to
+                    # tautological: "water" trivially "carries" because the
+                    # Insulated Water Bottle's own text contains "water".
+                    # Found live, confirmed directly: shop_carries("water",
+                    # wide_sample) returns True even on a shop that plainly
+                    # does not sell kayaks, silently defeating this entire
+                    # gate. The semantic judge is asked directly instead,
+                    # against the shopper's own original wording (never the
+                    # model's substituted term - judging relevance against
+                    # the paraphrase would just repeat its mistake). `None`
+                    # (unavailable/throttled) keeps the existing, already-
+                    # deterministic `shop_carries(query, ...)` verdict as a
+                    # fallback rather than treating an unconfirmed check as
+                    # permission either way.
+                    semantic_carries = await self._shop_carries_semantic(raw_said, wide_sample)
+                    if semantic_carries is False or (
+                        semantic_carries is None
+                        and not relevance.shop_carries(query, wide_sample)
+                    ):
                         candidates = []
                         relevant = []
                         weak_match_rejected = True
@@ -823,7 +914,25 @@ class ExecutionService:
                             query, wide_products
                         )
                         if not shop_carries_query:
-                            titles = []
+                            # Deterministic category/description overlap
+                            # says no. Second opinion via the semantic
+                            # judge, against the shopper's own original
+                            # wording - this is what lets "something smooth
+                            # and not too bitter" at a coffee shop keep
+                            # working: it shares zero literal words with
+                            # any product or category, but a real semantic
+                            # judgment against the shop's real categories/
+                            # sample titles can recognize it as a genuine
+                            # coffee-shop taste question. `None`
+                            # (unavailable/throttled) keeps the
+                            # deterministic "not carried" verdict.
+                            semantic_carries = await self._shop_carries_semantic(
+                                raw_said, wide_products
+                            )
+                            if semantic_carries is True:
+                                shop_carries_query = True
+                            else:
+                                titles = []
 
                 if not titles:
                     if query and not shop_carries_query:

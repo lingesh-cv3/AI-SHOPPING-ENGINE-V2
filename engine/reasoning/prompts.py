@@ -801,8 +801,29 @@ def synthesis_tool() -> dict[str, Any]:
     synthesis call has always been (see `ReasoningService.synthesize`'s own
     docstring), confirmed by `invariant-guard` for this exact reason each
     time this file changes.
+
+    **A real, previously-undiscovered bug, found live while building the
+    sixth fix this session (the semantic relevance judge below): this
+    schema, and `relevance_tool()`'s, were both missing the OpenAI
+    `{"type": "function", "function": {...}}` request wrapper that
+    `propose_tool()` above correctly has - the tool was sent as a bare
+    `{"name": ..., "parameters": ...}` dict, which the OpenAI-compatible API
+    rejects outright with an HTTP 400.** `ReasoningService.synthesize()`
+    already catches `LLMUnavailable` and degrades to the safe fallback
+    sentence on ANY provider failure, by design - so this bug was
+    completely silent: every real synthesis call under the OpenAI provider
+    has been failing and falling back this entire session, and it read
+    exactly like the already-documented Groq-throttle variance (a
+    `model_reply` with real text from the separate, correctly-wrapped
+    `propose_tool()` call, next to a `reply` that fell back to the plain
+    engine sentence) rather than a schema bug, until confirmed directly by
+    calling the provider and inspecting the raw error. Fixed by wrapping
+    both this schema and `relevance_tool()`'s the same way `propose_tool()`
+    already is.
     """
     return {
+        "type": "function",
+        "function": {
         "name": "write_synthesis",
         "description": (
             "Give the final shopper-facing reply and, if it personalizes the "
@@ -838,5 +859,80 @@ def synthesis_tool() -> dict[str, Any]:
                 },
             },
             "required": ["reply", "personalizes"],
+        },
+        },
+    }
+
+
+_RELEVANCE_SYSTEM_PROMPT = (
+    "You judge whether a shop's real catalog plausibly carries something a "
+    "shopper described, when a literal keyword/category match already failed "
+    "to decide it. You are given the shop's REAL declared categories and a "
+    "REAL sample of its actual product titles/descriptions - never invent a "
+    "product or claim one exists beyond what is listed. Judge based on "
+    "genuine semantic/use-case fit, not literal word overlap (that already "
+    "failed, which is why you were asked). A coffee shop plausibly carries "
+    "'something smooth and not too bitter' even though those words never "
+    "appear in any title. A running-shoe shop does not plausibly carry a "
+    "kayak, a tent, or ski goggles, even if one shared word coincidentally "
+    "matched something in its catalog. Answer only about whether the "
+    "CATEGORY of thing described is plausible for this shop to sell at all - "
+    "not whether a specific named product exists."
+)
+
+
+def relevance_judgment_prompt(
+    need: str, categories: list[str], sample_titles: list[str]
+) -> str:
+    """Prompt for the semantic relevance judge (`relevance_tool()` below).
+
+    Deliberately narrow: this call cannot see anything not already fetched
+    from the real adapter (`categories`/`sample_titles` are always real,
+    never invented here or by the model), and its only output is a yes/no
+    plausibility judgment used to gate an existing fallback decision - never
+    a product list, never an action, never anything the risk gate would need
+    to see. See `engine/execution/relevance.py::shop_carries`'s own docstring
+    for why a purely literal keyword/category check cannot close this gap on
+    its own (a coffee-shop taste question sharing no literal words with any
+    title; a weak coincidental single-word match surviving for a clearly
+    unrelated named product) - the two shapes this call exists to catch.
+    """
+    cats = ", ".join(categories[:30]) or "(none declared)"
+    titles = "\n".join(f"- {t}" for t in sample_titles[:40]) or "(no sample available)"
+    return (
+        f"Shopper described wanting: {need!r}\n\n"
+        f"This shop's real declared categories: {cats}\n\n"
+        f"A real sample of this shop's actual products:\n{titles}\n\n"
+        "Does this shop plausibly carry something matching what the shopper "
+        "described, based on genuine category/use-case fit? Call "
+        "judge_relevance with your answer."
+    )
+
+
+def relevance_tool() -> dict[str, Any]:
+    """Tool schema for the semantic relevance judge. No action-type, variant,
+    or risk field of any kind - it cannot propose an action or be classified
+    by the risk gate, the same narrow-capability guarantee `synthesis_tool()`
+    already carries, confirmed by `invariant-guard` for the same reason each
+    time this file changes. Its only effect anywhere in the system is gating
+    whether an existing, already-real candidate/fallback list is kept or
+    discarded - it can never cause a product to be invented or shown that
+    was not already fetched from the real adapter.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "judge_relevance",
+            "description": "State whether this shop plausibly carries something matching the shopper's description.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "plausible": {
+                        "type": "boolean",
+                        "description": "True if this shop plausibly carries something matching the description, based on real category/use-case fit.",
+                    },
+                },
+                "required": ["plausible"],
+            },
         },
     }

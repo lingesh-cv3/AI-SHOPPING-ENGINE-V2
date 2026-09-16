@@ -109,15 +109,20 @@ def build_engine() -> Engine:
         )
     )
 
+    # Built once and shared with ExecutionService below (for the narrow
+    # semantic relevance judgment only, see ExecutionService.__init__'s
+    # own docstring) rather than constructed twice - builds disabled if no
+    # key is configured, rather than failing. The engine runs on rule-based
+    # proposals without a model.
+    reasoning_service = ReasoningService.from_env()
+
     return Engine(
         registry=registry,
         policies=policies,
         decision=DecisionEngine(registry, policies),
         gate=RiskGate(policies),
-        # Builds disabled if no key is configured, rather than failing. The engine
-        # runs on rule-based proposals without a model.
-        reasoning=ReasoningService.from_env(),
-        execution=ExecutionService(registry),
+        reasoning=reasoning_service,
+        execution=ExecutionService(registry, reasoning=reasoning_service),
         # Unconfigured (records rather than delivers) unless MAILER_SMTP_HOST is
         # set - see engine/notify/mailer.py.
         mailer=Mailer.from_env(),
