@@ -161,6 +161,15 @@ class Synthesis:
     #: own docstring for why the prior two rounds of prose-scanning were each
     #: defeated by adversarial rephrasing.
     cited_reason: str | None = None
+    #: The model's own declared "does this reply personalize to something the
+    #: shopper stated" flag, per `synthesis_tool()`'s now-required
+    #: `personalizes` field. `None` means no structured claim was made at all
+    #: (the plain-text fallback path, or a tool-call the model skipped) -
+    #: `_honest_synthesis` treats that the same as `True`, fail-closed,
+    #: precisely because "the model didn't say" must not become a free pass
+    #: the way an unset optional field previously was (see `synthesis_tool()`'s
+    #: docstring for the bypass this closes).
+    personalizes: bool | None = None
 
 
 class ReasoningService:
@@ -397,12 +406,15 @@ class ReasoningService:
                 prompt_tokens=result.prompt_tokens,
                 completion_tokens=result.completion_tokens,
                 cited_reason=None,
+                personalizes=None,
             )
 
         args = call["arguments"] if isinstance(call.get("arguments"), dict) else {}
         text = str(args.get("reply", "")).strip() or None
         cited = args.get("cited_reason")
         cited_reason = str(cited).strip()[:300] if isinstance(cited, str) and cited.strip() else None
+        personalizes_raw = args.get("personalizes")
+        personalizes = personalizes_raw if isinstance(personalizes_raw, bool) else None
         return Synthesis(
             text=text,
             used_model=text is not None,
@@ -410,6 +422,7 @@ class ReasoningService:
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
             cited_reason=cited_reason,
+            personalizes=personalizes,
         )
 
     # -- parsing -----------------------------------------------------------

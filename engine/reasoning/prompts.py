@@ -750,8 +750,10 @@ def _synthesis_prompt(
 
     parts.append(
         "Write the reply now - two to three sentences, grounded only in the facts above. "
-        "Then call write_synthesis with that reply and, if you personalized it to "
-        "something the shopper stated, the exact stated phrase you based it on."
+        "Then call write_synthesis with that reply, a true/false personalizes flag stating "
+        "whether the reply attributes the pick to something the shopper said, and - "
+        "whenever personalizes is true - the exact stated phrase you based it on "
+        "(cited_reason must not be null when personalizes is true)."
     )
     return "\n\n".join(parts)
 
@@ -770,12 +772,28 @@ def synthesis_tool() -> dict[str, Any]:
     in a field the code can check exactly: `cited_reason` must be the shopper's
     own stated phrase, verbatim or near-verbatim, or null if this reply makes
     no personalization claim at all. `_honest_synthesis` then checks THIS
-    field against `shopping_state`'s real stored terms - not the prose - so
-    there is no phrasing space left to search for a bypass in; the only way
-    to defeat this check is for the model to leave `cited_reason` null while
-    the `reply` text still makes an implicit, uncited personalization claim,
-    which is a materially harder and rarer failure than free-form rephrasing
-    a known regex, and is worth verifying empirically rather than assuming.
+    field against `shopping_state`'s real stored terms - not the prose.
+
+    **A FIFTH gap, found live: leaving `cited_reason` null was itself the
+    bypass.** Nothing forced the model to fill it, so a reply could still
+    make an implicit personalization claim in free prose ("reading between
+    the lines of what you said about X, Y actually wins out for you") with
+    `cited_reason` left null - and the null case was, by design, treated as
+    "no claim being made," a free pass. An independent adversarial pass found
+    5/5 fresh phrasings defeated it this way. A `personalizes` boolean is now
+    ALSO required on every call: the model must explicitly declare whether
+    this reply attributes its pick to something the shopper said. `personalizes:
+    true` (or the field being missing/malformed, which is treated the same,
+    fail-closed) with no valid `cited_reason` is now rejected outright -
+    there is no longer a way to get an uncited personalization claim through
+    by simply not filling in the optional field, because there are now two
+    structured signals that both have to be honestly reconciled, not one that
+    can be silently omitted. `personalizes: false` still passes through the
+    older free-text backstop checks underneath (any-term-mentioned floor,
+    causal-claim-pattern extraction) as a second line of defense against a
+    model that lies on the boolean itself - a materially harder and rarer
+    failure than simply not filling in a field, and worth verifying
+    empirically rather than assuming closed.
 
     Deliberately has NO action-type, variant, or risk field of any kind - it
     cannot propose an action, cannot be classified by the risk gate, and
@@ -798,17 +816,27 @@ def synthesis_tool() -> dict[str, Any]:
                     "type": "string",
                     "description": "The two-to-three sentence reply, grounded only in the given facts.",
                 },
+                "personalizes": {
+                    "type": "boolean",
+                    "description": (
+                        "True if the reply's wording, in any way, attributes or credits "
+                        "the pick to something the shopper said or stated as a preference "
+                        "(e.g. 'since you said...', 'because you prefer...', 'this matches "
+                        "your need for...', 'given how much you care about...'). False if "
+                        "the reply only states real facts/differences with no such "
+                        "attribution to the shopper's own words."
+                    ),
+                },
                 "cited_reason": {
                     "type": ["string", "null"],
                     "description": (
-                        "The shopper's own stated phrase (verbatim or near-verbatim from "
-                        "THEIR CURRENT MISSION above) that this reply's personalization is "
-                        "actually based on. Null if the reply makes no claim about what the "
-                        "shopper specifically said - e.g. it just describes real differences "
-                        "without attributing the choice to a stated preference."
+                        "REQUIRED to be a real, non-null value whenever personalizes is "
+                        "true. The shopper's own stated phrase (verbatim or near-verbatim "
+                        "from THEIR CURRENT MISSION above) that this reply's personalization "
+                        "is actually based on. Must be null when personalizes is false."
                     ),
                 },
             },
-            "required": ["reply"],
+            "required": ["reply", "personalizes"],
         },
     }

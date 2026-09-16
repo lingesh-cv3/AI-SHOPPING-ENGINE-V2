@@ -196,6 +196,7 @@ def _honest_synthesis(
     shopping_state: dict | None,
     fallback: str,
     cited_reason: str | None = None,
+    personalizes: bool | None = None,
 ) -> str:
     """The central hardening-pass fix, in one place - and, after a
     `value-auditor` pass caught a real gap in this function's first version,
@@ -275,6 +276,22 @@ def _honest_synthesis(
                 "attribution",
                 cited_reason,
                 terms,
+            )
+            return fallback
+    # FIFTH gap's fix: `personalizes` is now a required field, and leaving it
+    # null/missing is treated the same as `True` - fail-closed - so "the
+    # model didn't say" can no longer stand in for "this reply doesn't
+    # personalize." If the model declares (or fails to declare) that this
+    # reply personalizes, a real matching `cited_reason` is mandatory; there
+    # is no longer a way to make an implicit, uncited personalization claim
+    # by simply leaving the optional citation field empty.
+    if personalizes is not False and not cited_reason:
+        if mission_ranking.has_stated_priority(shopping_state):
+            logger.warning(
+                "synthesis declared personalizes=%r with no valid cited_reason "
+                "while stated mission state exists; falling back rather than "
+                "trusting an uncited personalization claim",
+                personalizes,
             )
             return fallback
     if not mission_ranking.has_stated_priority(shopping_state):
@@ -1363,7 +1380,7 @@ async def _process_turn(
                 )
                 reply = _honest_synthesis(
                     synth.text, shopping_state, "Here's how they compare.",
-                    synth.cited_reason,
+                    synth.cited_reason, synth.personalizes,
                 )
             else:
                 reply = "Here's how they compare."
@@ -1736,7 +1753,8 @@ async def _process_turn(
                         shopping_state=shopping_state,
                     )
                     reply = _honest_synthesis(
-                        synth.text, shopping_state, reply, synth.cited_reason
+                        synth.text, shopping_state, reply,
+                        synth.cited_reason, synth.personalizes,
                     )
                 try:
                     await db.shopping_state.merge(
