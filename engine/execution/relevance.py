@@ -38,9 +38,48 @@ from shared.models import Product
 #: this module ignores is a word the search itself would have ignored too.
 _MIN_WORD_LEN = 2
 
+#: EIGHTH-gap fix: common English function words that pass the length
+#: floor above (long enough to look "significant") but carry no product
+#: intent - found live when the RECOMMEND_PRODUCTS "rescue search" branch
+#: (engine/execution/service.py, fires when the model leaves `query`
+#: blank and searches the shopper's raw sentence instead) scored "do you
+#: sell kayaks?" against Northfield's catalog: "you" cleared the length
+#: floor and `_overlap`'s substring check (`w in text`) matched it inside
+#: ordinary marketing copy containing "your" ("the perfect fit for your
+#: daily runs") on several unrelated products, producing a real-looking
+#: overlap score of 1 across four different, unrelated items - not a
+#: query-specific coincidence but a structural one, since a raw shopper
+#: sentence (unlike a deliberate `query` parameter) is full of pronouns
+#: and auxiliary verbs like this. `weak_single_word_match`'s own
+#: `len(words) <= 1` check assumes a 3-word query already had real
+#: multi-word discrimination applied - not true when two of those three
+#: words are stopwords doing no actual discriminating. This list is
+#: deliberately short and closed-class (pronouns, articles, common
+#: auxiliaries) - words that are structurally never a product name or
+#: attribute in English, not a per-example patch for one failing query.
+_STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "are", "you", "your", "yours", "with", "have",
+        "has", "had", "does", "did", "not", "any", "some", "this", "that",
+        "these", "those", "can", "could", "would", "will", "sell", "sells",
+        "selling", "offer", "offers", "carry", "carries", "got", "get",
+        "there", "here", "what", "which", "who", "whom", "about", "into",
+    }
+)
+
 
 def _significant_words(text: str) -> list[str]:
-    return [w for w in text.lower().split() if len(w) > _MIN_WORD_LEN]
+    # Punctuation is stripped here, not just for the stopword check below -
+    # found live in the same investigation: a raw sentence like "do you
+    # sell kayaks?" kept "kayaks?" (with the trailing "?") as its one
+    # actually-meaningful word, and `_overlap`'s substring check can never
+    # match "kayaks?" against a product's real, punctuation-free "kayak"/
+    # "kayaks" text - silently weakening the one word in the query that
+    # should have mattered most, while stopwords with no punctuation
+    # attached ("you", "sell") matched cleanly. Stripping first fixes both
+    # sides of the same investigation, not just the stopword half.
+    words = [w.strip(".,!?'\"") for w in text.lower().split()]
+    return [w for w in words if len(w) > _MIN_WORD_LEN and w not in _STOPWORDS]
 
 
 def _product_text(p: Product | dict) -> str:
@@ -117,6 +156,47 @@ def weak_single_word_match(query: str, top_score: int) -> bool:
     """
     words = _significant_words(query)
     return len(words) <= 1 and top_score == 1
+
+
+def query_diverges_from_said(query: str, raw_said: str) -> bool:
+    """True when the model's search `query` shares NOT ONE significant word
+    with what the shopper actually typed (`raw_said`) - a structural signal
+    that the model invented a proxy term rather than searching on the
+    shopper's own words, independent of how many words that proxy has.
+
+    EIGHTH-gap fix, second half: `weak_single_word_match` only catches a
+    single-word proxy ("kayak" -> "water") scoring exactly 1. Found live
+    that a multi-word proxy the model guesses just as wrongly ("kayak" ->
+    "water bottle", two significant words) slips past that check entirely,
+    since it is not "weak" by word-count even though it is exactly as
+    ungrounded in what the shopper actually said. This does not replace
+    `weak_single_word_match` - both are checked, combined with `or` - it
+    catches the case that check's word-count framing cannot see.
+
+    Deliberately conservative in two ways, the second found live after the
+    first version of this function shipped and immediately regressed a
+    working case: (1) only fires when there is at least one significant
+    word on each side to compare (an empty `query` or a `raw_said` with
+    nothing significant in it says nothing about divergence either way);
+    (2) only fires when `query` is SHORT (at most two significant words).
+    A short, generic proxy term ("water", "water bottle") diverging from
+    what the shopper said is the actual signature of a wrong guess. A
+    longer query - three or more significant words - diverging from the
+    raw sentence is exactly what a model naming a SPECIFIC real product by
+    its own title looks like ("Ethiopia Guji Natural" for "a fruity
+    coffee") - a genuinely correct, specific citation that will never
+    share words with the shopper's generic phrasing, and must not be
+    hedged as if it were a coincidental guess. Reproduced live: without
+    this length cap, the exact-title-match case above was flagged and
+    given a "couldn't confirm an exact match" disclosure on a fully
+    correct answer, 5/5 trials - a real, caught regression, not a
+    hypothetical one.
+    """
+    query_words = set(_significant_words(query))
+    said_words = set(_significant_words(raw_said))
+    if not query_words or not said_words or len(query_words) > 2:
+        return False
+    return query_words.isdisjoint(said_words)
 
 
 def shop_carries(query: str, catalog_sample: list) -> bool:

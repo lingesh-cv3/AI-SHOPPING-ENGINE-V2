@@ -693,7 +693,41 @@ class ExecutionService:
                     has_real_word = any(len(w) > 2 for w in said.split())
                     if said and has_real_word:
                         rescued = await adapter.search_products(said, limit=30)
-                        rescued_relevant = relevance.best_matches(rescued.products, said)
+                        rescue_score, rescued_relevant = relevance.best_matches_with_score(
+                            rescued.products, said
+                        )
+                        # EIGHTH gap, found live by an independent
+                        # `value-auditor` round re-testing the SEVENTH-gap
+                        # disclosure fix below: this rescue-search branch
+                        # (fires when the model left `query` blank and the
+                        # shopper's own raw message is searched instead) was
+                        # never covered by ANY relevance gate at all - not
+                        # `weak_single_word_match`, not `shop_carries`, not
+                        # the semantic judge, not the disclosure flag. It
+                        # returned a coincidental single-word hit ("do you
+                        # sell kayaks?" -> "Insulated Water Bottle" via
+                        # "water"-adjacent overlap in the demo backend's own
+                        # search) with the same confident framing as a real
+                        # match, in 3 of 8 live trials - the exact kayak bug
+                        # the other branch's fix addressed, just reachable
+                        # through a second, previously-unguarded path.
+                        # Applying the identical weak-match check here, not
+                        # a second bespoke one.
+                        rescue_weak_uncertain = False
+                        if rescued_relevant and relevance.weak_single_word_match(
+                            said, rescue_score
+                        ):
+                            rescue_wide = await _full_catalog_sample(adapter)
+                            rescue_semantic = await self._shop_carries_semantic(
+                                said, rescue_wide
+                            )
+                            if rescue_semantic is False or (
+                                rescue_semantic is None
+                                and not relevance.shop_carries(said, rescue_wide)
+                            ):
+                                rescued_relevant = []
+                            else:
+                                rescue_weak_uncertain = True
                         if rescued_relevant:
                             titles = [p.title for p in rescued_relevant[:6]]
                             return Executed(
@@ -706,6 +740,7 @@ class ExecutionService:
                                 ),
                                 payload={
                                     "query": said,
+                                    "weak_match_uncertain": rescue_weak_uncertain,
                                     "products": [
                                         {
                                             "product_id": p.product_id,
@@ -796,6 +831,23 @@ class ExecutionService:
                 # Never applied to a multi-word query or a score>1 match -
                 # those already survived real word-overlap discrimination.
                 weak_match_rejected = False
+                # SEVENTH-gap disclosure fix (see `_honest_synthesis` in
+                # chat.py for the sibling fix this session): a weak
+                # single-word match that survives the check below - because
+                # the semantic judge says "plausible" when it's actually
+                # wrong (~1 in 3-8 trials on "kayak"->"water"->"Insulated
+                # Water Bottle", a real, measured, unresolved limit of the
+                # judge model itself, not a code defect - see PROGRESS.md)
+                # - used to be shown with the same confident "Here's what's
+                # available" framing as a genuine match, even though the
+                # engine's own internal reasoning already knows this is
+                # only a coincidental word overlap, never fully confirmed.
+                # Tracked here so chat.py can disclose the uncertainty
+                # instead of presenting it as a direct answer - the weak
+                # match itself is still shown (a real, correctly-priced
+                # product is not withheld), only the confident framing is
+                # replaced with an honest one.
+                weak_match_uncertain = False
                 # Cached and reused below (the `if not titles` browse-fallback
                 # branch) rather than fetched a second time - both branches
                 # page the same real catalog for the same failed query in the
@@ -803,7 +855,19 @@ class ExecutionService:
                 # round-trips a single negative query cost (up to ~20 instead
                 # of ~10 at `_MAX_CATALOG_SCAN`), found live this session.
                 wide_sample = None
-                if candidates and relevance.weak_single_word_match(query, match_score):
+                # EIGHTH gap, second half: `weak_single_word_match` alone
+                # only catches a single-word proxy term. A multi-word proxy
+                # the model guesses just as wrongly ("kayak" -> "water
+                # bottle") is not "weak" by word count but is exactly as
+                # ungrounded in what the shopper actually said -
+                # `query_diverges_from_said` catches that shape too. See
+                # its own docstring in relevance.py for why this is a
+                # conservative, structural check, not another per-example
+                # word list.
+                if candidates and (
+                    relevance.weak_single_word_match(query, match_score)
+                    or relevance.query_diverges_from_said(query, raw_said)
+                ):
                     wide_sample = await _full_catalog_sample(adapter)
                     # NOT gated on `relevance.shop_carries(query, wide_sample)`
                     # here, deliberately - checking the deterministic
@@ -832,6 +896,11 @@ class ExecutionService:
                         candidates = []
                         relevant = []
                         weak_match_rejected = True
+                    else:
+                        # Survived only on the strength of one coincidental
+                        # word overlap plus a semantic judgment that could
+                        # be wrong - never fully confirmed. Disclose it.
+                        weak_match_uncertain = True
 
                 if top_rated:
                     # Never invented: a product with no rating on this platform
@@ -972,6 +1041,7 @@ class ExecutionService:
                         "query": query,
                         "relevance_relaxed": relevance_relaxed,
                         "budget_relaxed": budget_relaxed,
+                        "weak_match_uncertain": weak_match_uncertain,
                         "max_price": max_price,
                         "products": [
                             {
