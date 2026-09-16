@@ -59,6 +59,131 @@ operator key must be typed rather than built in.
 Reported after a walkthrough. **Not a complete list** - walk the product before
 trusting anything.
 
+**Round 8 of the honesty/relevance hardening pass - two real, verified fixes
+(`c377250`, `6e650b1`), following a value-auditor pass that found the
+round-7 "fixes" still broken.** Both problems this session has repeatedly
+tried and re-broken to fix are, as of this round, genuinely closed against
+everything tested so far - stated carefully, not triumphantly, given this
+exact pattern has repeated seven times already.
+
+**Fix 1 (`c377250`) - `_honest_synthesis`'s seventh gap.** The sixth-gap
+deterministic-clause fix (see item 0 below) only applied when
+`personalizes is not False`. Setting `personalizes=False` - ordinary model
+output variance, not adversarial cleverness - fell through to the old
+free-text-scanning path, already proven bypassable at the fourth gap.
+Reproduced live via two exact cases from an independent audit
+(`cited_reason='lightweight', personalizes=False` with prose arguing
+durability; `cited_reason=None, personalizes=False` with an implicit
+durability claim), both returning the raw false claim verbatim. Closed by
+no longer reading `personalizes` as a gate anywhere in the function - only
+for logging. A valid `cited_reason` now always uses the deterministic
+clause regardless of what `personalizes` claims; with no `cited_reason`,
+real stated mission state now always falls back to the plain sentence,
+unconditionally - no text-scanning path is left to bypass. The old
+`_causal_claim_terms`/`_CAUSAL_CLAIM_PATTERNS` regex (and the now-unused
+`re` import) were removed rather than patched an eighth time. Verified via
+8 deterministic direct-function-call cases (`scripts/va_fix7_personalizes_false.py`)
+covering both exact bypasses plus regression cases (grounded citation,
+dishonest citation, no stated priority) - 8/8 pass, no model-call variance
+involved since this calls the function directly. `fuzz.py` (20/20
+sequences) and `auditroutes.py` (all probes) both clean afterward.
+
+**Fix 2 (`6e650b1`) - the kayak false-substitution gap, three distinct,
+previously-undiscovered root causes, not one.** An adversarial
+`value-auditor` round found the round-7 semantic-judge fix still
+substituting "Insulated Water Bottle 750ml" for "do you sell kayaks?" on
+~3/8 live trials (twice measured, ~37.5%). Investigation found:
+
+1. **A second, entirely unguarded code path.** `engine/execution/service.py`'s
+   RECOMMEND_PRODUCTS "rescue search" branch (fires when the model leaves
+   `query` blank and searches the shopper's raw sentence instead - a path
+   no prior round of this fix ever touched) had zero relevance gating -
+   not `weak_single_word_match`, not `shop_carries`, not the semantic
+   judge. Now runs the identical weak-match check the primary search path
+   already uses.
+2. **A stopword bug in `relevance.py`'s word-overlap re-scoring.** `_significant_words`
+   kept "you" as a "significant" word (3 characters, clears the length
+   floor), and `_overlap`'s substring check matched it inside ordinary
+   marketing copy containing "your" ("the perfect fit for your daily
+   runs") - producing a real-looking overlap score of 1 against several
+   unrelated products whenever a full raw sentence, not a deliberate
+   short query, was scored. This only bit the raw-sentence rescue path
+   above, which is why it survived unnoticed through six rounds of fixes
+   to the `query`-based path. A small, closed-class stopword list (`_STOPWORDS`)
+   was added, scoped to this module's re-scoring only - not a per-example
+   patch, a structural class of word (pronouns, articles, common
+   auxiliaries) that is never a product name or attribute. Also fixed a
+   latent punctuation bug found in the same pass: significant words kept
+   trailing punctuation ("kayaks?"), which can never match a product's
+   real, punctuation-free text - silently weakening the one word that
+   should have mattered most, on the same line as the stopword fix.
+3. **`weak_single_word_match`'s word-count framing missed a multi-word
+   wrong proxy.** "kayak" narrowed by the model to "water bottle" (two
+   significant words) scores 2 against "Insulated Water Bottle 750ml" -
+   not "weak" by that check's own `len(words) <= 1` definition, despite
+   being exactly as ungrounded in what the shopper actually said as the
+   one-word "water" case the check already covers. New
+   `relevance.query_diverges_from_said(query, raw_said)` catches this via
+   a different, structural signal instead: does the model's query share
+   any word at all with what the shopper actually typed. **This directly
+   caused, and then fixed, a real regression within this same
+   investigation** - the first version had no length cap, and it flagged
+   Kettle's `"a fruity coffee"` -> `query="Ethiopia Guji Natural"` (the
+   model correctly naming the specific real product) as "diverging"
+   (zero shared words with "a fruity coffee", true but irrelevant) and
+   hedged a fully correct answer with "I couldn't confirm an exact
+   match..." on 5/5 trials - caught by this investigation's own
+   coffee-regression check before shipping, not by a separate audit.
+   Fixed by capping the check to queries of two significant words or
+   fewer: a short, generic proxy term diverging from the raw sentence is
+   the actual signature of a wrong guess; a longer query diverging from a
+   generic sentence is what a model correctly citing a *specific* product
+   by title looks like, and must not be hedged as if it were coincidental.
+
+Also added: when a weak/uncertain match survives all of the above and is
+still shown, the reply now discloses the uncertainty ("I couldn't confirm
+an exact match for X - here's the closest thing this shop carries, though
+it may not be quite what you meant") instead of the same confident framing
+a genuine match gets. The product is shown, never withheld - only the
+framing changes.
+
+**Verification, reported with real numbers, not rounded up:** 24 live
+kayak trials across three batches after the full fix (8+8+8, engine
+restarted between each code change to guarantee the running code matched
+what was being tested) - **zero** confident false substitutions, down from
+the ~3/8 (37.5%) measured twice in the round-7 audit. "A fruity coffee"
+and "something smooth and not too bitter" on Kettle re-verified
+unregressed *after* the length-cap fix specifically (5/5 and 5/5,
+`scripts/va_fix7_coffee_regression.py`) - the length-cap fix exists
+precisely because an earlier version of this same investigation broke the
+coffee case, so this is not an assumption, it is a re-measurement.
+`fuzz.py` (20/20, every invariant held) and `auditroutes.py` (every probe)
+both clean on the final committed state.
+
+**What this round does NOT claim:** no `invariant-guard` or `value-auditor`
+agent pass has run against `c377250`/`6e650b1` yet (manual invariant
+reasoning only - both changes are shopper-reply-text/candidate-filtering
+only, never touching risk/payment/execution/idempotency, confirmed by
+reading every call site touched). Neither commit moves to Completed.md.
+Given this exact pair of problems has been "fixed" and then found broken
+seven times in a row this session, the honest posture is: this is the
+first round where the specific previously-reproduced failure modes did
+not reproduce in a real re-test, not a claim that no ninth gap exists.
+Whoever picks this up next should run a fresh, independent adversarial
+audit - construct new phrasings, don't just re-run this round's own test
+scripts - before trusting this as closed.
+
+**A separate anomaly, investigated but not fixed here, from the same live
+testing.** A fallback in the kayak-testing flow once re-searched a
+category label ("Accessories") as if it were a literal product query,
+returning unrelated shoes. Traced to the demo merchant backend's own
+`/items` search endpoint (`sample_merchant`/`adapters/sample`) doing its
+own server-side matching - a different subsystem from anything this
+session's `engine/execution/relevance.py`/`service.py` fixes touch.
+Fixing it would mean changing the demo merchant's own search behavior,
+out of scope for shopper-assistant hardening; documented here rather than
+rushed.
+
 **A general-hardening pass, prompted directly by the user calling out a real
 pattern: features that were only ever verified against the one example
 phrasing used to build them, not the general case a real shopper will
