@@ -786,6 +786,68 @@ on the strength of the audit's own say-so.
   moves to `Completed.md` until that happens and returns a genuine
   VALUABLE verdict, not before.
 
+**A dedicated adversarial `value-auditor` pass then ran against `01b78ca`
+and confirmed the concern above was warranted, not hypothetical.** 5 of 10
+fresh phrasings bypassed `_honest_synthesis` live (a valid `cited_reason`
+plus prose arguing a different, unstated reason - "the lightweight design
+is nice, but what really seals the deal here is the Marathon Pro's
+outstanding durability"), and `judge_relevance` was found still passing
+the kayak-substitution false match 2/8 (25%) live trials and still 0/8 on
+"something smooth and not too bitter." Two commits followed to fix these
+for real:
+
+- **`8b6e179` - `_honest_synthesis`'s SIXTH gap, closed structurally.**
+  The root cause: `cited_reason` was checked in isolation against real
+  stored terms, but the free-text `text` was never cross-checked against
+  what it actually *argues* - a reply can honestly cite "lightweight"
+  while its prose argues for "durability," and no regex enumerates every
+  way to phrase that (rhetorical question, third-person, comparative,
+  hedged language all reproduced it). Fixed by no longer letting the model
+  author the causal-attribution sentence at all: when `personalizes` is
+  true and `cited_reason` validates against real stored state, the clause
+  is now built in code from `cited_reason` alone (one of three
+  deterministic templates, picked by a stable hash so a given reason reads
+  consistently rather than robotically), and the model's own prose is
+  discarded rather than searched for a bypass. Verified: all 5
+  previously-bypassing phrasings from the audit's own test harness, plus
+  10 fresh adversarial ones constructed separately, now produce zero false
+  claims (15/15) - confirmed by direct, deterministic calls to the
+  function (no model-call variance to explain away). The false-positive
+  case (a genuine, honestly-grounded citation) still produces a natural
+  reading sentence, not a robotic one. `fuzz.py` (480 assertions) and
+  `auditroutes.py` both clean afterward.
+
+- **`b9f86a1` - `judge_relevance`'s prompt strengthened, honestly not
+  fully fixed.** Added an explicit instruction naming the exact failure
+  mode already documented in `service.py`'s own comments: a product
+  sharing one incidental word with the description (a water bottle for
+  "kayak," because both involve "water") is not a match, and the judge
+  should not be swayed by coincidental overlap. Live-retested 8 trials of
+  "do you sell kayaks?" on Northfield after this change: **3/8 still
+  returned the water-bottle substitution** - the same order of magnitude
+  as before this change, not a fix. Coffee case unregressed: "a fruity
+  coffee" 5/5 clean; "something smooth and not too bitter" still finds no
+  real match but continues to degrade honestly (no false claim) 5/5.
+
+  **Honest conclusion after this attempt: the kayak-substitution gap is a
+  genuine, currently-irreducible limit of the judge model's own
+  reliability on this specific class of query** (a weak, coincidentally-
+  overlapping single-word match), not a bug a prompt wording change alone
+  can close - the model sees the water bottle in its own candidate sample
+  and sometimes judges it plausible anyway despite an explicit instruction
+  not to. A further, more expensive mitigation (e.g. a second judge call
+  and requiring agreement, or a stricter default-to-False posture when the
+  judge's own confidence is anything but clear) was considered but not
+  attempted this round, since it would roughly double an already-flagged
+  per-turn model-call cost under the documented Groq throttle - a
+  trade-off that needs a deliberate decision, not one made silently inside
+  a "fix" commit.
+
+  `fuzz.py` and `auditroutes.py` both clean after this change too. Neither
+  commit has had a fresh independent `value-auditor`/`invariant-guard`
+  pass yet - that should happen before anything from this round, or the
+  chain it sits on top of, is considered for `Completed.md`.
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived
