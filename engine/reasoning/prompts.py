@@ -904,8 +904,12 @@ def relevance_judgment_prompt(
         f"This shop's real declared categories: {cats}\n\n"
         f"A real sample of this shop's actual products:\n{titles}\n\n"
         "Does this shop plausibly carry something matching what the shopper "
-        "described, based on genuine category/use-case fit? Call "
-        "judge_relevance with your answer."
+        "described, based on genuine category/use-case fit? Answer False "
+        "unless there is a real, specific category or use-case match - a "
+        "product merely sharing one incidental word with the description "
+        "(e.g. a water bottle for a 'kayak' request, because both involve "
+        "'water') is NOT a match; judge the shopper's actual need, not "
+        "coincidental word overlap. Call judge_relevance with your answer."
     )
 
 
