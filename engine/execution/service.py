@@ -904,7 +904,7 @@ class ExecutionService:
                 )
                 if candidates and (
                     relevance.weak_single_word_match(query, match_score)
-                    or relevance.query_diverges_from_said(query, raw_said)
+                    or relevance.query_diverges_from_said(query, raw_said, candidates)
                     or category_only_unverified
                 ):
                     wide_sample = await _full_catalog_sample(adapter)
@@ -1025,8 +1025,24 @@ class ExecutionService:
                     # narrower keyword-matched result above, which already
                     # found something real.
                     if query and not relevant:
+                        # ELEVENTH gap, found live re-testing the TENTH-gap
+                        # fix: this deterministic gate used to check `query`
+                        # (the model's own proxy term, e.g. "water bottle")
+                        # against `wide_products` - a sample that BY
+                        # CONSTRUCTION already contains the very product
+                        # that weak proxy term matched, making it exactly
+                        # as tautological as the sibling check above already
+                        # explains and avoids by checking `raw_said`
+                        # instead. This one was never updated to match, so
+                        # a wrong proxy term could trivially "confirm itself
+                        # carried" and skip the semantic judge (and the
+                        # disclosure it can trigger) entirely - reproduced
+                        # live: "water bottle" against Northfield's own
+                        # wide catalog sample (which contains the Insulated
+                        # Water Bottle) returned `shop_carries=True` outright,
+                        # never asking whether a kayak was actually meant.
                         shop_carries_query = relevance.shop_carries(
-                            query, wide_products
+                            raw_said, wide_products
                         )
                         if not shop_carries_query:
                             # Deterministic category/description overlap
@@ -1046,6 +1062,27 @@ class ExecutionService:
                             )
                             if semantic_carries is True:
                                 shop_carries_query = True
+                                # TENTH gap, found by an independent
+                                # value-auditor re-test of the NINTH-gap fix:
+                                # the deterministic check already said this
+                                # query has no real category/description
+                                # grounding - the semantic judge is the ONLY
+                                # thing keeping this browse alive, and that
+                                # judge is measurably wrong some of the time
+                                # (see the identical, already-disclosed
+                                # weak_single_word_match case above). This
+                                # branch never touched `weak_match_uncertain`
+                                # at all (it only runs when `candidates` was
+                                # already empty, so the earlier weak-match
+                                # block never fires), so a judge-affirmed
+                                # whole-catalog browse used to reach the
+                                # shopper with full, undisclosed confidence -
+                                # reproduced live: "water sports accessories"
+                                # -> Insulated Water Bottle, 12% of trials.
+                                # The judge may still decide whether to show
+                                # this at all; it must never decide whether
+                                # to disclose that it's unconfirmed.
+                                weak_match_uncertain = True
                             else:
                                 titles = []
 

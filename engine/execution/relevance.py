@@ -168,7 +168,46 @@ def weak_single_word_match(query: str, top_score: int) -> bool:
     return top_score == 1
 
 
-def query_diverges_from_said(query: str, raw_said: str) -> bool:
+def _is_real_title_citation(query_words: set[str], candidates: list[Product]) -> bool:
+    """True when `query_words` is (near-)exactly some single real candidate's
+    own title, word for word - the actual signature of a model naming a
+    specific product by name, independent of how many words it took.
+
+    TENTH-gap fix: the word-count exemption this replaces ("a query of 3+
+    significant words diverging from what the shopper said is a real
+    citation") is a proxy, not the real signal - it is defeated by a
+    vague, GENERIC multi-word guess ("water sports accessories") that is
+    exactly as ungrounded as a one-word guess ("water"), just longer.
+    Reproduced live: "I need a kayak" -> query="water sports accessories"
+    -> a real but unrelated "Insulated Water Bottle" (its title sharing
+    only "water"; "accessories" matched via category, not the title)
+    slipped through with zero disclosure because 3 words was enough to
+    skip the divergence check entirely, regardless of whether those words
+    actually named anything real.
+
+    A first version of this fix checked `query_words <= title_words` (query
+    is a SUBSET of the title's words) and immediately regressed a second
+    case, found live in the same investigation: "water bottle" (2 words) is
+    also a subset of "Insulated Water Bottle 750ml"'s own words, so a
+    fragment of the WRONG product's title read as a "citation" of it just
+    as easily as the full, correct title of the RIGHT product would have.
+    A citation names the product, not a piece of it - so this requires
+    NEAR-EQUALITY (symmetric difference of at most one word, to tolerate a
+    size/unit suffix like "750ml" the shopper's phrasing would never
+    repeat), not mere one-directional containment.
+    """
+    if not query_words:
+        return False
+    for p in candidates:
+        title_words = set(_significant_words(p.title))
+        if len(query_words ^ title_words) <= 1:
+            return True
+    return False
+
+
+def query_diverges_from_said(
+    query: str, raw_said: str, candidates: list[Product] | None = None
+) -> bool:
     """True when the model's search `query` shares NOT ONE significant word
     with what the shopper actually typed (`raw_said`) - a structural signal
     that the model invented a proxy term rather than searching on the
@@ -183,28 +222,26 @@ def query_diverges_from_said(query: str, raw_said: str) -> bool:
     `weak_single_word_match` - both are checked, combined with `or` - it
     catches the case that check's word-count framing cannot see.
 
-    Deliberately conservative in two ways, the second found live after the
-    first version of this function shipped and immediately regressed a
-    working case: (1) only fires when there is at least one significant
-    word on each side to compare (an empty `query` or a `raw_said` with
-    nothing significant in it says nothing about divergence either way);
-    (2) only fires when `query` is SHORT (at most two significant words).
-    A short, generic proxy term ("water", "water bottle") diverging from
-    what the shopper said is the actual signature of a wrong guess. A
-    longer query - three or more significant words - diverging from the
-    raw sentence is exactly what a model naming a SPECIFIC real product by
-    its own title looks like ("Ethiopia Guji Natural" for "a fruity
-    coffee") - a genuinely correct, specific citation that will never
-    share words with the shopper's generic phrasing, and must not be
-    hedged as if it were a coincidental guess. Reproduced live: without
-    this length cap, the exact-title-match case above was flagged and
-    given a "couldn't confirm an exact match" disclosure on a fully
-    correct answer, 5/5 trials - a real, caught regression, not a
-    hypothetical one.
+    Only fires when there is at least one significant word on each side to
+    compare (an empty `query` or a `raw_said` with nothing significant in
+    it says nothing about divergence either way). A genuine, specific
+    product-title citation ("Ethiopia Guji Natural" for "a fruity coffee")
+    must never be hedged as if it were a coincidental guess - originally
+    approximated by a query-length cap (skip anything 3+ words), replaced
+    by `_is_real_title_citation` (TENTH gap) after the length cap itself
+    was found to exempt an equally-wrong, merely longer, generic guess.
+    When `candidates` is not supplied (existing callers unaffected), falls
+    back to the original length-cap approximation for backward
+    compatibility.
     """
     query_words = set(_significant_words(query))
     said_words = set(_significant_words(raw_said))
-    if not query_words or not said_words or len(query_words) > 2:
+    if not query_words or not said_words:
+        return False
+    if candidates is not None:
+        if _is_real_title_citation(query_words, candidates):
+            return False
+    elif len(query_words) > 2:
         return False
     return query_words.isdisjoint(said_words)
 
