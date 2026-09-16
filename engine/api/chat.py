@@ -29,7 +29,6 @@ from shared.models import (
     ProposedAction,
 )
 import logging
-import re
 
 from fastapi import Depends, APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -147,48 +146,16 @@ def _find_extra_items(
     return out
 
 
-#: Causal-claim phrasings the model uses to attribute a recommendation to a
-#: specific stated reason - "since you said X", "because X matters",
-#: "your priority of X", "you prioritized X", "X is what you need most".
-#: Captures the specific claimed term/phrase (group 1) so it can be checked
-#: against `shopping_state`'s real stored terms on its own, not just
-#: whether *some* stored term appears anywhere else in the same sentence.
-#: A third `value-auditor`-style adversarial pass found the second version
-#: of `_honest_synthesis` (the `any_term_mentioned`-over-the-whole-text
-#: floor) still passable: a reply can mention a true stored term as an
-#: aside while its actual causal claim names a different, unstored one -
-#: "Since you said durability matters most to you (though it's also nice
-#: and light), here's our pick" mentions the real term "light[weight]" but
-#: *claims* "durability", which was never stated. `any_term_mentioned`
-#: alone cannot see that distinction; this patterns-list extracts what the
-#: text specifically claims was the reason, so that claim - not just the
-#: sentence around it - can be checked.
-_CAUSAL_CLAIM_PATTERNS = [
-    r"since you (?:said|mentioned|stated|noted)\s+(?:that\s+)?(.+?)\s+(?:matters|is what|are what|is your|was your|is important|comes first)",
-    r"because\s+(.+?)\s+(?:matters most|is what you need|is your priority|is important to you)",
-    r"your (?:stated |main |top )?priority (?:of|is|being)\s+(.+?)(?:[,.]|$)",
-    r"you (?:prioriti[sz]ed|care most about|only care about)\s+(.+?)(?:[,.]| above| over|$)",
-    r"(?:since|as|because)\s+(.+?)\s+is what (?:you|matters) (?:need|most)",
-]
-_CAUSAL_CLAIM_RE = re.compile(
-    "|".join(f"(?:{p})" for p in _CAUSAL_CLAIM_PATTERNS), re.IGNORECASE
-)
-
-
-def _causal_claim_terms(text: str) -> list[str]:
-    """Every specific reason `text` explicitly claims to be attributing a
-    recommendation to, extracted via `_CAUSAL_CLAIM_PATTERNS`. Deliberately
-    a narrow, named-pattern extraction (not a second NLP system) - the same
-    honest trade-off `explicit_extraction.py` already makes elsewhere: it
-    catches an explicit "since you said X" shape, not every conceivable way
-    a model could phrase the same claim, and returns an empty list rather
-    than guessing when no such phrase is present."""
-    out = []
-    for match in _CAUSAL_CLAIM_RE.finditer(text):
-        claimed = next((g for g in match.groups() if g), None)
-        if claimed:
-            out.append(claimed.strip(" .,"))
-    return out
+#: Retired by the SEVENTH gap fix (see `_honest_synthesis`'s docstring): this
+#: regex-pattern approach to catching a false causal claim in the model's
+#: free text was the THIRD/FOURTH-gap-era mitigation, and was found to still
+#: leave a live bypass reachable via `personalizes=False`. `_honest_synthesis`
+#: no longer scans free text for a claim at all - either a validated
+#: `cited_reason` is used verbatim (trusted on its own), or, with none
+#: offered, the reply falls back unconditionally whenever real stated state
+#: exists to misattribute. Kept only as a comment, not code, so a future
+#: session doesn't have to rediscover why a "smarter regex" was tried and
+#: removed rather than left in place unused.
 
 
 #: Deterministic templates for the one sentence `_honest_synthesis` no
@@ -284,15 +251,53 @@ def _honest_synthesis(
     (`mission_ranking.stated_terms`/`any_term_mentioned`) - a floor, not a
     semantic proof, but one that closes this specific, now-demonstrated
     bypass shape without reintroducing a phrase blocklist.
+
+    A SEVENTH gap, found live by a `value-auditor` round adversarially
+    re-testing the sixth fix: the deterministic-clause substitution above
+    only fired when `personalizes is not False`. `personalizes=False` -
+    which needs no adversarial cleverness, just ordinary model output
+    variance, since nothing forces the model to keep it consistent with
+    its own prose - fell straight through to the old free-text-scanning
+    checks below (the THIRD/FOURTH-gap-era `any_term_mentioned`/
+    `_causal_claim_terms` path), which were already proven bypassable by
+    unenumerated phrasing. Reproduced live, deterministically:
+    `cited_reason="lightweight", personalizes=False` with text "The
+    lightweight build is a nice bonus, but what truly seals the deal here
+    is the Marathon Pro's outstanding durability" returned verbatim, false
+    claim intact - and the same for `cited_reason=None, personalizes=False`
+    with an implicit claim in prose. `personalizes` was being trusted as a
+    gate on whether the text needed checking at all, when the model's own
+    claim about itself is exactly the thing this function must not trust.
+
+    Closed by removing that trust entirely: `personalizes` is no longer
+    read anywhere in this function except for logging. Whenever the model
+    offers a `cited_reason` (validated against real stored terms, as
+    above), the deterministic clause is used unconditionally, whatever
+    `personalizes` separately claims - a valid citation already proves the
+    model intends a personalization claim, full stop. Whenever it offers
+    no `cited_reason` at all, and real stated state exists that a claim
+    could misattribute, the reply is discarded for the plain `fallback` -
+    also unconditionally. This retires the old free-text-scanning path
+    (`_causal_claim_terms` and its `_CAUSAL_CLAIM_PATTERNS` regex) for
+    good rather than patching it an eighth time: there is no way to verify
+    from prose alone, in the uncited case, whether it does or doesn't make
+    a claim, and every attempt at that verification in this function's
+    history has been defeated by a phrasing nobody enumerated. The cost is
+    real and accepted, not hidden: a genuinely neutral, non-personalizing
+    reply that happens to arrive with no citation, while real mission
+    state exists, now also falls back to the plain sentence rather than
+    being trusted - fewer natural-sounding replies, in exchange for zero
+    remaining path where an uncited or falsely-cited claim reaches a
+    shopper as fact.
     """
     if not text:
         return fallback
-    # The structural check, first: if the model told us directly what it
-    # claims this reply is based on, that claim is checked exactly, not
-    # inferred from prose - no phrasing space left to search for a bypass in.
-    # A non-null `cited_reason` that doesn't match anything actually stored
-    # is rejected outright, regardless of what the rest of the checks below
-    # would have concluded from the free text.
+    # The structural check: if the model told us directly what it claims
+    # this reply is based on, that claim is checked exactly, not inferred
+    # from prose - no phrasing space left to search for a bypass in. A
+    # non-null `cited_reason` that doesn't match anything actually stored
+    # is rejected outright. `personalizes` is deliberately never consulted
+    # here (SEVENTH gap, above) - a valid citation is trusted on its own.
     if cited_reason:
         terms = mission_ranking.stated_terms(shopping_state)
         if not mission_ranking.any_term_mentioned(cited_reason, terms):
@@ -304,84 +309,35 @@ def _honest_synthesis(
                 terms,
             )
             return fallback
-        # SIXTH gap, found live by a `value-auditor` round adversarially
-        # re-testing the fifth fix: a *valid* `cited_reason` only proves the
-        # model named a real stored term somewhere - it never proved the
-        # free-text `text` actually argues for that term rather than a
-        # different, unstated one. "The lightweight design is nice, but what
-        # really seals the deal here is the Marathon Pro's outstanding
-        # durability" passes `cited_reason="lightweight"` cleanly (a real
-        # term) while its actual prose argues durability - and every
-        # rhetorical shape this can take (rhetorical question, third-person,
-        # comparative framing, "X above all else") is exactly the
-        # unenumerable free-text space that already defeated four prior
-        # pattern-based attempts at this same function. Five of ten fresh
-        # phrasings reproduced this live, deterministically, in the audit.
-        #
-        # Closed structurally this time by no longer trusting the model to
-        # author the causal-attribution sentence AT ALL: the personalized
-        # clause is now built here, in code, from `cited_reason` alone - the
-        # one field already verified against real stored state - and the
-        # model's own free text is discarded rather than searched for a
-        # bypass that cannot be enumerated away. This trades the model's
-        # more natural narrative for a claim that actually holds, the same
-        # trade-off this function's docstring already made once for the
-        # "no stated priority at all" case.
-        if personalizes is not False:
-            return _deterministic_personalized_reply(cited_reason, fallback)
-    # FIFTH gap's fix: `personalizes` is now a required field, and leaving it
-    # null/missing is treated the same as `True` - fail-closed - so "the
-    # model didn't say" can no longer stand in for "this reply doesn't
-    # personalize." If the model declares (or fails to declare) that this
-    # reply personalizes, a real matching `cited_reason` is mandatory; there
-    # is no longer a way to make an implicit, uncited personalization claim
-    # by simply leaving the optional citation field empty.
-    if personalizes is not False and not cited_reason:
-        if mission_ranking.has_stated_priority(shopping_state):
-            logger.warning(
-                "synthesis declared personalizes=%r with no valid cited_reason "
-                "while stated mission state exists; falling back rather than "
-                "trusting an uncited personalization claim",
-                personalizes,
-            )
-            return fallback
-    if not mission_ranking.has_stated_priority(shopping_state):
-        logger.info(
-            "no captured mission state this turn; using the plain "
-            "deterministic reply rather than trusting synthesized text "
-            "that cannot be verified as grounded"
-        )
-        return fallback
-    terms = mission_ranking.stated_terms(shopping_state)
-    if not mission_ranking.any_term_mentioned(text, terms):
+        # SIXTH gap: a valid `cited_reason` only proves the model named a
+        # real stored term somewhere - it never proved the free-text
+        # `text` actually argues for that term rather than a different,
+        # unstated one. Closed by never trusting the model to author the
+        # causal-attribution sentence at all: it is built here, in code,
+        # from `cited_reason` alone, and the model's own free text is
+        # discarded rather than searched for a bypass that cannot be
+        # enumerated away.
+        return _deterministic_personalized_reply(cited_reason, fallback)
+    # No `cited_reason` offered this turn. If there is real stated state a
+    # claim could misattribute, there is no longer any path that trusts
+    # the free text anyway (SEVENTH gap, above) - `personalizes` is logged
+    # for visibility only, never used to decide whether to check further,
+    # since it is exactly the model's own unverifiable self-report.
+    if mission_ranking.has_stated_priority(shopping_state):
         logger.warning(
-            "synthesis referenced no actual stored mission term (%r); "
-            "falling back rather than trusting an unrelated claim",
-            terms,
+            "synthesis offered no valid cited_reason (personalizes=%r) "
+            "while stated mission state exists; falling back rather than "
+            "trusting free text that cannot be verified as honestly "
+            "grounded",
+            personalizes,
         )
         return fallback
-    # THIRD gap, found by further adversarial testing after the second fix
-    # above shipped: "some real term appears somewhere in the text" is not
-    # the same as "the specific thing the text says was the reason is a
-    # real term." A reply can mention a true stored term as filler while
-    # its actual causal claim ("since you said X matters most") names a
-    # different, unstored X - passing the check above because the true
-    # term shows up elsewhere in the same sentence. Every explicit causal
-    # claim the text makes is checked individually now; if even one names
-    # something not actually stored, the whole reply is untrusted, the
-    # same "not just relocated, not partially trusted" standard the first
-    # two fixes already apply.
-    for claimed in _causal_claim_terms(text):
-        if not mission_ranking.any_term_mentioned(claimed, terms):
-            logger.warning(
-                "synthesis claimed a reason (%r) not among actual stored "
-                "terms (%r); falling back rather than trusting a false "
-                "attribution",
-                claimed,
-                terms,
-            )
-            return fallback
-    return text
+    logger.info(
+        "no captured mission state this turn; using the plain "
+        "deterministic reply rather than trusting synthesized text "
+        "that cannot be verified as grounded"
+    )
+    return fallback
 
 
 def _unconfirmed_compare_items(message: str | None, comparison: list[dict]) -> list[str]:
@@ -1132,6 +1088,15 @@ async def _process_turn(
         # anti-pattern, just reached through a different action.
         relevance_relaxed = bool(executed.payload.get("relevance_relaxed"))
         relaxed_query = str(executed.payload.get("query") or "")
+        # True when the only reason a result exists at all is one
+        # coincidental single-word overlap the semantic relevance judge
+        # said was plausible - which the judge is measurably wrong about
+        # some of the time (the "kayak"->"water"->"Insulated Water Bottle"
+        # case; see engine/execution/service.py and PROGRESS.md). The
+        # engine's own reasoning already knows this match is unconfirmed;
+        # this flag lets the reply say so instead of presenting it with
+        # the same confident framing as a genuine match.
+        weak_match_uncertain = bool(executed.payload.get("weak_match_uncertain"))
         # True when real, relevant matches exist for the stated product
         # intent but none clear the shopper's own stated price limit - the
         # product/category intent must never be discarded just because a
@@ -1762,6 +1727,17 @@ async def _process_turn(
                 reply = (
                     f'Nothing matched "{relaxed_query}" exactly, so here\'s '
                     "what's available instead:"
+                )
+            elif weak_match_uncertain and products:
+                # Disclosure fix for the kayak/water-bottle gap: this is a
+                # real, correctly-priced product, but the only reason it
+                # was found at all is one coincidental word overlap that a
+                # semantic check could not fully confirm - shown, not
+                # withheld, but never framed as a direct, confident answer.
+                reply = (
+                    f'I couldn\'t confirm an exact match for "{relaxed_query}" - '
+                    "here's the closest thing this shop carries, though it "
+                    "may not be quite what you meant:"
                 )
             elif products:
                 # Was "pass" - trusting the model's pre-written reply as-is,
