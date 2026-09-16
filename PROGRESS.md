@@ -973,6 +973,94 @@ for real:
   pass yet - that should happen before anything from this round, or the
   chain it sits on top of, is considered for `Completed.md`.
 
+  **NINTH round, real code fixes, two distinct root causes found and
+  closed - reducing kayak-substitution to a precisely characterized ~1/10
+  residual, not claimed eliminated.** An independent `value-auditor` pass
+  re-testing the eighth round's "24/24 clean" claim with a larger sample
+  found it did not hold: "I need a kayak" (a close variant of the tested
+  "do you sell kayaks?") produced an undisclosed, confident single-product
+  answer (`"Here's what's available - 1 option:"` showing the Insulated
+  Water Bottle, no hedge) on a slice of trials. Root-caused directly
+  rather than patched by inspection alone:
+
+  1. **A category-only match had zero relevance discrimination applied at
+     all.** `engine/execution/service.py`'s weak-match gate (`if candidates
+     and (weak_single_word_match(...) or query_diverges_from_said(...))`)
+     is entirely keyed off `query`; when the model instead narrows purely
+     by `category` with `query` left blank, `best_matches_with_score`
+     returns every product in that category unfiltered (an empty query has
+     no significant words to score against, by its own docstring) - so a
+     category the model guessed with zero literal grounding sailed through
+     exactly as confidently as a real, deliberate "show me your shoes" ->
+     category=Footwear. Fixed with a new `category_only_unverified` check,
+     deliberately NOT keyed on the category label (a category name rarely
+     shares literal words with ordinary phrasing even when correct -
+     "shoes" vs "Footwear") but on whether the actual candidates FOUND via
+     that category share even one literal word with what the shopper
+     actually said (`raw_said`) - grounded ("Trailblazer Running Shoe" for
+     "show me your shoes" shares "shoe") passes through unhedged; ungrounded
+     ("Insulated Water Bottle" for "I need a kayak" shares nothing) routes
+     through the same semantic-judge/disclosure path the query-driven case
+     already uses. Verified directly, unit-level, before any live test:
+     `best_matches_with_score([water_bottle], "I need a kayak")` scores 0
+     (correctly flagged unverified); `best_matches_with_score([shoe], "show
+     me your shoes")` scores 1 (correctly NOT flagged) - the discriminator
+     itself is sound by construction, not just by luck on live trials.
+
+  2. **`weak_single_word_match`'s own word-count gate was wrong, found via
+     live reproduction after fix #1 alone did not close the gap.** Its
+     original logic assumed a query with more than one significant word
+     scoring only 1 had already been through "real multi-word
+     discrimination" and could be trusted. Live trials disproved this
+     directly: the model paraphrased "I need a kayak" into a three-word
+     proxy ("water sports gear" / "water sports accessories"), of which
+     only "water" ever overlapped anything real (`action_summary: 'Searched
+     "water sports accessories" and found 1: Insulated Water Bottle
+     750ml'`) - a coincidental one-word hit with two padding words that
+     matched nothing, not real discrimination. Fixed by dropping the
+     word-count condition entirely: `weak_single_word_match` now fires on
+     `top_score == 1` regardless of how many significant words the query
+     had. Checked this would not regress the two cases the original
+     word-count gate existed to protect, by direct scoring before shipping:
+     an exact product-title citation ("Ethiopia Guji Natural" for itself)
+     scores 3; a genuine two-noun match ("a fruity coffee" against Kettle's
+     real catalog) scores 2 - both comfortably above the new threshold, so
+     neither is newly hedged.
+
+  **Live-verified, two independent runs of 10 trials each on Northfield
+  after both fixes, restarting the engine between the code change and
+  each test run (required - `engine/` changes need a restart to take
+  effect, confirmed the first test run before restart still showed the
+  bug):** "I need a kayak" - 9/10 and 9/10 correctly declined or hedged,
+  1/10 and 1/10 still showed the undisclosed confident wrong answer.
+  Traced the one residual failure in the second run to a THIRD, narrower
+  variant of the same shape, precisely characterized rather than left
+  vague: the model's proxy query ("water sports accessories") coincidentally
+  scored 2, not 1, because "accessories" is *itself* the Insulated Water
+  Bottle's real category name - a second word overlapping for a reason
+  that has nothing to do with the query being any more grounded, defeating
+  the new `top_score == 1` threshold by exactly one point. Not fixed this
+  round - chasing this specific coincidence (a proxy term whose padding
+  word happens to also be a real category label) risks the same
+  per-example special-casing this file has repeatedly warned against
+  reintroducing; it is a real, narrow, now-understood residual, not a
+  restatement of the original bug. Control cases re-confirmed unaffected
+  in the same session: "show me your shoes" (Northfield) 3/3 confident,
+  correct, unhedged; "a fruity coffee" (Kettle) 4/5 confident and correct,
+  1/5 degraded honestly via the disclosed browse-fallback path (consistent
+  with previously-documented judge variance, not a new regression).
+
+  `fuzz.py` (20/20 sequences, every invariant held) and `auditroutes.py`
+  (every probe held) both re-run clean against the restarted engine after
+  these changes. No `invariant-guard`/`value-auditor` pass was run against
+  this specific round in this session - only manual invariant reasoning
+  (both changes are confined to `engine/execution/relevance.py` and
+  `engine/execution/service.py`'s reply-shaping/candidate-filtering logic;
+  neither touches risk, payment, execution-authorization or idempotency).
+  Do not move this, or anything in the chain above it, to `Completed.md`
+  without that independent pass - the honest state after nine rounds is
+  "substantially improved and now narrowly characterized," not "closed."
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived

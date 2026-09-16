@@ -864,9 +864,48 @@ class ExecutionService:
                 # its own docstring in relevance.py for why this is a
                 # conservative, structural check, not another per-example
                 # word list.
+                # NINTH gap: everything above only re-verifies a candidate
+                # that a QUERY produced. A model that instead narrows purely
+                # by `category` - no query text at all - gets none of that
+                # scrutiny: `best_matches_with_score(products, "")` returns
+                # every product unfiltered (an empty query has no
+                # significant words to score against, by its own docstring),
+                # so `match_score` is always 0 and `weak_single_word_match`/
+                # `query_diverges_from_said` (both keyed off `query`) never
+                # fire - a category the model guessed with zero literal
+                # grounding ("I need a kayak" -> category="Accessories",
+                # landing on an Insulated Water Bottle by category
+                # coincidence) sailed through as confidently as a real,
+                # deliberate "show me your shoes" -> category="Footwear".
+                # Found live: this exact shape produced an undisclosed
+                # single-product answer ("Here's what's available - 1
+                # option:") for a kayak question, right next to the
+                # already-fixed query-driven version of the identical bug.
+                # A category-only match has had precisely as little real
+                # discrimination applied as a single-word query match - so
+                # it is treated the same way here, not with a second,
+                # bespoke check.
+                # Only "unverified" when the actual candidates found by
+                # category share not one literal word with what the
+                # shopper actually said - "show me your shoes" ->
+                # category=Footwear landing on real running shoes is
+                # grounded (their own titles contain "shoe") and must not
+                # be hedged; "I need a kayak" -> category=Accessories
+                # landing on a water bottle is not (its text shares nothing
+                # with "kayak"). Checked against the real candidates, not
+                # the category name itself, since a category label rarely
+                # shares literal words with ordinary phrasing even when
+                # correct ("shoes" vs "Footwear").
+                category_only_unverified = (
+                    bool(category)
+                    and not query
+                    and bool(candidates)
+                    and not relevance.best_matches_with_score(candidates, raw_said)[1]
+                )
                 if candidates and (
                     relevance.weak_single_word_match(query, match_score)
                     or relevance.query_diverges_from_said(query, raw_said)
+                    or category_only_unverified
                 ):
                     wide_sample = await _full_catalog_sample(adapter)
                     # NOT gated on `relevance.shop_carries(query, wide_sample)`
@@ -884,22 +923,29 @@ class ExecutionService:
                     # against the shopper's own original wording (never the
                     # model's substituted term - judging relevance against
                     # the paraphrase would just repeat its mistake). `None`
-                    # (unavailable/throttled) keeps the existing, already-
-                    # deterministic `shop_carries(query, ...)` verdict as a
-                    # fallback rather than treating an unconfirmed check as
-                    # permission either way.
+                    # (unavailable/throttled) keeps a deterministic verdict
+                    # as fallback rather than treating an unconfirmed check
+                    # as permission either way. For the category-only case
+                    # there is no `query` text to fall back on, so the
+                    # category name itself stands in - a genuinely weaker
+                    # deterministic check than the query case gets (the
+                    # category was already drawn from this shop's own real
+                    # category list, so it will often trivially "overlap"
+                    # itself), disclosed here rather than pretended equal.
+                    fallback_term = query if query else category
                     semantic_carries = await self._shop_carries_semantic(raw_said, wide_sample)
                     if semantic_carries is False or (
                         semantic_carries is None
-                        and not relevance.shop_carries(query, wide_sample)
+                        and not relevance.shop_carries(fallback_term, wide_sample)
                     ):
                         candidates = []
                         relevant = []
                         weak_match_rejected = True
                     else:
                         # Survived only on the strength of one coincidental
-                        # word overlap plus a semantic judgment that could
-                        # be wrong - never fully confirmed. Disclose it.
+                        # word overlap (or an unverified category guess) plus
+                        # a semantic judgment that could be wrong - never
+                        # fully confirmed. Disclose it.
                         weak_match_uncertain = True
 
                 if top_rated:

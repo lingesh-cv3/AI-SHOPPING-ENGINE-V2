@@ -144,18 +144,28 @@ def best_matches(products: list, query: str) -> list:
 def weak_single_word_match(query: str, top_score: int) -> bool:
     """True when a match's entire justification is one shared word.
 
-    A query with more than one significant word that only achieves a
+    Originally gated on the QUERY having at most one significant word
+    ("a query with more than one significant word that only achieves a
     top score of 1 already went through the ordinary multi-word
-    discrimination `best_matches` provides. A query that is itself a
-    single significant word (often the model's own paraphrase of what the
-    shopper actually said, e.g. "kayak" narrowed to "water") scoring 1 has
-    had no discrimination applied at all - one coincidental shared word is
-    the entire basis for the match. Used to decide when a narrow-search
-    "hit" is weak enough to need the wider `shop_carries` category check
-    applied to it too, not just to the zero-match browse fallback.
+    discrimination `best_matches` provides"). Found live to be wrong: a
+    model that paraphrases a made-up need into a multi-word proxy term
+    ("kayak" -> "water sports gear", three significant words) can still
+    land on a top score of exactly 1 - only "water" happened to overlap
+    "Insulated Water Bottle" - while the other two words matched nothing
+    on any product. A top score of 1 is a single coincidental word
+    overlap and nothing more, REGARDLESS of how many words the query had;
+    "more words were tried and none of them helped" is not
+    discrimination, it is the same weak evidence as a one-word query,
+    just with padding. Checked directly: a genuine multi-word match - an
+    exact product-title citation ("Ethiopia Guji Natural" for "a fruity
+    coffee") or an ordinary two-noun phrase ("running shoes") - scores 2
+    or higher in practice, because a real match shares more than one
+    real word; this only fires when it does not. Used to decide when a
+    narrow-search "hit" is weak enough to need the wider `shop_carries`/
+    semantic-judge check applied to it too, not just to the zero-match
+    browse fallback.
     """
-    words = _significant_words(query)
-    return len(words) <= 1 and top_score == 1
+    return top_score == 1
 
 
 def query_diverges_from_said(query: str, raw_said: str) -> bool:
