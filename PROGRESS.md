@@ -1415,6 +1415,192 @@ should extend the Playwright suite to them rather than reach for
    above get their own dedicated implementation-and-audit pass rather than
    being declared solved by inference from the mechanical fixes being real.
 
+10. **The two named architecture items from #9 above, each given a real
+    implementation attempt this session (commits `07d3a00`, `4ace479`) -
+    genuine progress on both, neither claimed fully solved.**
+
+    **`_honest_synthesis`'s null-citation bypass (item #9's first
+    architecture item) - closed structurally, verified in-process, not yet
+    live-model-verified.** A required `personalizes` boolean was added to
+    `write_synthesis`'s schema (`engine/reasoning/prompts.py`) alongside the
+    existing `cited_reason`. `personalizes: true` (or missing/malformed,
+    treated the same, fail-closed) with no valid `cited_reason` is now
+    rejected outright in `_honest_synthesis` - there is no longer a way to
+    get an uncited personalization claim through by leaving an optional
+    field empty, since two structured signals must now be honestly
+    reconciled instead of one that can be silently omitted.
+    `personalizes: false` still passes through the pre-existing free-text
+    backstop checks underneath (a model lying on the boolean itself remains
+    a theoretical residual bypass, explicitly not claimed closed).
+
+    Verified in-process (deterministic, no model-call variance to fight):
+    the 5 previously-defeating phrasings plus 5 fresh adversarial ones
+    (rhetorical-question, assumed-shared-knowledge, comparative-emphasis,
+    implicit-and-conjunction shapes), tested both with `personalizes` unset
+    and explicitly `true` - 20/20 correctly rejected. A genuinely grounded,
+    honestly-cited reply still passes (1/1); a neutral factual reply
+    mentioning the real term still passes (1/1); the pre-existing "no
+    stated priority" case still falls back as before (1/1). 23/23 total,
+    script at `scripts/va_cited_reason_fix5_test.py` (gitignored scratch).
+
+    **Live-model verification was attempted and came back inconclusive, not
+    positive** - worth stating precisely rather than glossing over. Two
+    live comparison-flow attempts against Northfield both showed the
+    synthesis call itself falling back (`reply` = the plain fallback
+    sentence while `model_reply`, from the separate, unrelated `reason()`
+    call, carried real text) - consistent with `LLMUnavailable` firing on
+    the synthesis call specifically, before it could ever reach the new
+    `personalizes` check. This is not evidence the fix works under real
+    model output; it is evidence the two live attempts made this session
+    did not exercise the new code path at all. **This turned out to have a
+    real, separate cause - see below - not simply Groq-throttle variance as
+    first assumed.**
+
+    **A significant separate, previously-undiscovered bug was found and
+    fixed while investigating: `synthesis_tool()` (and the new
+    `relevance_tool()` below) were missing the OpenAI
+    `{"type": "function", "function": {...}}` request wrapper that
+    `propose_tool()` correctly has - both were sent as a bare
+    `{"name": ..., "parameters": ...}` dict, which an OpenAI-compatible API
+    rejects outright with HTTP 400.** Confirmed directly by calling the
+    configured provider in isolation and reading the raw error, not
+    inferred. Because `ReasoningService.synthesize()` already catches
+    `LLMUnavailable` and degrades silently by design (the correct behavior
+    for a real throttle), this bug has been indistinguishable from ordinary
+    Groq-throttle variance all session - every "the synthesis call fell
+    back" observation logged in this file and the ones before it may
+    include an unknown fraction caused by this schema bug rather than
+    genuine rate-limiting, on whichever provider/session actually had
+    `LLM_PROVIDER=openai` configured. Fixed by wrapping both schemas the
+    same way `propose_tool()` already is. **Not yet re-verified live
+    end-to-end after this fix** - the two live attempts above happened
+    before the schema bug was found; a follow-up session should re-run a
+    real comparison/discovery turn against a real stated priority and
+    confirm `personalizes`/`cited_reason` actually arrive correctly-shaped
+    from a real model response now that the request itself is well-formed.
+
+    **The semantic relevance gap (item #9's second architecture item,
+    "kayak substituted with an unrelated product" / "a legitimate taste
+    question finds nothing") - a real semantic judge built and wired in,
+    genuine improvement measured, not a full fix.** New
+    `ReasoningService.judge_relevance()` - a small, narrow model call
+    (single boolean field, no action/variant/risk field, same
+    narrower-than-`reason()` guarantee `synthesize()` already carries) that
+    judges "does this shop plausibly carry something matching this need"
+    against the shop's real declared categories and a real sample of its
+    actual products, never inventing one. Wired into
+    `engine/execution/service.py`'s two existing `RECOMMEND_PRODUCTS`
+    fallback gates (`relevance.shop_carries`'s weak-single-word-match and
+    zero-match-browse checks) - only ever consulted when the deterministic
+    check already said "not carried," never overriding a deterministic
+    "yes," never able to substitute or invent a product itself (it can only
+    keep or discard candidates the adapter already really returned).
+    `ExecutionService` now optionally holds a `ReasoningService` reference
+    (`engine/api/deps.py` constructs one and shares it with both), `None`
+    in any caller that builds `ExecutionService` directly (e.g. a future
+    test), which simply skips the semantic check and keeps the prior
+    deterministic-only behavior.
+
+    **A second real, previously-undiscovered bug found live while
+    verifying this, not assumed from code review: the deterministic
+    `shop_carries(query, ...)` check is close to tautological for a weak
+    single-word match.** Checking "water" (the model's own narrowed proxy
+    term for "kayak") against a catalog sample that, by construction,
+    includes the very "Insulated Water Bottle" product that weak match
+    found always says "carries" - the product's own text obviously
+    contains "water". Confirmed directly in isolation
+    (`relevance.shop_carries("water", wide_sample)` returns `True` on
+    Northfield, a shop that sells no water sport equipment at all) - this
+    silently defeated every one of the four prior kayak-fix attempts
+    documented in item #9 above, regardless of catalog sample size, because
+    none of them changed *what term* was being checked. Fixed for this one
+    gate by asking the semantic judge directly, using the shopper's own
+    original wording (`raw_said`, threaded through from the tap/message
+    parameters) rather than the model's narrowed proxy query - judging
+    relevance against the paraphrase would just repeat its mistake, the
+    same lesson item #9's coffee-case investigation already found for a
+    different reason.
+
+    **A third bug found live, not anticipated in the plan: the new model
+    call had no timeout, and hung a batch test run far longer than
+    acceptable** - `fuzz.py`, which never calls the reasoning-triggering
+    `/api/chat` POST route at all (only the model-free tap endpoint), still
+    reached this new code path through `/api/chat/act` when a tapped
+    action's execution happened to be `RECOMMEND_PRODUCTS`-shaped, and one
+    run took over 8 minutes before being killed, versus its normal ~100s.
+    Fixed with an explicit `asyncio.wait_for(..., timeout=12.0)` around the
+    call, degrading to the same `None`-means-"could not confirm" contract
+    as any other `LLMUnavailable` - this is a real robustness fix for a
+    live shopper turn too, not just the test suite, since an unbounded call
+    on this path could have stalled a real turn for however long the
+    underlying HTTP client's own default timeout is.
+
+    **Live verification after both bug fixes, honestly reported with both
+    the favorable and unfavorable numbers:**
+    - Northfield "do you sell kayaks?", 6 fresh trials: 1/6 still showed
+      the false substitution (down from ~4/5 measured in item #9 before
+      this fix); 3/6 correctly degraded to an honest "nothing matched
+      exactly, here's what's available instead" browse; 2/6 gave a clean
+      "not carried"/category-list decline. The one residual failure was
+      re-investigated: an isolated direct call for the identical query
+      returned the correct `False` reliably, so the live miss is a
+      transient failure of that one specific call (timeout, throttle, or a
+      dropped response) rather than a repeat of the tautology bug - not
+      fully diagnosed, and not claimed impossible to recur.
+    - Kettle "a fruity coffee", 5 fresh trials: 3/5 returned real coffee
+      matches (unchanged from item #9's own baseline for this exact
+      phrase); 2/5 routed to `SUGGEST_ALTERNATIVE`'s separate, untouched
+      empty-result path instead of `RECOMMEND_PRODUCTS` at all - a
+      pre-existing model-routing variance (which action type the model
+      proposes for the same message varies by call) this fix does not
+      touch and did not introduce, confirmed by isolated direct calls to
+      `_shop_carries_semantic` separately returning `True` reliably for
+      both "a fruity coffee" and "something smooth and not too bitter" on
+      Kettle when that code path is actually reached.
+
+    **Automated suites, run against this exact final state:**
+    `fuzz.py` - 1200 assertions across 20 sequences, every invariant held
+    (one run needed killing and a clean restart after the timeout bug above
+    was found and fixed; the confirming run completed normally in line with
+    historical timing). `auditroutes.py` - every probe held, run twice
+    (before and after the timeout fix). Manual invariant reasoning only,
+    not a dedicated `invariant-guard` agent pass (not available in this
+    session's execution context) - traced through all six hard invariants
+    and the idempotency rule by reading the actual diff: no fabrication
+    (the judge only gates already-fetched real candidates, never returns or
+    invents a product itself), no risk/payment/idempotency/tap-trust
+    surface touched, every failure path (exception, timeout, missing
+    client) degrades to `None` and is never allowed to raise to the
+    shopper.
+
+    **Honest residual gaps, stated plainly rather than declared solved:**
+    - The semantic judge narrows the false-substitution rate: it does not
+      guarantee zero, per the 1/6 residual above.
+    - `SUGGEST_ALTERNATIVE`'s own empty-result path is untouched and not
+      gated by this judge at all - only `RECOMMEND_PRODUCTS`'s two fallback
+      branches are. A message that routes there instead never gets the
+      semantic second opinion.
+    - The `personalizes` fix's real-model compliance has not been
+      confirmed live post-schema-fix (see above) - only the deterministic
+      logic is rigorously verified.
+    - Neither fix has had an independent `invariant-guard` or
+      `value-auditor` pass; both were reasoned through manually in the same
+      session that built them, which this file's own standing rule treats
+      as insufficient to claim closed.
+    - Mission-state extraction's residual miss rate (from item #9,
+      unchanged) and true 40,000-SKU-scale verification of the catalog
+      pagination path (also unchanged) remain exactly as open as item #9
+      already described them.
+
+    **Nothing from this entry moves to Completed.md.** A fresh,
+    independent `invariant-guard` pass and a `value-auditor` pass against
+    commits `07d3a00` and `4ace479` specifically, plus the live-model
+    re-verification of the `personalizes` fix now that the schema bug is
+    fixed, are the concrete next steps - not a sixth round of "seems fixed"
+    without independent re-testing, the same standing lesson item #9
+    already states and this entry does not get to skip just because two
+    real bugs were found and fixed along the way.
+
 ---
 
 ## Research-Backed Product Work
