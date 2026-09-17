@@ -94,6 +94,51 @@ def _product_text(p: Product | dict) -> str:
     return " ".join([title, description, " ".join(categories)]).lower()
 
 
+#: Consonant/digraph endings after which English adds "-es" rather than a
+#: bare "-s" (box/boxes, glass/glasses, dress/dresses, brush/brushes,
+#: watch/watches). Deliberately narrow and closed-class, the same
+#: philosophy as `_STOPWORDS` above - not a general stemmer.
+_SIBILANT_ENDINGS = ("s", "x", "z", "ch", "sh")
+
+
+def _stem(word: str) -> str:
+    """Canonical singular-ish form of `word`, covering ordinary English
+    "-s" and "-es" plurals only.
+
+    TWELFTH-gap fix: the plural handling this replaces (a bare
+    `word.rstrip("s")`, in both `_overlap` and `_is_real_title_citation`)
+    only strips a single trailing "s" - correct for "bottles" -> "bottle"
+    but wrong for a genuine "-es" plural, where the "e" is also part of
+    the suffix, not the stem: "boxes".rstrip("s") -> "boxe", which never
+    equals "box". Reproduced live and deterministically against a real
+    Kettle catalog title: `_is_real_title_citation({"taster","gift",
+    "boxes"}, [Product(title="Taster Gift Box")])` returned False (should
+    be True) for exactly this reason - a shopper citing "Taster Gift Box"
+    as "gift boxes" was spuriously flagged as a coincidental guess.
+
+    Fixed by first checking for the "-es" pattern specifically (strip
+    "es" rather than "s" when the word minus "es" itself ends in a
+    sibilant sound - `box`, `glass`, `dress`, `brush`), falling back to a
+    single-character "-s" strip otherwise. Deliberately does NOT use
+    `str.rstrip("s")` for the fallback either: that method strips every
+    trailing "s" it finds, not just one, which would mangle an
+    already-singular word ending in a doubled "s" ("glass" ->
+    `rstrip("s")` -> "gla") - guarded against explicitly (a word ending
+    in "ss" is left alone by the plain "-s" branch; the "-es" branch
+    above already gives it the correct stem when a genuine plural form of
+    it is seen).
+    """
+    if (
+        word.endswith("es")
+        and len(word) > 3
+        and word[:-2].endswith(_SIBILANT_ENDINGS)
+    ):
+        return word[:-2]
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 1:
+        return word[:-1]
+    return word
+
+
 def _overlap(words: list[str], text: str) -> int:
     """How many of `words` appear in `text`, singular or plural.
 
@@ -101,7 +146,7 @@ def _overlap(words: list[str], text: str) -> int:
     sample_merchant/store.py's own search already applies - kept identical
     here so this re-score never disagrees with the search it is checking.
     """
-    return sum(1 for w in words if w in text or w.rstrip("s") in text)
+    return sum(1 for w in words if w in text or _stem(w) in text)
 
 
 def best_matches_with_score(products: list, query: str) -> tuple[int, list]:
@@ -204,6 +249,12 @@ def _is_real_title_citation(query_words: set[str], candidates: list[Product]) ->
     title "Ethiopia Guji Natural" counted as a 2-word difference - remove
     "natural", add "naturals" - instead of zero).
 
+    TWELFTH-gap follow-up: normalization now goes through the shared
+    `_stem` helper (not a bare `.rstrip("s")`) so an ordinary "-es" plural
+    ("gift boxes" for the real title "Taster Gift Box") is recognized the
+    same way `_overlap` recognizes it - see `_stem`'s own docstring for
+    why a plain single-"s" strip cannot do this correctly.
+
     Deliberately NOT handling ordinary abbreviation ("marathon shoe" for
     "Marathon Pro Racing Shoe") in this same pass: a subset-plus-majority
     rule was tried on paper and immediately reopens the exact "water
@@ -217,10 +268,10 @@ def _is_real_title_citation(query_words: set[str], candidates: list[Product]) ->
     """
     if not query_words:
         return False
-    normalized_query = {w.rstrip("s") for w in query_words}
+    normalized_query = {_stem(w) for w in query_words}
     for p in candidates:
         title_words = set(_significant_words(p.title))
-        normalized_title = {w.rstrip("s") for w in title_words}
+        normalized_title = {_stem(w) for w in title_words}
         if len(normalized_query ^ normalized_title) <= 1:
             return True
     return False

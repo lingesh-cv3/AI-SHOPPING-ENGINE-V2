@@ -1162,13 +1162,71 @@ for real:
   answer live. `fuzz.py` (every invariant held) and `auditroutes.py`
   (every probe held) both re-run clean.
 
+  **This plural-fix commit (`dd56318`) has since had a dedicated
+  `invariant-guard` and independent `value-auditor` pass, both run this
+  session.** `invariant-guard`: SAFE - confirmed the change is confined to
+  `engine/execution/relevance.py`'s word-comparison logic and only ever
+  narrows/hedges already-real, already-fetched candidates. `value-auditor`
+  independently reproduced the fix's own claims (4 fresh plural cases
+  beyond the commit's own example, both regression guards still holding,
+  a hand-reconstructed copy of the pre-fix logic confirming the change is
+  load-bearing rather than a no-op) and separately confirmed the
+  abbreviation gap is the right thing to leave open, with no cheaper safe
+  fix found. It also found a genuine, reproducible next gap, addressed
+  immediately below rather than left to drift.
+
+  **TWELFTH gap (commit `<pending>`, same session), found by that
+  `value-auditor` pass and fixed immediately.** The plural normalization
+  `dd56318` added (`w.rstrip("s")`, borrowed from `_overlap`'s existing
+  rule) only strips a single trailing "s" - correct for "bottles" ->
+  "bottle" but wrong for an ordinary English "-es" plural, where the "e"
+  is also part of the suffix: `"boxes".rstrip("s")` -> `"boxe"`, which
+  never equals `"box".rstrip("s")` -> `"box"`. Reproduced live and
+  deterministically against a real Kettle catalog title:
+  `_is_real_title_citation({"taster","gift","boxes"}, [Product(title=
+  "Taster Gift Box")])` returned False (should be True) - a shopper
+  citing "Taster Gift Box" as "gift boxes" would have been spuriously
+  hedged as a coincidental guess, the identical bug class `dd56318` had
+  just closed for the simpler "-s" case. Inherited from, and shared with,
+  `_overlap()` in the same file (not new to `_is_real_title_citation`).
+
+  Fixed with a single shared `_stem()` helper used by both `_overlap` and
+  `_is_real_title_citation` (per CLAUDE.md's "fix the shape, not the
+  instance" standard, rather than patching each call site separately):
+  strips "es" instead of "s" specifically when the word minus "es" itself
+  ends in a sibilant sound (box/glass/dress/brush - the ordinary English
+  "-es" pluralization rule), falling back to a single-character "-s"
+  strip otherwise. Deliberately does not reuse `str.rstrip("s")` for that
+  fallback, since it strips every trailing "s" it finds rather than one -
+  found live that this would otherwise mangle an already-singular word
+  ending in a doubled "s" ("glass" -> "gla", disagreeing with "glasses"
+  correctly stemming to "glass"); guarded explicitly so "glass"/"glasses"
+  and "dress"/"dresses" both canonicalize to the same stem rather than
+  the naive fix trading one bug for a subtler one.
+
+  Verified directly (14 deterministic unit cases, no model-call
+  variance): the "-es" gap case now correctly returns True; the existing
+  "-s" plural case ("ethiopia guji naturals") still returns True;
+  both standing regression guards (vague multi-word non-citation,
+  wrong-fragment-of-a-different-product) still correctly return False;
+  two different words that both happen to end in "-es" ("gates"/"gases")
+  correctly stem to different roots rather than being collapsed together;
+  and the glass/dress double-s cases specifically checked and confirmed
+  correct. Live re-test on the running engine: 5/5 fresh phrasings citing
+  "Taster Gift Box" as "gift boxes" on Kettle now return a confident,
+  correctly unhedged answer (previously would have been spuriously
+  hedged); 15/15 kayak-family queries on Northfield remain correctly
+  declined/hedged with 0 undisclosed confident-wrong answers, confirming
+  no regression from the shared-helper refactor. `fuzz.py` (every
+  invariant held) and `auditroutes.py` (every probe held) both re-run
+  clean.
+
   No `invariant-guard`/`value-auditor` pass has run against this specific
-  plural-fix commit yet - manual invariant reasoning only (confined to
-  `engine/execution/relevance.py`'s word-comparison logic; only ever
-  narrows/hedges already-real adapter-fetched candidates, never touches
-  risk, payment, execution or idempotency). Do not move this, or the
-  tenth/eleventh-gap chain it sits on top of, to `Completed.md` without
-  that independent pass.
+  twelfth-gap commit yet - manual invariant reasoning only (confined
+  entirely to `engine/execution/relevance.py`'s word-comparison logic, no
+  new file touched, same class of change already cleared for `dd56318`
+  above). Do not move this, or the ninth/tenth/eleventh/twelfth-gap chain
+  it sits on top of, to `Completed.md` without that independent pass.
 
 ### Why the tests did not used to catch these
 
