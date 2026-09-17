@@ -127,7 +127,23 @@ def _stem(word: str) -> str:
     in "ss" is left alone by the plain "-s" branch; the "-es" branch
     above already gives it the correct stem when a genuine plural form of
     it is seen).
+
+    FIFTEENTH-gap fix: also handles the "-y" -> "-ies" plural
+    (category/categories, accessory/accessories, battery/batteries) -
+    found live and deterministically against a real Northfield
+    department name: "Accessory" (a shopper's ordinary singular of the
+    real "Accessories" department) did not stem-match "Accessories",
+    since neither the "-es"-after-sibilant rule nor the plain "-s" strip
+    fires on a "-y"/"-ies" pair. A word ending "ies" is stemmed to that
+    word with "ies" replaced by "y" ("accessories" -> "accessory"); a
+    word already ending in a bare "y" is left alone, so the two now
+    collapse to the same stem. Deliberately narrow (a fixed length guard
+    to avoid mangling a short word that only coincidentally ends "ies")
+    rather than a general y/i vowel-shift rule - same closed-class
+    philosophy as the rest of this function.
     """
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
     if (
         word.endswith("es")
         and len(word) > 3

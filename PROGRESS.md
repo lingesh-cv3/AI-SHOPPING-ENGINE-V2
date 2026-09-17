@@ -1355,9 +1355,62 @@ for real:
   symmetry (the same helpers now gate both call sites identically)
   rather than a live reproduction of that exact branch.
 
+  **A dedicated `invariant-guard` pass on the fourteenth-gap commit
+  (`0c7a940`) returned SAFE** - confirmed both action types now share
+  the identical, real-data-only validation, both failure directions
+  fail open (skip the filter) rather than fabricate, and the
+  closure/variable-ordering in the shared code block is correct Python
+  late-binding, not a latent bug.
+
+  **A dedicated `value-auditor` pass on the same commit independently
+  re-verified both fourteenth-gap fixes hold (fresh stem/hyphen pairs,
+  fresh fabricated-category rejections, a direct control-flow trace
+  confirming the shared-filter claim) and found one more, narrower,
+  fifteenth gap - not a reopening of gap two, but an edge of it left
+  uncovered.** `relevance._stem()`'s own docstring already scopes it to
+  "-s"/"-es" plurals only; it has no rule for the "-y" -> "-ies" plural
+  pattern (category/categories, battery/batteries, and - found live,
+  not hypothetically - accessory/accessories, a real Northfield
+  department name). `_category_is_real("Accessory", {"accessories",
+  ...})` returned False before this fix, even though "Accessory" is the
+  ordinary singular of a real, live department. Bounded severity by the
+  same fail-open design gap two relies on (no false decline, only a
+  quiet loss of intended category narrowing) - but real and
+  reproducible against the actual seeded catalog, not contrived.
+
+  **Fix:** `_stem()` gained one more narrow, closed-class rule (matching
+  its own existing philosophy, not a general vowel-shift stemmer): a
+  word ending "ies" is stemmed by replacing "ies" with "y"
+  ("accessories" -> "accessory"), so it now collapses to the same stem
+  as the plain "-y" singular. Since `engine/execution/service.py`'s
+  `_category_is_real`/`_normalize_category` (the fourteenth-gap fix)
+  already calls `relevance._stem` directly rather than reimplementing
+  its own normalization, this single change closes the gap at both call
+  sites with no separate edit needed there - confirmed by reading the
+  call site, not assumed.
+
+  Verified: 10 direct deterministic checks - the exact freshly-found
+  gap (`accessory`/`accessories` now equal), every previously-fixed
+  plural/`-es`/hyphen case re-confirmed unregressed (`box`/`boxes`,
+  `bottle`/`bottles`, `natural`/`naturals`, `glass` left un-mangled),
+  two more genuine "-y"/"-ies" pairs (`battery`/`batteries`,
+  `category`/`categories`), and an explicit non-collapse guard
+  (`ties`/`pies` stay distinct, `series` stems harmlessly to a form
+  nothing else matches) - all correct. Re-verified end to end through
+  `engine/execution/service.py`'s actual `_category_is_real` helper
+  (not just the underlying `_stem` function in isolation): `"Accessory"`
+  now correctly validates against a real `["Accessories"]` list, and a
+  genuinely fabricated category is still correctly rejected. Live,
+  against the running engine: 0/8 undisclosed on a fresh kayak-family
+  batch (Northfield) and 0/5 false declines on "a fruity coffee"
+  (Kettle) - both unregressed from the fourteenth-gap fix's own numbers.
+  `auditroutes.py`: every probe held. `fuzz.py`: every invariant held
+  (run separately, confirmed clean).
+
   No `invariant-guard`/`value-auditor` pass has run against this
-  fourteenth-gap commit yet - do not move it, or the thirteenth-gap
-  commit it patches, to `Completed.md` without one.
+  specific fifteenth-gap commit yet - do not move any of the
+  thirteenth/fourteenth/fifteenth-gap commits to `Completed.md` without
+  one covering the final state.
 
 ### Why the tests did not used to catch these
 
