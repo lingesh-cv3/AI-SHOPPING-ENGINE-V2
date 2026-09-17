@@ -195,12 +195,33 @@ def _is_real_title_citation(query_words: set[str], candidates: list[Product]) ->
     NEAR-EQUALITY (symmetric difference of at most one word, to tolerate a
     size/unit suffix like "750ml" the shopper's phrasing would never
     repeat), not mere one-directional containment.
+
+    ELEVENTH-gap follow-up: words are compared after the same plural
+    normalization `_overlap` already applies ("count both forms, do not
+    punish a plural") - found live that an unnormalized comparison here
+    disagreed with `_overlap` in the same file and spuriously hedged a
+    genuinely correct citation ("ethiopia guji naturals" for the real
+    title "Ethiopia Guji Natural" counted as a 2-word difference - remove
+    "natural", add "naturals" - instead of zero).
+
+    Deliberately NOT handling ordinary abbreviation ("marathon shoe" for
+    "Marathon Pro Racing Shoe") in this same pass: a subset-plus-majority
+    rule was tried on paper and immediately reopens the exact "water
+    bottle" regression above - {"water", "bottle"} is 2 of that title's 4
+    real words, a clear majority, and no check against *other* candidates
+    catches it, because it is not ambiguous with a different product, it
+    is a generic phrase that happens to fully overlap the wrong one.
+    Nothing short of real semantic judgment can tell that apart from a
+    deliberate abbreviation of a specific title, so this stays open rather
+    than risk reintroducing an already-documented bug for a narrower one.
     """
     if not query_words:
         return False
+    normalized_query = {w.rstrip("s") for w in query_words}
     for p in candidates:
         title_words = set(_significant_words(p.title))
-        if len(query_words ^ title_words) <= 1:
+        normalized_title = {w.rstrip("s") for w in title_words}
+        if len(normalized_query ^ normalized_title) <= 1:
             return True
     return False
 

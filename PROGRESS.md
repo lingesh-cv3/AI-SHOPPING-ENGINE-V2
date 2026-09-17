@@ -1061,6 +1061,115 @@ for real:
   without that independent pass - the honest state after nine rounds is
   "substantially improved and now narrowly characterized," not "closed."
 
+  **TENTH and ELEVENTH rounds (commit `ed01b82`), two further real root
+  causes found by independent re-test of the ninth round's headline
+  number.** A dedicated `value-auditor` pass re-tested "24/24 clean" at
+  larger sample and found it did not hold: 3/25 (12%) trials of
+  "I need a kayak"/"do you sell kayaks?" on Northfield still produced an
+  undisclosed, confident wrong answer. Root-caused, not patched on the
+  same spot twice:
+
+  - **TENTH gap** (`engine/execution/relevance.py`): the word-count
+    exemption in `query_diverges_from_said` ("a query of 3+ significant
+    words diverging from what the shopper said is a real citation") was a
+    proxy for "the model named a specific real product," not the actual
+    signal - a vague, equally-ungrounded multi-word guess ("water sports
+    accessories") is exactly as wrong as a one-word guess, just longer,
+    and slipped through untouched. Replaced with `_is_real_title_citation`:
+    a query only counts as a real citation when it is near-exactly equal
+    (symmetric difference of at most one word, to tolerate a size/unit
+    suffix) to some real candidate's own title - the actual signature of
+    naming a product, independent of word count. A first version checked
+    plain subset-containment and immediately regressed the already-known
+    "water bottle" case (a fragment of the WRONG product's title read as a
+    citation of it); near-equality is the narrower, correct check.
+  - **ELEVENTH gap** (`engine/execution/service.py`): the deterministic
+    `shop_carries(query, ...)` call in the query-driven browse fallback
+    checked the model's own weak proxy term against a sample that, by
+    construction, already contains whatever that proxy term matched -
+    tautological, the same shape the sibling weak-match check already
+    avoids by checking `raw_said` instead. Fixed to use `raw_said` there
+    too. Also made the semantic judge (`judge_relevance`) structurally
+    one-directional for this path: when the judge affirms an otherwise-
+    ungrounded browse as plausible, `weak_match_uncertain` is now always
+    set - the judge may decide whether to show a weak match at all, never
+    whether to suppress the honest disclosure a judge-only-confirmed match
+    warrants.
+
+  Verified live against the running services: 15/15 kayak-family queries
+  on Northfield correctly declined or hedged (0 undisclosed, up from
+  3/25); "a fruity coffee" on Kettle unaffected (4/4 confident, correct);
+  "something smooth and not too bitter" unaffected (4/4 honestly hedged,
+  unchanged). `fuzz.py` (every invariant held) and `auditroutes.py`
+  (every probe held) both clean.
+
+  A dedicated adversarial re-test of `ed01b82` (fresh trials, not the
+  commit's own script) reproduced the headline number independently -
+  18/18 clean on the direct kayak phrasings, 5/6 correctly hedged (1/6
+  declined) on phrasings specifically constructed to reconstruct the
+  exact "water sports accessories" failure shape, 0/24 undisclosed
+  overall (vs. the prior round's 3/25) - and confirmed the coffee control
+  unregressed 5/5 and 5/5. Binomial check: given a true 12% failure rate,
+  P(0 failures in 24 trials) is under 5%, meaningful evidence the fix
+  works rather than small-sample luck, though not exhaustive proof.
+
+  **The same audit also found a genuine over-hedging risk `ed01b82` did
+  not address, fixed in a follow-up (commit `<pending>`, same session):**
+  `_is_real_title_citation`'s near-equality check did no plural
+  normalization, unlike its sibling `_overlap()` in the same file (which
+  already has an explicit "count both forms, do not punish a plural"
+  rule) - a genuinely correct citation like "ethiopia guji naturals" for
+  the real title "Ethiopia Guji Natural" counted as a 2-word difference
+  (remove "natural", add "naturals") instead of zero, and would have been
+  spuriously hedged as if it were a coincidental guess. Fixed by
+  normalizing both sides with the same `w.rstrip("s")` rule `_overlap`
+  already uses before computing the symmetric difference.
+
+  **Deliberately left open, not silently dropped:** the same audit also
+  flagged ordinary abbreviation ("marathon shoe" for the real title
+  "Marathon Pro Racing Shoe") as untolerated by the near-equality check.
+  A subset-plus-majority rule was worked through on paper before writing
+  any code and immediately reopens the already-documented "water bottle"
+  regression: `{"water", "bottle"}` is 2 of "Insulated Water Bottle
+  750ml"'s 4 real words, a clear majority, and a check against *other*
+  candidates doesn't catch it either, because the problem isn't ambiguity
+  with a different product - it's a generic phrase that happens to fully
+  overlap the wrong one. Nothing short of real semantic judgment
+  distinguishes that from a deliberate abbreviation of a specific title,
+  so this stays open rather than risk reintroducing an already-fixed bug
+  for a narrower one. Live re-test found this gap did not bite in
+  practice for the two abbreviation-shaped queries tried ("do you have
+  the marathon shoe", "tell me about the marathon shoe" both returned a
+  confident, correct, unhedged answer) - likely because the underlying
+  `_overlap` word-count score for these particular titles was already
+  strong enough (2+) to route around the citation-check path entirely,
+  not because the gap is closed. Do not treat it as closed; it has not
+  been forced to fail live, only shown not to fail on the two phrasings
+  tried.
+
+  Verified directly (deterministic, no model-call variance): 5 unit-level
+  cases confirm the plural fix works, the two already-documented
+  regressions (fragment-of-wrong-product, vague-multi-word-non-citation)
+  still correctly return False, and the deliberately-unaddressed
+  abbreviation case still correctly returns False (not silently broken
+  by the plural change). Live re-test on the running engine: 0/10
+  undisclosed confident wrong on kayak-family queries on Northfield;
+  coffee control on Kettle 4/5 confident-correct (1/5 model-variance
+  degrade to the honest browse fallback, consistent with the
+  already-documented baseline, not a new regression); both a plural
+  ("do you have the guji naturals") and an abbreviated ("do you have the
+  marathon shoe") real citation returned a confident, correct, unhedged
+  answer live. `fuzz.py` (every invariant held) and `auditroutes.py`
+  (every probe held) both re-run clean.
+
+  No `invariant-guard`/`value-auditor` pass has run against this specific
+  plural-fix commit yet - manual invariant reasoning only (confined to
+  `engine/execution/relevance.py`'s word-comparison logic; only ever
+  narrows/hedges already-real adapter-fetched candidates, never touches
+  risk, payment, execution or idempotency). Do not move this, or the
+  tenth/eleventh-gap chain it sits on top of, to `Completed.md` without
+  that independent pass.
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived
