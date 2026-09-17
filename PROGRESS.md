@@ -1295,6 +1295,70 @@ for real:
   has run against this specific commit yet - do not move it to
   `Completed.md` without one.
 
+  **A dedicated `invariant-guard`/`value-auditor` pass on this commit
+  (`d230d35`) found it SAFE and the specific fix verified, but surfaced
+  two further precise gaps in the same fix - a fourteenth round, not a
+  reopening of the thirteenth.**
+
+  1. **The category-validation logic protected only one of two call
+     sites that share it.** `_within_category`'s hard filter is applied
+     TWICE in the same `RECOMMEND_PRODUCTS`/`SUGGEST_ALTERNATIVE` shared
+     code path: once early, unconditionally, right after the narrow
+     keyword search (`relevant = [p for p in relevant if
+     _within_category(p)]`), and once again inside the later wide-
+     catalog fallback that the thirteenth-gap fix protected. The
+     fallback's protection was gated `action_type is
+     ActionType.RECOMMEND_PRODUCTS` only - so a bogus model-guessed
+     category reaching the EARLY filter on a `SUGGEST_ALTERNATIVE` turn
+     still zeroed `relevant` with no protection at all, falling through
+     to the still-broken "Searched for X and still found nothing" reply
+     for something the shop actually carries. Same bug, same file, one
+     action type and one call site away, still open after the
+     thirteenth-gap fix.
+
+  2. **The category comparison itself was a bare `.lower()` exact-string
+     match, with no plural/hyphen normalization** - even though this
+     exact codebase had already built `relevance._stem()` one commit
+     earlier (twelfth gap) for precisely this class of problem. A
+     model-guessed category like "Blend" (singular) or "single-origin"
+     (hyphenated) against a real category "Blends"/"Single origin" would
+     fail the exact-match check and have its filter silently dropped -
+     not the crash-to-zero bug, but a quiet, undisclosed loss of the
+     shopper's intended category narrowing.
+
+  **Fix:** validation is now applied at its actual source - the early,
+  shared `_within_category` filter itself - for both action types, via
+  a new `_category_is_real`/`_normalize_category` pair
+  (`engine/execution/service.py`) that stems and hyphen-normalizes both
+  sides before comparing (reusing `relevance._stem`, not a second
+  bespoke normalizer). The later wide-catalog fallback's own duplicate
+  `.lower()`-based check was replaced with a call to the same shared
+  helpers, so the two can no longer disagree with each other about what
+  counts as the same category - the exact inconsistency-between-two-
+  word-matchers shape this whole multi-round chain has been closing
+  everywhere else.
+
+  Verified: 5 direct deterministic checks (`blend`→`Blends`,
+  `single-origin`→`Single origin`, a genuinely fabricated category
+  correctly still rejected against two different real category sets,
+  and an exact real-category match) all correct. Live, against the
+  restarted engine: 15/15 "a fruity coffee" trials on Kettle still
+  return a real product (0 false declines, no regression from the
+  thirteenth-gap fix); 10/10 kayak-family trials on Northfield
+  (including the "water sports accessories" phrasing) still correctly
+  decline or honestly hedge, zero undisclosed confident-wrong answers.
+  `fuzz.py`: every invariant held. `auditroutes.py`: every probe held.
+  Not live-forced for `SUGGEST_ALTERNATIVE` specifically (the model's
+  own choice of action type/category cannot be dictated from the API,
+  the same limitation the auditor that found this gap already noted) -
+  relying on the direct deterministic verification and code-level
+  symmetry (the same helpers now gate both call sites identically)
+  rather than a live reproduction of that exact branch.
+
+  No `invariant-guard`/`value-auditor` pass has run against this
+  fourteenth-gap commit yet - do not move it, or the thirteenth-gap
+  commit it patches, to `Completed.md` without one.
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived

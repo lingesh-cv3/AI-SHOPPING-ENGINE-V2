@@ -782,10 +782,45 @@ class ExecutionService:
                         return False
                     return True
 
-                def _within_category(p: Product) -> bool:
-                    if not category:
+                def _normalize_category(name: str) -> frozenset[str]:
+                    # FOURTEENTH-gap fix: stem- and hyphen-normalized, not a
+                    # bare `.lower()` string, so "Blend"/"Blends" or
+                    # "single-origin"/"Single origin" are recognized as the
+                    # same category rather than treated as a mismatch - the
+                    # identical class of problem `relevance._stem` was
+                    # already built to solve one commit earlier, reused
+                    # here rather than a second bespoke exact-match check.
+                    return frozenset(
+                        relevance._stem(w)
+                        for w in name.lower().replace("-", " ").split()
+                    )
+
+                def _category_is_real(name: str, real_names) -> bool:
+                    if not name:
                         return True
-                    return any(c.lower() == category.lower() for c in p.categories)
+                    target = _normalize_category(name)
+                    return any(target == _normalize_category(r) for r in real_names)
+
+                def _within_category(p: Product) -> bool:
+                    # FOURTEENTH-gap fix: a category the shop does not
+                    # actually have must not be trusted to zero out real
+                    # results - the same "the model's guess does not
+                    # override real ground truth" rule already applied
+                    # further below (`category_only_unverified`, the
+                    # THIRTEENTH-gap fallback fix), now applied at its
+                    # actual source instead of only at one of its two
+                    # downstream consequences. Previously this filter ran
+                    # unconditionally for both RECOMMEND_PRODUCTS and
+                    # SUGGEST_ALTERNATIVE - a bogus category zeroed
+                    # `relevant` here for SUGGEST_ALTERNATIVE with no
+                    # fallback protection at all, since the later fix was
+                    # gated to RECOMMEND_PRODUCTS only.
+                    if not category or not category_is_real:
+                        return True
+                    return any(
+                        _normalize_category(category) == _normalize_category(c)
+                        for c in p.categories
+                    )
 
                 # Fetch a wider candidate set when narrowing further - a keyword
                 # search's first 6 results, filtered or re-sorted down, can
@@ -793,6 +828,17 @@ class ExecutionService:
                 # match exists further in.
                 narrowed = price_bounded or top_rated or bool(category)
                 found = await adapter.search_products(query, limit=30 if narrowed else 6)
+                # Validated against this same real, already-fetched result
+                # set - cheap (no extra adapter call) and, since `narrowed`
+                # already widens the page to 30 whenever a category was
+                # given, a reasonably representative sample of what this
+                # keyword search actually turned up. A real category simply
+                # absent from this narrow sample fails safe (the filter is
+                # skipped, never zeroing candidates), the same direction
+                # every other fix in this file already fails toward.
+                category_is_real = _category_is_real(
+                    category, {c for p in found.products for c in p.categories}
+                )
                 # Re-score what the adapter's own keyword search already
                 # found and keep only the best-matching tier - a product
                 # sharing one word with the query (a "Running Cap" for
@@ -1018,14 +1064,18 @@ class ExecutionService:
                     # 9/20 trials of "a fruity coffee" hit this exact path
                     # (category="Coffee", real_categories=[...no "Coffee"...],
                     # wide_products_count=16, titles wiped to []).
-                    real_categories = {
-                        c.lower() for p in wide_products for c in p.categories
-                    }
-                    category_is_real = not category or category.lower() in real_categories
+                    # FOURTEENTH-gap fix: reuses the same stem/hyphen-
+                    # normalized `_category_is_real`/`_within_category`
+                    # helpers defined above, rather than a second bespoke
+                    # bare `.lower()` exact-match check - the two must not
+                    # disagree with each other about what counts as the
+                    # same category.
+                    category_is_real = _category_is_real(
+                        category, {c for p in wide_products for c in p.categories}
+                    )
                     candidates = [
                         p for p in wide_products
-                        if _within_price(p)
-                        and (not category_is_real or _within_category(p))
+                        if _within_price(p) and _within_category(p)
                     ]
                     if top_rated:
                         candidates = [p for p in candidates if p.rating is not None]
