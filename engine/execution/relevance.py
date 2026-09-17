@@ -321,6 +321,36 @@ def query_diverges_from_said(
     When `candidates` is not supplied (existing callers unaffected), falls
     back to the original length-cap approximation for backward
     compatibility.
+
+    SIXTEENTH-gap fix: "shares at least one word" (the original
+    `isdisjoint` check) is not the same claim as "every word in the
+    query is grounded in what the shopper actually said" - and the gap
+    between those two claims is exactly how a model-invented word slips
+    through. Reproduced live: raw_said "water sports accessories",
+    model's own `query` "water bottle" - shares the word "water" with
+    what the shopper typed, so the old disjoint check called this
+    "not diverging" and never flagged it, while the second word,
+    "bottle", is a pure model invention appearing nowhere in what the
+    shopper said and happens to be the exact word that made an unrelated
+    "Insulated Water Bottle" score high enough (2) to also clear
+    `weak_single_word_match`'s threshold. One shared generic word bought
+    a free pass for one entirely invented specific word riding beside
+    it. Reproduced at 5/5 on this exact phrasing, not a rare coincidence
+    - a batch composed mostly of other kayak phrasings had been masking
+    the true failure rate of this specific one for several rounds (see
+    PROGRESS.md's own after-the-fact correction).
+
+    Fixed by checking SUBSET rather than intersection: divergence now
+    fires whenever any of the query's (stemmed) significant words is
+    absent from what the shopper (stemmed) actually said - not only when
+    none of them are present. A query entirely built from the shopper's
+    own words (in any order, any subset) is never flagged, whatever its
+    length; a query introducing even one word the shopper never said and
+    that isn't part of a verified real title citation is. This does not
+    reject the match outright - the caller still runs it through the
+    wider sample and the semantic judge before deciding what to say -
+    it only stops treating "shares a word" as proof the whole query is
+    grounded when only part of it demonstrably is.
     """
     query_words = set(_significant_words(query))
     said_words = set(_significant_words(raw_said))
@@ -331,7 +361,9 @@ def query_diverges_from_said(
             return False
     elif len(query_words) > 2:
         return False
-    return query_words.isdisjoint(said_words)
+    normalized_query = {_stem(w) for w in query_words}
+    normalized_said = {_stem(w) for w in said_words}
+    return not normalized_query.issubset(normalized_said)
 
 
 def shop_carries(query: str, catalog_sample: list) -> bool:

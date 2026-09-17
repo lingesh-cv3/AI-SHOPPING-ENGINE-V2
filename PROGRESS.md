@@ -1407,10 +1407,82 @@ for real:
   `auditroutes.py`: every probe held. `fuzz.py`: every invariant held
   (run separately, confirmed clean).
 
+  **A dedicated `invariant-guard` pass on the fifteenth-gap commit
+  (`df5c4af`) returned SAFE** - confirmed the change is pure
+  string-stemming used only for equality comparison against real,
+  already-fetched category/title data, with no path to fabricate or
+  introduce a product/category that wasn't actually there.
+
+  **A dedicated `value-auditor` pass on the same commit independently
+  confirmed the "-y"/"-ies" fix itself holds (3 fresh pairs beyond the
+  commit's own examples, no false collapses found in ~20 words tried),
+  but found something more consequential than one more narrow gap: the
+  last several rounds' "0/8 unregressed" and "0/10 unregressed" claims
+  were technically true of what they tested and misleading about what
+  they implied.** A dedicated 15-trial batch giving "water sports
+  accessories" - the one phrasing already known, since round 10, to be
+  the weak point - its own full weight (rather than 3-4 of a 8-10-trial
+  mixed batch, as every commit since the tenth gap had been sampling
+  it) reproduced an undisclosed confident-wrong answer **5 times out of
+  5**. Traced precisely, not vaguely: the model's own proxy query for
+  this phrasing was `"water bottle"`, which shares the word "water"
+  with what the shopper actually typed - enough for the old
+  `query_diverges_from_said` (an `isdisjoint` check: fires only when
+  the query shares NOTHING with what was said) to call it "not
+  diverging" - while the second word, "bottle", is a pure model
+  invention appearing nowhere in the shopper's sentence and is exactly
+  the word that pushed `Insulated Water Bottle`'s score to 2, clearing
+  `weak_single_word_match`'s `top_score == 1` threshold by the same one
+  point the ninth-gap fix already found this exact product defeating a
+  score-based check by. One shared generic word bought a free pass for
+  one entirely invented specific word riding beside it - the auditor
+  named this correctly as a structural property of the two-gate design
+  (an absolute or intersection-based threshold can always be defeated by
+  padding with one word that happens to help), not a sixteenth instance
+  of "found one more phrasing."
+
+  **Fixed at the shape, not the phrasing, per the auditor's own explicit
+  recommendation against continuing round-by-round phrasing patches:**
+  `query_diverges_from_said` now checks SUBSET rather than intersection
+  - it fires whenever ANY of the query's (stemmed) significant words is
+  absent from what the shopper (stemmed) actually said, not only when
+  none of them are present. A query built entirely from the shopper's
+  own words, in any subset or order, is never flagged, however long;
+  a query introducing even one word the shopper never said, and that
+  isn't part of a verified real title citation (the existing
+  `_is_real_title_citation` exemption is unchanged), now is. This does
+  not reject a match outright - it only routes it into the same wider-
+  sample/semantic-judge verification every other flagged case already
+  goes through - so a legitimate model synonym or paraphrase still gets
+  a fair honest-disclosure check rather than an outright refusal; it
+  just stops being able to hide behind one coincidentally-shared word.
+
+  Verified: 9 direct deterministic cases covering the exact new bug
+  (`"water bottle"`/`"water sports accessories"` now correctly flagged),
+  every standing citation exemption (`Ethiopia Guji Natural` and its
+  plural, `Taster Gift Box`'s `-es` citation), every standing subset-
+  match case (`"shoes"` for `"show me your shoes"`, `"running shoes"`
+  for a longer sentence), and one case the OLD check would have missed
+  entirely (`"kayak accessories"` against raw_said `"kayak"` - shares
+  "kayak", old check said not diverging; new check correctly flags the
+  invented "accessories"). All 9 correct. Live, against the restarted
+  engine: the exact previously-5/5-failing phrasing now **0/10**
+  undisclosed; the rest of the kayak-family batch **0/10**; "a fruity
+  coffee" on Kettle **10/10** confident and correct (no over-hedging
+  regression from tightening the divergence check); "show me your
+  shoes" control unaffected (4 options, not hedged). `fuzz.py`: every
+  invariant held, 1200 assertions across 20 sequences. `auditroutes.py`:
+  every probe held.
+
   No `invariant-guard`/`value-auditor` pass has run against this
-  specific fifteenth-gap commit yet - do not move any of the
-  thirteenth/fourteenth/fifteenth-gap commits to `Completed.md` without
-  one covering the final state.
+  specific sixteenth-gap commit yet - do not move any of the
+  thirteenth/fourteenth/fifteenth/sixteenth-gap commits to
+  `Completed.md` without one covering the final state. Given the pattern
+  of the last several rounds, treat any future "N/N clean" claim for
+  this mechanism with the same suspicion this round applied to the
+  ones before it - test the known-weakest phrasing at its own full
+  weight, not diluted inside a mixed batch, before trusting a headline
+  number.
 
 ### Why the tests did not used to catch these
 
