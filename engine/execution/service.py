@@ -997,8 +997,35 @@ class ExecutionService:
                     # `_MAX_CATALOG_SCAN` - that residual gap is real,
                     # disclosed, and not claimed solved.
                     wide_products = wide_sample if wide_sample is not None else await _full_catalog_sample(adapter)
+                    # THIRTEENTH gap, found live while reproducing the
+                    # "fruity coffee" false-decline report: the model
+                    # sometimes narrows by a plausible-sounding but
+                    # NONEXISTENT category ("Coffee", on a shop whose real
+                    # categories are "Single origin"/"Blends"/"Equipment"/
+                    # "Subscriptions"/"Gifts") - `_within_category` then hard-
+                    # filters this honest wide-catalog fallback down to zero
+                    # products, wiping out a real, correct match (Ethiopia
+                    # Guji Natural, in "Single origin") that the deterministic
+                    # `shop_carries` check below has already confirmed this
+                    # shop carries. An unverified category the shop does not
+                    # actually have must not be trusted to zero out an
+                    # otherwise-honest browse, the same "the model's guess
+                    # does not override real ground truth" rule already
+                    # applied to `category_only_unverified` above - this is
+                    # that same shape, just reached from the fallback branch
+                    # rather than the narrow-search branch. Reproduced live,
+                    # traced with temporary instrumentation, not guessed:
+                    # 9/20 trials of "a fruity coffee" hit this exact path
+                    # (category="Coffee", real_categories=[...no "Coffee"...],
+                    # wide_products_count=16, titles wiped to []).
+                    real_categories = {
+                        c.lower() for p in wide_products for c in p.categories
+                    }
+                    category_is_real = not category or category.lower() in real_categories
                     candidates = [
-                        p for p in wide_products if _within_price(p) and _within_category(p)
+                        p for p in wide_products
+                        if _within_price(p)
+                        and (not category_is_real or _within_category(p))
                     ]
                     if top_rated:
                         candidates = [p for p in candidates if p.rating is not None]

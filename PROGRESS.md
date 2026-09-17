@@ -1228,6 +1228,73 @@ for real:
   above). Do not move this, or the ninth/tenth/eleventh/twelfth-gap chain
   it sits on top of, to `Completed.md` without that independent pass.
 
+- **A distinct, newly-found problem, NOT part of the false-substitution
+  chain above - the mirror image of it.** An independent adversarial
+  audit of the twelfth-gap fix found the false-substitution saga (never
+  confidently show an unrelated real product) genuinely closed across
+  three fresh query families, but surfaced a different bug class: on
+  Kettle, "a fruity coffee" (and near-variants) returned a flat,
+  undisclosed "I couldn't turn anything up for that" on ~19-30% of
+  trials, even though the exact same input reliably finds a real,
+  correct match ("Ethiopia Guji Natural") on other trials seconds later.
+  Arguably worse than substitution: a shopper told "no" about something
+  the shop demonstrably carries has nowhere to go, where a hedge at
+  least shows real options.
+
+  **Root cause, found live with temporary debug instrumentation, not
+  guessed** (`engine/execution/service.py`, the `RECOMMEND_PRODUCTS`
+  wide-catalog fallback around what is now line ~1000): the model
+  sometimes narrows this action by a plausible-sounding but genuinely
+  NONEXISTENT category - `category="Coffee"` on Kettle, whose real
+  category list is `Single origin`/`Blends`/`Equipment`/`Subscriptions`/
+  `Gifts`. `_within_category` then hard-filtered the honest wide-catalog
+  browse-fallback down to zero products, wiping out a real, correct
+  match that the deterministic `shop_carries` check running moments
+  later had *already confirmed* this shop carries (`shop_carries_query`
+  was `True` in every failing trial, logged directly). This is the same
+  shape as the already-fixed `category_only_unverified` gap from the
+  ninth round - a model-guessed category must not override real ground
+  truth - just reached from the fallback branch instead of the narrow-
+  search branch, so the existing fix never covered it. Confirmed
+  precisely, not inferred: 9 of 20 trials logged `category='Coffee'`
+  against `real_categories=['Blends', 'Equipment', 'Gifts', 'Single
+  origin', 'Subscriptions']`, `wide_products_count=16`, candidates wiped
+  to `[]`.
+
+  **Fix:** before applying `_within_category` in this specific fallback,
+  check whether the model's stated category matches any of the shop's
+  real categories (case-insensitive, drawn from the same `wide_products`
+  already fetched, no extra call). If it does not, the category filter
+  is dropped for this fallback rather than trusted to zero out real
+  candidates - the shop's own real category list is ground truth the
+  model's guess does not get to override, the same principle already
+  applied elsewhere in this function. A real, verified category (e.g.
+  "show me your Blends") still narrows correctly; only a fabricated one
+  is defused.
+
+  Verified live against the running engine: 20/20 fresh trials of "a
+  fruity coffee" now correctly return a real match (previously 6-9
+  failures per 20, i.e. roughly 30-45% depending on the run - worse
+  than the ~19% first estimated from a smaller sample). Re-confirmed no
+  regression on the just-closed substitution saga: 15/15 kayak-family
+  queries on Northfield still correctly decline/hedge with zero
+  undisclosed confident-wrong answers; 5/5 "something smooth and not too
+  bitter" trials on Kettle unchanged (still an honest hedge, not forced
+  into a false match). All four standing deterministic regression
+  guards re-checked directly (`_is_real_title_citation`'s plural, "-es"
+  plural, fragment, and vague-proxy cases) - all four still correct.
+  `fuzz.py`: every invariant held. `auditroutes.py`: every probe held.
+
+  This is a category-filter bug, not a relevance-scoring bug - it lives
+  entirely in `engine/execution/service.py`, not `relevance.py`, and
+  does not belong in the ninth-through-twelfth-gap numbering above; it
+  is its own, newly-discovered defect in the same general area
+  (RECOMMEND_PRODUCTS honesty), found because closing the substitution
+  saga finally made room to test recall/consistency rather than only
+  false-positive substitution. No `invariant-guard`/`value-auditor` pass
+  has run against this specific commit yet - do not move it to
+  `Completed.md` without one.
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived
