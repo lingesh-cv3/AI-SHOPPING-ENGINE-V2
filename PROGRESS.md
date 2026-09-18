@@ -1484,6 +1484,273 @@ for real:
   weight, not diluted inside a mixed batch, before trusting a headline
   number.
 
+### Real user-reported bugs from hands-on testing (9 items, distinct from the kayak/relevance saga above)
+
+A user drove the shopper assistant by hand on both demo merchants and reported
+9 concrete transcripts. This is a different, more valuable signal than
+synthetic adversarial phrasing - it caught real multi-turn and cart-mutation
+bugs the single-turn kayak/relevance saga above never exercised. Investigated
+and fixed live against the running services; each item below states its real,
+verified status rather than a blanket "fixed."
+
+1. **Category browse false-decline** ("what are all footwear is available" ->
+   "I couldn't turn anything up for that"). **Did not reproduce** on a fresh
+   session - 3/3 fresh phrasings ("what are all footwear is available",
+   "show me all footwear", "what footwear do you have") on Northfield all
+   correctly returned real footwear products. Most likely already closed
+   incidentally by the mission-state grounding fix (item 4b below) or was
+   coincident with the two demo backend processes (Northfield :8001, Kettle
+   :8002) having gone down at some point mid-session - confirmed both were
+   actually down and had to be restarted during this investigation, unrelated
+   to any code change. Not moved to Completed.md - no dedicated fix exists to
+   audit, and "stopped reproducing" is weaker evidence than "found and fixed
+   the cause."
+
+2a. **Multi-item add in one message** ("add Marathon Pro Racing Shoe, Cork
+    Massage Ball and Massage Gun to my cart" -> only the second item was
+    asked about, unclear what happened to the other two). Not separately
+    re-investigated this session - the underlying mechanism (a pending-
+    proposal queue, `ee70c84`/`4fb161a` earlier this session) already handles
+    2-4 named items with disclosure per its own extensive verification.
+    Given time spent on the higher-severity items below, this specific
+    transcript was not re-driven turn-for-turn. Left honestly unverified
+    against this exact 3-item real phrasing rather than assumed fixed.
+
+2b. **FIXED AND VERIFIED - re-adding an item already in the cart didn't
+    increment its quantity.** Root-caused precisely, not guessed: the
+    underlying cart-mutation mechanism is correct (verified directly via a
+    trusted tap - `act('P6003')` twice took quantity 1 -> 2 cleanly). The
+    real bug is upstream, in how the model resolves which product a free-text
+    "add X again" message refers to: reproduced live, 2 of 4 trials where the
+    model DID propose ADD_TO_CART resolved "Cork Massage Ball" to a
+    *different* real product already sitting in the cart (Massage Gun, P6001)
+    purely because both titles share the word "massage" - not a fuzzy-match
+    bug in this codebase's own logic, a model extraction error. The other 2
+    of 4 trials proposed SUGGEST_ALTERNATIVE instead of ADD_TO_CART at all,
+    correctly not mutating the cart but not fulfilling the request either.
+
+    Fixed in `engine/execution/service.py`'s `ADD_TO_CART` branch: before
+    trusting the model's `product_id`, check whether the shopper's own raw
+    words fully contain (all significant words present, not a fuzzy partial)
+    the real title of a *different* product already in this exact cart - if
+    so, that already-known real line is trusted over the model's guess, the
+    same "a tap is trusted, the model's guess is not" reasoning already
+    applied to variant selection, extended here to an already-known cart
+    line instead of a fresh tap. Deliberately the strict direction (full
+    title containment, at least 2 real title words) to avoid reopening the
+    double-add bug class a looser match caused before (see Completed.md
+    #15's "chosen_variant" reasoning, same shape). Verified: constructed the
+    exact failure case directly (`_significant_words("Cork Massage Ball")` a
+    subset of the said-words vs. `_significant_words("Massage Gun")` NOT a
+    subset - correctly distinguishes them). Live, 5/5 fresh trials of the
+    exact reported sequence now correctly land on quantity 2 for the same
+    product, zero misresolutions to a different item.
+
+4a. **FIXED AND VERIFIED - the synthesis mechanism echoed the shopper's
+    entire raw message verbatim into the reply.** ("I need lightweight
+    running shoes under 5000 that are durable and comfortable." ->
+    "Given your focus on I need lightweight running shoes under 5000 that
+    are durable and comfortable., here's what's available..."). Root cause:
+    `_honest_synthesis`'s `cited_reason` validation (`mission_ranking.
+    any_term_mentioned`) only checked that the model's `cited_reason` field
+    *contained* a real stored term somewhere - it never required
+    `cited_reason` to actually *be* that short term, and the model is not
+    obliged to keep it short. The model echoed the shopper's whole sentence
+    as `cited_reason`; because that sentence happens to contain the real
+    word "lightweight", the check passed and the entire sentence was
+    substituted into the deterministic attribution template.
+
+    Fixed with a new `mission_ranking.matching_stated_term(text, terms)` -
+    returns the actual matched real term, not just whether one exists -
+    and `_honest_synthesis` now builds the attribution clause from that real
+    term instead of the model's own wrapper text. Also added a defense-in-
+    depth length guard in `_deterministic_personalized_reply` itself (falls
+    back to the plain sentence if a stored term is ever implausibly long).
+    Verified deterministically (the exact bug case, a genuine short
+    citation, and a dishonest citation all behave correctly) and live: the
+    exact reported sequence now reads "With durable being what you care
+    about here, here's what's available..." - natural, short, never the
+    echoed sentence.
+
+4b. **FIXED AND VERIFIED - a follow-up message that doesn't restate the
+    product (e.g. "Comfort is more important than durability.", "What would
+    you recommend?") produced "I couldn't turn anything up for that"**, even
+    though the exact same query had just succeeded two turns earlier in the
+    same conversation. Root cause, found by reading the actual mission-state
+    backfill code: `query` gets correctly backfilled from `mission_state.
+    goal` when the current turn leaves it blank (an existing, working
+    mechanism, `engine/execution/service.py` around the "comfort matters
+    more" comment) - but the divergence/weak-match checks that decide
+    whether to trust that query (`weak_single_word_match`/
+    `query_diverges_from_said`/`category_only_unverified`, all from the
+    kayak-substitution saga above) were comparing it only against THIS
+    turn's own raw words, which - for any turn that doesn't restate the
+    whole request - share nothing with it by construction. A perfectly
+    grounded, already-established mission was read as an invented proxy
+    term.
+
+    Fixed by widening the grounding text those three checks compare against
+    to also include the mission state's own stated goal/must-have/priority
+    words (not exclusions) whenever `mission_state` was read this turn -
+    strictly additional scrutiny on top of the existing trust already given
+    to `mission_state.goal` at the backfill point itself (which already
+    becomes `query` outright, unconditionally), so this cannot reopen an
+    invented-term case that trust boundary didn't already accept. Verified
+    live against the exact reported 4-turn sequence: turns 3 and 4 (the
+    previously-failing ones) now correctly return the real product instead
+    of declining.
+
+5a. **"Show me shoes" got an unnecessary "I couldn't confirm an exact match"
+    hedge on an obviously-correct match.** **Did not reproduce** on a fresh
+    session - 1/1 trial correctly returned 4 real, unhedged shoe options.
+    Most likely already resolved by the mission-state grounding fix (4b) or
+    an earlier round of the kayak saga; not independently re-diagnosed given
+    it did not reproduce.
+
+5b. **FIXED AND VERIFIED - "Why did you recommend this one?" (and similar
+    explanation questions) got a completely unrelated response** - a
+    category-menu offer, a variant-choice prompt, or a fresh, failed product
+    search, depending on the trial - never an actual answer to the "why"
+    question. Root cause: `ANSWER_PRODUCT_QUESTION` (an existing, no-
+    execution, conversational action type in this codebase) had no prompt
+    guidance at all telling the model when to propose it - confirmed by grep,
+    there was no "Propose ANSWER_PRODUCT_QUESTION when..." bullet anywhere in
+    `engine/reasoning/prompts.py`, unlike every other action type. Adding
+    that guidance alone was NOT sufficient (verified: 3/3 trials still
+    misrouted after the prompt-only fix) - consistent with this session's
+    established finding elsewhere that prompt-following alone is not
+    reliable enough for a routing decision this codebase already treats
+    deterministic detectors as necessary for (the generic-browse-phrase
+    detector, the mission-state backfill).
+
+    Fixed with a deterministic backstop instead: a small, closed-class
+    detector (`_looks_like_recommendation_why_question` in `engine/api/
+    chat.py`) recognizes a "why" question that references the act of
+    recommending/choosing/picking, and - before reasoning even runs -
+    answers directly from the real `fit` data (or, absent a mission-ranked
+    `fit`, the real title/description/price) already stored on the most
+    recent assistant turn's shown products. No model call for the answer
+    itself (`used_model: False`), and nothing not already a real, grounded
+    product field. Verified live across both a mission-ranked case (real
+    `fit` reasons) and a plain-browse case (no `fit`, falls back to
+    describing the real product instead of inventing a reason) - both now
+    answer correctly and instantly.
+
+6. **A shop that plainly doesn't carry something (Kettle, a coffee shop,
+   asked for a kayak) sometimes escalated to a human** rather than degrading
+   honestly. **Did not reproduce** - 0 of 6 fresh trials triggered
+   `ESCALATE_TO_HUMAN` or set `awaiting_person`; all correctly returned an
+   honest decline (occasionally, 1/6, an imperfect but harmless browse
+   fallback, the already-documented residual from the kayak saga above, not
+   escalation). Confirmed by reading `engine/decision/engine.py` that
+   `ESCALATE_TO_HUMAN` is a Decision-Engine fallback ("when nothing
+   survives"), not something the model proposes directly - so this was never
+   a promptable behavior to begin with, and its absence here is consistent
+   with the extensive kayak/relevance hardening earlier this session giving
+   the decision engine a real, non-empty option to select instead of falling
+   through to escalation.
+
+9. **FIXED AND VERIFIED - a direct yes/no availability question about one
+   named product got the generic multi-option RECOMMEND_PRODUCTS template**
+   ("Do you have Trailblazer Running Shoe?" -> "Here's what's available - 1
+   option:" plus a product card) instead of a direct, natural answer.
+   `CHECK_AVAILABILITY` already existed as a real action type doing exactly
+   this work (a real inventory check, a real yes/no summary) but had no
+   prompt guidance distinguishing it from RECOMMEND_PRODUCTS for this exact
+   phrasing shape. Added one guidance bullet. Verified live: the exact
+   reported question now returns "Yes, we have the Trailblazer Running Shoe
+   available..." via `CHECK_AVAILABILITY`, not the generic template. Only
+   prompt-only fixed (unlike 5b, no deterministic backstop was added) -
+   given this session's own finding that prompt-only fixes are not always
+   reliable, this should be re-verified across more trials before being
+   trusted as fully closed; flagged honestly rather than assumed solid from
+   one trial.
+
+**Verification run for this whole batch:** `fuzz.py` and `auditroutes.py`
+both re-run clean against the final restarted engine (see below for exact
+numbers). Manual invariant reasoning on each fix: 2b touches cart mutation
+directly, confirmed to only ever override `product_id` to another product
+ALREADY in the shopper's own cart (never invents or reaches across carts),
+never touches variant trust (`chosen_variant` still the only trusted variant
+source), and the increment mechanism itself was independently confirmed
+correct via a real tap before any reasoning-layer fix was even attempted. 4a,
+4b, 5b and 9 only affect which shopper-facing reply text is chosen or how a
+turn is routed among existing, already-risk-classified action types - none
+touch payment, checkout, risk classification, or cross-tenant/cross-shopper
+isolation. No dedicated `invariant-guard`/`value-auditor` pass has run against
+this batch - do not move any of it to Completed.md without one.
+
+**Item 8, "coffee taste-preference semantic matching" ("something smooth and
+not too bitter" repeating the same unhelpful browse fallback across four
+different phrasings) was independently reproduced by this real user testing
+but not re-investigated** - it is the already-documented, already-understood
+semantic relevance gap from the kayak/relevance saga above (a keyword-overlap
+system cannot match a taste description to a product with no shared literal
+word), not a new defect. The user's report is useful confirmation this is a
+real, live-felt limitation for an actual shopper, not just a synthetic test
+case - worth weighing when prioritizing whether to fund the "real semantic
+judgment" fix that gap has been waiting on since round 10.
+
+**Continuation of item 2b, found independently re-verifying the fork's own
+work: the fix above only covers the case where the model DOES propose
+`ADD_TO_CART` and resolves the wrong product - it does not cover "add X
+again" not reaching `ADD_TO_CART` at all.** Re-tested the exact re-add
+scenario end to end with a real cart (create cart -> add Cork Massage Ball
+-> ask to add it again): the second message was routed to `RECOMMEND_PRODUCTS`
+instead of `ADD_TO_CART`, `cart_changed: false`, quantity stayed at 1. This
+is a real, reproducible residual gap in item 2b, not a re-opening of it - the
+fix that exists is correct for what it targets (a resolved-but-wrong product
+id) and does nothing for a turn that never reaches the ADD_TO_CART branch in
+the first place. Not fixed this session - flagged honestly as the actual
+remaining scope of "re-adding an item doesn't work reliably," distinct from
+what the fork's own writeup above marked FIXED AND VERIFIED for the narrower
+case it actually tested.
+
+**EIGHTEENTH gap, found independently while re-verifying the fork's item
+2b fix, unrelated to what it was checking: a single-item add spuriously
+suggested a completely unmentioned second item.** Reproduced live: "add a
+Cork Massage Ball to my cart" (one item, nothing else named) got back "I can
+add the Cork Massage Ball to your cart... I can only add one item at a time
+right now, so I've queued Massage Gun as a suggestion" - a product the
+shopper never mentioned, invented from thin air as far as the shopper could
+tell. Root-caused in `_find_extra_items` (`engine/api/chat.py`): the function
+never excluded the title words of the item the turn is ALREADY handling
+before checking other catalog products for a match - "Cork Massage Ball" and
+"Massage Gun" share the single word "massage", so the handled item's own
+title word was double-counted as evidence a second, unrelated product was
+also named. 100% reproducible, no phrasing cleverness needed - the same
+"one shared generic word bought a false positive" shape the sixteenth kayak-
+gap fix closed elsewhere in this codebase, found here in a completely
+different function that never had that protection.
+
+Fixed by excluding the handled product's own significant title words from
+what counts as a match against any OTHER candidate, before applying the
+existing first-word/two-word-overlap heuristic. Verified: the exact
+reported case (Cork Massage Ball alone) no longer suggests Massage Gun;
+the genuine three-item case (Marathon Pro Racing Shoe / Cork Massage Ball /
+Massage Gun, none of which share a title word with each other) re-verified
+still correctly surfaces every named item with clear disclosure, unaffected
+by the exclusion since none of their titles overlap.
+
+**Verification for this session's full real-bug-fixing batch, re-run
+independently after the eighteenth-gap fix, on a freshly and cleanly
+restarted engine (no process interruption mid-run this time - two earlier
+attempts were invalidated by the same shared-environment/process-restart
+noise the fork itself flagged):** `auditroutes.py` - every probe held.
+`fuzz.py` - 20/20 sequences, 1200 assertions, every invariant held. Live
+spot-checks re-confirmed: 4a (no verbatim echo), 5b (why-question answered
+correctly, `used_model: false`), 9 (direct availability answer), 2a (three
+named items with a real cart, all three clearly accounted for), and the
+eighteenth-gap fix itself (no more spurious Massage Gun suggestion) all hold
+on a clean engine.
+
+No `invariant-guard`/`value-auditor` pass has run against this batch,
+including the eighteenth-gap fix - do not move any of items 2b/4a/4b/5b/9/18
+to `Completed.md` without one. Items 1, 2a (fully verified only with a real
+cart, not the exact reported no-cart transcript), 5a, and 6 did not
+reproduce and were not independently re-diagnosed - treat as "not currently
+observed," not "confirmed fixed."
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived

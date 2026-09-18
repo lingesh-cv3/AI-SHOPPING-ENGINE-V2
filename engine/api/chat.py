@@ -130,11 +130,34 @@ def _find_extra_items(
     if not catalog_sample or not message:
         return []
     said = message.lower()
+    # EIGHTEENTH-gap fix, found from real shopper testing: a single-item
+    # add ("add a Cork Massage Ball to my cart") spuriously suggested a
+    # completely unmentioned second item ("Massage Gun") - both titles
+    # share the word "massage", and the handled product's own title was
+    # never excluded from what counts as evidence a DIFFERENT product was
+    # also named. A word explained entirely by the item this turn already
+    # handled is not evidence the shopper named anything else - reproduced
+    # live, 100% reproducible with this exact pair, no phrasing cleverness
+    # needed. Excluded here rather than post-filtered by product id, since
+    # the false match is the WORD "massage" being double-counted, not a
+    # single stray product row.
+    handled_title_words: set[str] = set()
+    if handled_product_id:
+        for product in catalog_sample:
+            if product.product_id == handled_product_id:
+                handled_title_words = {
+                    w for w in product.title.lower().split() if len(w) > 3
+                }
+                break
     out = []
     for product in catalog_sample:
         if product.product_id == handled_product_id:
             continue
-        title_words = [w for w in product.title.lower().split() if len(w) > 3]
+        title_words = [
+            w
+            for w in product.title.lower().split()
+            if len(w) > 3 and w not in handled_title_words
+        ]
         if not title_words:
             continue
         first = title_words[0]
@@ -171,6 +194,15 @@ _ATTRIBUTION_TEMPLATES = [
 ]
 
 
+#: A stored priority/must-have/constraint phrase is, by the extraction
+#: prompt's own design, meant to be a short discrete item ("lightweight",
+#: "not waterproof"), never a restated sentence - but nothing enforces that
+#: at the storage layer, so this is a last, cheap defense-in-depth check,
+#: not the primary fix (that's `mission_ranking.matching_stated_term`
+#: returning the real term rather than the model's own wrapper text).
+_MAX_CITED_REASON_WORDS = 8
+
+
 def _deterministic_personalized_reply(cited_reason: str, fallback: str) -> str:
     """Build the personalized reply's causal clause ourselves, from the one
     field already checked against real `shopping_state` terms, instead of
@@ -178,7 +210,17 @@ def _deterministic_personalized_reply(cited_reason: str, fallback: str) -> str:
     in `_honest_synthesis` for why. `fallback` is always a short, plain,
     engine-written, fact-only sentence (e.g. "Here's how they compare."),
     so a clause can be safely prepended to it without needing to parse or
-    rewrite the model's prose."""
+    rewrite the model's prose.
+
+    `cited_reason` is expected to already be a real, short, stored term
+    (the caller passes `mission_ranking.matching_stated_term`'s result, not
+    the model's raw field - SEVENTEENTH gap). If a stored term is itself
+    implausibly long, the clause would read as robotically as the bug this
+    function exists to prevent, so an oversized term is treated as
+    unusable rather than used - the plain `fallback` alone, not a
+    misattribution risk, since nothing false is being claimed either way."""
+    if len(cited_reason.split()) > _MAX_CITED_REASON_WORDS:
+        return fallback
     template = _ATTRIBUTION_TEMPLATES[hash(cited_reason) % len(_ATTRIBUTION_TEMPLATES)]
     clause = template.format(reason=cited_reason)
     return clause + fallback[0].lower() + fallback[1:] if fallback else clause.rstrip()
@@ -300,7 +342,8 @@ def _honest_synthesis(
     # here (SEVENTH gap, above) - a valid citation is trusted on its own.
     if cited_reason:
         terms = mission_ranking.stated_terms(shopping_state)
-        if not mission_ranking.any_term_mentioned(cited_reason, terms):
+        matched_term = mission_ranking.matching_stated_term(cited_reason, terms)
+        if matched_term is None:
             logger.warning(
                 "synthesis cited a reason (%r) not among actual stored "
                 "terms (%r); falling back rather than trusting a false "
@@ -314,10 +357,24 @@ def _honest_synthesis(
         # `text` actually argues for that term rather than a different,
         # unstated one. Closed by never trusting the model to author the
         # causal-attribution sentence at all: it is built here, in code,
-        # from `cited_reason` alone, and the model's own free text is
+        # from a real stored term alone, and the model's own free text is
         # discarded rather than searched for a bypass that cannot be
         # enumerated away.
-        return _deterministic_personalized_reply(cited_reason, fallback)
+        #
+        # SEVENTEENTH gap: using the model's raw `cited_reason` string here
+        # (rather than `matched_term`, the actual real term it matched)
+        # reopened the same class of problem from a different angle - the
+        # model is not obliged to keep `cited_reason` short, and a mention-
+        # check passes just as easily when `cited_reason` is an entire
+        # multi-clause sentence that happens to contain a real word as when
+        # it is that word alone. Reproduced live: the shopper's own full
+        # message, echoed back whole as `cited_reason`, was substituted
+        # verbatim into the template. Using `matched_term` - the real,
+        # already-short phrase actually found in `terms` - instead of the
+        # model's wrapper text makes this structurally impossible: a stored
+        # term is never a restated sentence, whatever surrounds it in what
+        # the model sent.
+        return _deterministic_personalized_reply(matched_term, fallback)
     # No `cited_reason` offered this turn. If there is real stated state a
     # claim could misattribute, there is no longer any path that trusts
     # the free text anyway (SEVENTH gap, above) - `personalizes` is logged
@@ -338,6 +395,80 @@ def _honest_synthesis(
         "that cannot be verified as grounded"
     )
     return fallback
+
+
+#: BUG-5b fix: a small, closed-class signal that a shopper is asking WHY the
+#: assistant recommended something already shown, not naming a new product to
+#: search for. Deliberately narrow (the same "closed-class, not a per-example
+#: word list" philosophy the rest of this codebase already uses for its other
+#: deterministic detectors) - a message must both look like a "why" question
+#: AND explicitly reference the act of recommending/choosing, so an unrelated
+#: "why" question (about an order, a price, a policy) is not mis-answered
+#: with fit reasons for a product that has nothing to do with it.
+_RECOMMENDATION_REFERENCE_WORDS = (
+    "recommend", "recommended", "recommending",
+    "suggest", "suggested", "suggesting",
+    "pick", "picked", "picking",
+    "choose", "chose", "chosen", "choosing",
+)
+
+
+def _looks_like_recommendation_why_question(message: str) -> bool:
+    lowered = message.strip().lower().rstrip("?.!")
+    if not lowered.startswith("why"):
+        return False
+    if any(w in lowered for w in _RECOMMENDATION_REFERENCE_WORDS):
+        return True
+    # "why this?" / "why this one?" / "why that one?" - no verb, but an
+    # explicit enough reference to something just shown that a fresh product
+    # search would be the wrong response regardless.
+    return lowered in {"why this", "why this one", "why that one", "why that"}
+
+
+async def _deterministic_why_reply(
+    session_id: str, connection_id: str, message: str
+) -> str | None:
+    """Answer a "why did you recommend this" question directly from the real
+    `fit` data already computed and shown for the last recommendation - no
+    model call, and nothing not already grounded in a real product field.
+    Returns `None` (meaning: let the normal pipeline handle this turn) when
+    the message doesn't look like this kind of question, or when there is
+    nothing on record to answer it from - never fabricates a reason."""
+    if not _looks_like_recommendation_why_question(message):
+        return None
+    try:
+        recent = await session_store.turns(session_id, connection_id, limit=8)
+    except Exception:  # noqa: BLE001
+        logger.exception("could not read recent turns for a why-question; skipping")
+        return None
+    last_products: list[dict] = []
+    for turn in reversed(recent):
+        if turn.get("speaker") == "assistant" and turn.get("products"):
+            last_products = turn["products"]
+            break
+    if not last_products:
+        return None
+    lead = last_products[0]
+    title = lead.get("title", "this one")
+    if lead.get("fit"):
+        # A mission-ranked pick - the real reason it was chosen over the
+        # rest, not just described.
+        reply = f"I suggested the {title} because {'; '.join(lead['fit'])}."
+    else:
+        # No stated mission to rank against (a plain browse, e.g. "show me
+        # shoes") - there is no "chosen over the others" reason to give
+        # honestly, so this describes what the item actually is instead of
+        # inventing a justification that was never computed.
+        details = [d for d in (lead.get("description"), lead.get("price")) if d]
+        reply = f"{title} was shown as a real match for what you asked about"
+        if details:
+            reply += f" - {', '.join(str(d) for d in details)}"
+        reply += "."
+    if len(last_products) > 1:
+        others = ", ".join(p.get("title", "") for p in last_products[1:] if p.get("title"))
+        if others:
+            reply += f" The others shown ({others}) were there as alternatives, not a single top pick."
+    return reply
 
 
 def _unconfirmed_compare_items(message: str | None, comparison: list[dict]) -> list[str]:
@@ -735,6 +866,35 @@ async def _process_turn(
             speaker="shopper",
             text=req.message,
         )
+
+    # BUG-5b fix, found from real shopper testing (not synthetic phrasing):
+    # "Why did you recommend this one?" after a RECOMMEND_PRODUCTS turn was
+    # reliably (3/3 live trials, even after adding explicit prompt guidance
+    # for ANSWER_PRODUCT_QUESTION) still routed into a fresh RECOMMEND_PRODUCTS
+    # proposal by the model - "why" and "this" and "one" share no significant
+    # words with any real product, so it fell through to the generic browse/
+    # decline path, producing a reply about categories or "I couldn't turn
+    # anything up" in answer to a question that was never asking for a new
+    # search at all. Prompt-following alone was not reliable enough (the same
+    # class of gap the generic-browse-phrase detector and the mission-state
+    # backfill above already exist to close with a deterministic check rather
+    # than a prompt instruction alone) - handled the same way here: detected
+    # structurally, answered from data already computed and shown, no model
+    # call needed for the answer itself.
+    if not req.synthetic and not req.friction:
+        why_reply = await _deterministic_why_reply(req.session_id, req.connection_id, req.message)
+        if why_reply is not None:
+            await session_store.add_turn(
+                session_id=req.session_id,
+                connection_id=req.connection_id,
+                speaker="assistant",
+                text=why_reply,
+            )
+            return ChatReply(
+                reply=why_reply,
+                session_id=req.session_id,
+                used_model=False,
+            )
 
     # Commerce context. Best-effort: reasoning with less is better than a turn that
     # fails because a lookup did.

@@ -632,6 +632,13 @@ class ExecutionService:
                 # however active that mission still is; the same
                 # real-word floor the rescue search below already applies.
                 said_has_real_word = any(len(w) > 2 for w in said.split())
+                # Also read below (SEVENTEENTH-gap fix) by the divergence
+                # check that follows - kept in scope past this block rather
+                # than re-fetched, since a query this turn genuinely
+                # backfilled from here needs to be checked for grounding
+                # against the SAME state that supplied it, not only against
+                # this turn's own raw words.
+                mission_state = None
                 if (
                     action_type is ActionType.RECOMMEND_PRODUCTS
                     and not is_generic_browse_phrase
@@ -942,15 +949,55 @@ class ExecutionService:
                 # the category name itself, since a category label rarely
                 # shares literal words with ordinary phrasing even when
                 # correct ("shoes" vs "Footwear").
+                # SEVENTEENTH-gap fix: `raw_said` is this turn's own raw
+                # words only - correct for the semantic judge below
+                # (deliberately never the model's own paraphrase, so it
+                # cannot repeat the paraphrase's mistake), but wrong as the
+                # sole grounding source for the two checks just below, which
+                # exist to tell "the model invented this out of nothing"
+                # apart from "this is what was actually asked for". A query
+                # backfilled from `mission_state` a few lines up (real user
+                # report, reproduced live: turn 1 established "lightweight
+                # running shoes"; turn 3, "Comfort is more important than
+                # durability.", correctly carried that query forward with no
+                # product words of its own) was compared only against THIS
+                # turn's raw text, which - by construction, on any turn that
+                # doesn't restate the whole request - shares nothing with
+                # it. `weak_single_word_match`/`query_diverges_from_said`/
+                # `category_only_unverified` then read a perfectly grounded,
+                # already-established mission as an invented proxy term,
+                # producing `action_summary: '"lightweight running shoes" is
+                # not something this shop carries.'` for the exact query
+                # that had just succeeded two turns earlier in the same
+                # conversation. `mission_state.goal` is already fully
+                # trusted to become `query` outright at the backfill point
+                # above with no verification at all - checking these gates
+                # against it too is strictly more scrutiny than that
+                # existing trust level, never less, so this cannot reopen an
+                # invented-term case that trust boundary did not already
+                # accept. Union in the mission's own stated goal/must-have/
+                # priority words (not exclusions - a shopper explicitly
+                # ruling something out is not evidence the query is
+                # grounded) as additional valid grounding, on top of - not
+                # instead of - this turn's own raw words.
+                grounding_said = raw_said
+                if mission_state:
+                    _mission_terms = " ".join(
+                        [str(mission_state.get("goal") or "")]
+                        + list(mission_state.get("must_have") or [])
+                        + list(mission_state.get("priorities") or [])
+                    ).strip()
+                    if _mission_terms:
+                        grounding_said = f"{raw_said} {_mission_terms}"
                 category_only_unverified = (
                     bool(category)
                     and not query
                     and bool(candidates)
-                    and not relevance.best_matches_with_score(candidates, raw_said)[1]
+                    and not relevance.best_matches_with_score(candidates, grounding_said)[1]
                 )
                 if candidates and (
                     relevance.weak_single_word_match(query, match_score)
-                    or relevance.query_diverges_from_said(query, raw_said, candidates)
+                    or relevance.query_diverges_from_said(query, grounding_said, candidates)
                     or category_only_unverified
                 ):
                     wide_sample = await _full_catalog_sample(adapter)
@@ -1519,6 +1566,68 @@ class ExecutionService:
                         error_code="VALIDATION_ERROR",
                         final_state=str(CaseState.FAILED),
                     )
+
+                # BUG-2b fix, found from real shopper testing: a shopper
+                # asking to add a product a SECOND time ("add the Cork
+                # Massage Ball to my cart again") does not reliably get
+                # `product_id` resolved correctly by the model - reproduced
+                # live, 2 of 4 trials resolved it to a different, similarly-
+                # worded product already sharing no real name overlap
+                # (Massage Gun, because it shares the word "massage" with
+                # the actually-named Cork Massage Ball) rather than
+                # incrementing the item the shopper actually asked to add
+                # again. The increment mechanism itself is correct once the
+                # right product_id reaches it (verified directly via a
+                # trusted tap: quantity 1 -> 2) - this is purely a model
+                # product-resolution reliability gap, the same shape as
+                # invariant 4's "a tap is trusted, the model's guess is not",
+                # applied here to a real, already-known cart line instead of
+                # a variant tap. If the shopper's own raw words are a real,
+                # near-exact citation of a DIFFERENT product already sitting
+                # in this exact cart (not the one the model chose), that
+                # already-known real line is trusted over a fresh, possibly
+                # wrong model guess - deliberately narrow (near-exact title
+                # match only, never a partial/fuzzy one) to avoid reopening
+                # the double-add bug class a fuzzy match caused before (see
+                # `chosen_variant` above, same reasoning).
+                said_for_resolution = str(params.get("said") or "").strip()
+                if said_for_resolution and case.cart_id:
+                    try:
+                        current_cart = await adapter.get_cart(case.cart_id)
+                    except CommerceError:
+                        current_cart = None
+                    if current_cart and current_cart.lines:
+                        said_words = set(relevance._significant_words(said_for_resolution))
+                        for line in current_cart.lines:
+                            if line.product_id == product_id:
+                                continue
+                            # The direction matters: this checks whether the
+                            # REAL, FULL title of an already-known cart line
+                            # is entirely contained in what the shopper said
+                            # - not whether the shopper's words are a near-
+                            # exact citation of it. Those are different
+                            # checks with different failure modes; the
+                            # "citation" check elsewhere in this codebase
+                            # (relevance.py) is built for a short, narrow
+                            # search query, not a full raw sentence, and
+                            # comparing a whole sentence against it that way
+                            # would never match (too many extra words on the
+                            # sentence side). Requiring at least 2 real title
+                            # words, all present, keeps this from firing on
+                            # a single generic word a product title happens
+                            # to share with the sentence.
+                            title_words = set(relevance._significant_words(line.title))
+                            if len(title_words) >= 2 and title_words <= said_words:
+                                logger.info(
+                                    "ADD_TO_CART: overriding model's product_id "
+                                    "%r with %r - the shopper's own words fully "
+                                    "name an existing cart line the model's "
+                                    "guess did not match",
+                                    product_id,
+                                    line.product_id,
+                                )
+                                product_id = line.product_id
+                                break
 
                 product = await adapter.get_product(product_id)
                 buyable = [

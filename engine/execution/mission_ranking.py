@@ -404,3 +404,31 @@ def any_term_mentioned(text: str, terms: list[str]) -> bool:
         return False
     lowered = text.lower()
     return any(_matches(lowered, term) for term in terms)
+
+
+def matching_stated_term(text: str, terms: list[str]) -> str | None:
+    """The actual real, stored term `text` mentions - not just whether one
+    exists (`any_term_mentioned`), but which one, so a caller can use the
+    real short phrase instead of trusting whatever surrounding text the
+    model wrapped it in.
+
+    SEVENTEENTH-gap fix (`engine/api/chat.py::_deterministic_personalized_reply`):
+    `any_term_mentioned` only proves the model's `cited_reason` CONTAINS a
+    real term somewhere - it does not require `cited_reason` to BE that
+    term, and the model is not obliged to keep it short. Reproduced live:
+    a shopper's own multi-clause message ("I need lightweight running
+    shoes under 5000 that are durable and comfortable.") was echoed back
+    whole as `cited_reason`, and because it happens to contain the real
+    stored word "lightweight", the mention-check passed and the entire
+    sentence was substituted verbatim into the attribution template -
+    "Given your focus on I need lightweight running shoes under 5000 that
+    are durable and comfortable., here's what's available...". Returning
+    the matched real term itself, rather than the caller's untrusted
+    wrapper text, structurally cannot produce this: a stored term is
+    always the short phrase a shopper or the extraction step actually
+    captured, never an entire restated sentence."""
+    lowered = text.lower()
+    for term in terms:
+        if _matches(lowered, term):
+            return term
+    return None
