@@ -312,6 +312,49 @@ def _is_real_title_citation(query_words: set[str], candidates: list[Product]) ->
     return False
 
 
+#: Deliberately narrow, closed-class phrases (the same philosophy as
+#: `_STOPWORDS`/`_GENERIC_ACTION_VERBS` above) that explicitly rule OUT a
+#: product a shopper's message otherwise appears to name - not a general
+#: negation parser, just the handful of ways a shopper actually says "not
+#: this one" in an active shopping conversation.
+_EXCLUSION_PHRASES = ("different from", "not the", "other than", "instead of")
+
+
+def mentions_explicit_exclusion_of(said: str, title: str) -> bool:
+    """True when `said` explicitly rules out the product named by `title` -
+    e.g. "something different from the Trailblazer" - rather than asking
+    for more of it.
+
+    Found live, adversarially: a re-add/repeat-signal match ("another") can
+    coincidentally fire on a message that is actually asking for a
+    DIFFERENT product than the one already in the cart ("can you also add
+    another running shoe, something different from the trailblazer, maybe
+    a trail shoe") - the shared word "another" plus the cart line's own
+    title words being present is not enough to override an explicit
+    "different from X" naming that exact line. Checked by requiring one of
+    a short, closed set of exclusion phrases to appear immediately before a
+    near-full mention of the title's own significant words - not a general
+    negation parser, since that would be its own large, error-prone
+    undertaking; this only needs to catch the shopper explicitly ruling out
+    the one product a repeat-signal match already found.
+    """
+    lowered = said.lower()
+    title_words = _significant_words(title)
+    if len(title_words) < 2:
+        return False
+    for phrase in _EXCLUSION_PHRASES:
+        idx = lowered.find(phrase)
+        if idx == -1:
+            continue
+        # The exclusion only counts if it is followed, within a short
+        # window, by the actual title it is excluding - "different from
+        # the trailblazer" - not an unrelated "different from usual".
+        window = lowered[idx : idx + len(phrase) + 60]
+        if sum(1 for w in title_words if w in window) >= 2:
+            return True
+    return False
+
+
 def query_diverges_from_said(
     query: str, raw_said: str, candidates: list[Product] | None = None
 ) -> bool:

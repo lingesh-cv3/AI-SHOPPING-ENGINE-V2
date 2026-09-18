@@ -1959,6 +1959,72 @@ running engine with no process interruption mid-run. Not moved to
 Completed.md - no `invariant-guard`/`value-auditor` pass has run against
 either `180e0fa` or `8afdbcf` yet.
 
+**A dedicated adversarial audit of `180e0fa` found it PARTIAL, not FIXED,
+with one concrete gap distinct from what that commit itself verified: the
+variant-passthrough only reaches the minority of re-add phrasings that
+trigger `_deterministic_readd_action`'s direct-execution path (a full,
+literal title-word match). The majority of natural re-add phrasings
+("add another one of those", "one more of the same shoe") name the
+product by pronoun, never match `_find_readd_target`'s strict title
+check, and instead reach the model-driven `PROPOSE_CART_CHANGE` path -
+where the created proposal's own `variant_id` was left null even when the
+model correctly resolved `product_id` to a product already in the cart
+with exactly one variant, so accepting the proposal re-asked a size
+question the shopper had already answered in this same cart. Also found,
+same audit: a secondary false-positive where "...something different
+from the trailblazer..." still matched the Trailblazer as a re-add
+target purely because "another" and the title's own words were both
+present, ignoring the explicit exclusion.**
+
+Both closed in one follow-up:
+
+- **Proposal-path variant fill** (`engine/execution/service.py`,
+  `ActionType.PROPOSE_CART_CHANGE`): when the model's own `params` didn't
+  specify a `variant_id` and the change is an `ADD`, the real cart is
+  checked for existing lines matching the resolved `product_id` - if
+  exactly one distinct variant of that product is already in the cart,
+  the proposal is created with that real variant filled in rather than
+  left null. Deliberately conservative: never guesses among multiple
+  different variants already in the cart, never overrides a variant the
+  model did specify. `accept_proposal` (`engine/api/chat.py`) already
+  correctly forwarded a proposal's own `variant_id` as `chosen_variant`
+  before this fix - that half only needed the proposal to actually carry
+  a real value, not a code change of its own.
+- **"Different from X" exclusion guard** (new
+  `relevance.mentions_explicit_exclusion_of`, shared and reused by both
+  `_find_readd_target`'s direct-execution path and available for the
+  proposal path): a small, closed-class phrase set
+  ("different from"/"not the"/"other than"/"instead of") checked for
+  proximity to the very product's title words a repeat-signal match is
+  about to fire on - if present, that line is skipped rather than
+  treated as a re-add target, falling through to normal handling instead.
+
+Verified: direct-execution path re-confirmed with 3 fresh tests against a
+real tap-seeded, sized Trailblazer Running Shoe - two ordinary re-add
+phrasings correctly incremented quantity (1->2 both times, fresh carts),
+and the exclusion-guard phrasing correctly did NOT increment (fell
+through to `RECOMMEND_PRODUCTS` instead). The proposal-path variant-fill
+logic itself was verified by direct code tracing (the exact real-cart
+`CartLine` shape the new code reads, and `accept_proposal`'s existing,
+unchanged `variant_id` -> `chosen_variant` forwarding) rather than a full
+live model-routed end-to-end run: live re-testing of pronoun-based
+re-add phrasings this session was confounded by this shopping engine's
+own SQLite dev database having accumulated a very large number of test
+carts and proposals across the many rounds of this session's own
+testing, making it unreliable to isolate one fresh proposal's real
+before/after state from a `GET /api/chat/proposals` response cleanly
+within the time available - noted honestly rather than papered over with
+an untrustworthy number. `fuzz.py` (1200 assertions, every invariant
+held) and `auditroutes.py` (every probe held) both clean on an
+uninterrupted engine run.
+
+Not moved to Completed.md - no `invariant-guard`/`value-auditor` pass has
+run against this fix, and the proposal-path variant-fill specifically
+still wants a clean, isolated live re-test (fresh demo database or a
+tighter test harness that doesn't share state with dozens of prior test
+runs) before being trusted as fully proven end to end, even though the
+code path itself is straightforward and traced correctly.
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived

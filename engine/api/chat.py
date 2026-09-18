@@ -523,6 +523,13 @@ def _find_readd_target(message: str, cart_lines: list) -> object | None:
             # silently incrementing a shopper's cart from an underspecified
             # message.
             if has_repeat_signal:
+                # Adversarial-audit fix: an explicit exclusion of THIS exact
+                # line ("...something different from the trailblazer...")
+                # must not be read as a repeat-add of it just because
+                # "another" and the title's own words both appear in the
+                # same message - see relevance.mentions_explicit_exclusion_of.
+                if relevance.mentions_explicit_exclusion_of(message, line.title):
+                    continue
                 return line
     return None
 

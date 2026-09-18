@@ -1734,6 +1734,46 @@ class ExecutionService:
                     evidence.append(f"declared compatible with {replaces_id}")
                 if product.compare_at_price and product.price:
                     evidence.append("currently discounted from the usual price")
+                # Adversarial-audit fix, second path: the direct-execution
+                # re-add backstop (chat.py's `_deterministic_readd_action`)
+                # already trusts an existing cart line's own `variant_id`
+                # for an explicit "add it again"-style message, but most
+                # natural repeat phrasings ("add another one of those", "one
+                # more of the same shoe") don't literally name the product
+                # by title and so never reach that direct-execution path at
+                # all - they reach here instead, via a normal model-proposed
+                # PROPOSE_CART_CHANGE, with the model's own `variant_id`
+                # param left empty because pronoun-based phrasing gives it
+                # nothing to fill it with. Left as None, accepting this
+                # proposal later re-asks "which size?" from scratch even
+                # though the shopper already has exactly one variant of this
+                # exact product in this exact cart - reproduced live, 9/10
+                # fresh re-add phrasings. If the model already resolved
+                # `product_id` to a product that has exactly one variant
+                # already in this cart, and the model did not itself specify
+                # a variant, default to that one real, already-known variant
+                # instead of leaving it for the shopper to re-choose from
+                # scratch - the same "an already-known real cart line beats
+                # an unspecified guess" reasoning already applied to the
+                # direct-execution path, extended here to the proposal path.
+                # Deliberately conservative: only fires when the product has
+                # exactly one distinct variant already in this cart (never
+                # guesses among several), and never overrides a variant the
+                # model DID specify.
+                variant_id = params.get("variant_id")
+                if not variant_id and change_type == "ADD":
+                    try:
+                        current_cart = await adapter.get_cart(case.cart_id)
+                    except CommerceError:
+                        current_cart = None
+                    if current_cart and current_cart.lines:
+                        matching_variants = {
+                            line.variant_id
+                            for line in current_cart.lines
+                            if line.product_id == product_id and line.variant_id
+                        }
+                        if len(matching_variants) == 1:
+                            variant_id = next(iter(matching_variants))
                 proposal = await db.cart_proposals.create(
                     connection_id=case.connection_id,
                     session_id=case.session_id or "",
@@ -1741,7 +1781,7 @@ class ExecutionService:
                     cart_id=case.cart_id,
                     change_type=change_type,
                     product_id=product_id,
-                    variant_id=params.get("variant_id"),
+                    variant_id=variant_id,
                     quantity=quantity,
                     replaces_product_id=replaces_id,
                     reason=str(params.get("proposal_reason") or "suggested based on your cart"),
