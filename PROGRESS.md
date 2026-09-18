@@ -1871,6 +1871,94 @@ lesson that a fix's first "N/N clean" batch has usually undersampled the
 actual failure shape, treat this as a real, substantial improvement -
 not a closed, audited guarantee - until that pass happens.
 
+**A dedicated adversarial audit of both the nineteenth and twentieth gap
+fixes (5aa01bd) found each PARTIALLY FIXED - real progress, and each with
+a precise, reproducible residual, not a re-opening of either round's own
+"N/N clean" numbers by luck. Two follow-up fixes closed both residuals,
+plus one unrelated pre-existing crash the investigation happened to
+surface first.**
+
+- **Nineteenth-gap residual (`180e0fa`): the re-add backstop dropped
+  `target.variant_id`.** For a single-variant product (the commit's own
+  worked example, Cork Massage Ball) this made no difference; for any
+  multi-variant product already in the cart - the majority shape in a
+  real footwear/apparel catalogue - re-dispatching without a variant
+  always landed on `needs_choice`, dead-ending at "which option would
+  you like?" instead of ever incrementing quantity. Reproduced 9/10 on
+  fresh phrasings against a sized shoe. Fixed by passing
+  `target.variant_id` through as `chosen_variant` - the real, already-
+  existing cart line's own variant, trusted the same way a real tap's
+  variant already is, not a model guess. Verified via a real tap-seeded
+  cart (a free-text setup message does not reliably resolve a size on
+  its own, so this needed the actual tap endpoint to test correctly):
+  three different re-add phrasings against a sized Trailblazer Running
+  Shoe correctly incremented quantity 1 -> 2 -> 3 -> 4, same variant
+  throughout. Both standing adversarial guards re-confirmed clean.
+
+- **Twentieth-gap residual (`8afdbcf`): "do you sell energy drinks?" -
+  reported directly by a user, not constructed - still substituted all
+  4 real coffees dressed as an answer.** Took three rounds of reasoning
+  from the code alone to mislocate before live debug tracing found the
+  real culprit: not `judge_best_match`, not `judge_relevance` (both
+  structurally sound, confirmed again by this investigation), but
+  `relevance.shop_carries` itself - a plain deterministic function that
+  predates this session's relevance-honesty work entirely and had never
+  been touched by any of the sixteen false-substitution rounds. It
+  returned `True` for "energy drinks" because the word "drink" (stemmed
+  from "drinks") appears verbatim in one unrelated product's marketing
+  copy ("Roaster's Choice Subscription": "We pick, you drink. Cancel
+  whenever.") - a single coincidental word in a full-text fallback loose
+  enough to make an unrelated shop appear to "carry" nearly anything
+  asked about, the identical shape this whole saga has repeatedly found
+  and closed elsewhere, just in a function none of those rounds reached.
+  Fixed by excluding a small, closed-class list of generic consumption/
+  desire verbs ("drink"/"eat"/"use"/"try"/"enjoy"/"buy"/"want"/"need")
+  from being sufficient alone in `shop_carries`'s full-text fallback -
+  not added to the general stopword list, since these remain legitimate
+  search words elsewhere (a genuine "what can I drink here" still works
+  via the category/title checks that run first).
+
+  Explicitly considered and rejected: adding a decline whenever
+  `judge_best_match` returns no pick. Its own prompt correctly returns
+  "no match" both when nothing fits AND when several real options fit
+  equally well with nothing standing out - collapsing those two into one
+  decline signal would have broken legitimate broad-browse requests
+  ("what coffee do you have?"). The actual defect was one level up, in
+  `shop_carries` skipping the judge entirely once it wrongly said yes.
+
+  Verified: 3 direct deterministic cases (energy drinks -> False, fruity
+  coffee still -> True via the same Swiss Water Decaf description,
+  coffee bean -> True). Live, Kettle: "do you sell energy drinks?" 5/5
+  honest decline (was 5/5 false substitution); "do you sell shoes?",
+  "any board games?", "do I get a phone charger here?", "do you have
+  tea?", "can I get a sandwich" all still honestly decline; "a fruity
+  coffee" unaffected 5/5; "something smooth and not too bitter" now
+  returns a specific judge-confirmed match rather than the generic
+  list - an unplanned improvement, from correctly routing through the
+  already-built `judge_best_match` mechanism this fix stopped bypassing.
+
+- **A genuinely unrelated, pre-existing crash found live while verifying
+  the above, fixed in the same commit (`8afdbcf`) since the investigation
+  happened to be instrumenting the exact code it lives in:** "do you have
+  oat milk?" on Kettle raised a raw 500
+  (`UnboundLocalError: wide_products`). `if query and not relevant:` is a
+  SIBLING of `if not titles and action_type is ActionType.RECOMMEND_PRODUCTS:`
+  (identical indent level, not nested inside it) - so `wide_products`,
+  only ever assigned inside that RECOMMEND_PRODUCTS-only block, was
+  genuinely unset for any `SUGGEST_ALTERNATIVE` turn reaching this line.
+  Not introduced by anything in this session's relevance-honesty chain -
+  a real, independent, previously-undiscovered defect this investigation
+  happened to be the first thing to actually exercise. Fixed with the
+  same lazy-fetch pattern already used to build `wide_products` in the
+  first place. Verified: 5/5 clean 200 responses with an honest decline
+  on the exact previously-crashing input.
+
+`fuzz.py` (1200 assertions, every invariant held) and `auditroutes.py`
+(every probe held) both clean after both follow-up fixes, on a cleanly
+running engine with no process interruption mid-run. Not moved to
+Completed.md - no `invariant-guard`/`value-auditor` pass has run against
+either `180e0fa` or `8afdbcf` yet.
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived
