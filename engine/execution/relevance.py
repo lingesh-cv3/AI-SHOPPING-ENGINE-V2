@@ -67,6 +67,25 @@ _STOPWORDS = frozenset(
     }
 )
 
+#: NINETEENTH-gap fix: generic call-to-action/consumption verbs that appear
+#: in almost any product's marketing copy regardless of category ("we pick,
+#: you drink", "use daily", "try it today") - too weak, on their own, to
+#: establish `shop_carries`'s "does this shop carry anything like this"
+#: floor. Deliberately narrower than `_STOPWORDS` (these are real, useful
+#: search words in other contexts - a shopper asking "what can I drink
+#: here" should still work via the category/title checks that run before
+#: this exclusion applies) - excluded only from being SUFFICIENT by
+#: themselves in `shop_carries`'s broad full-product-text fallback, the one
+#: check loose enough that a single coincidental verb match can make an
+#: unrelated shop appear to "carry" nearly anything asked about.
+_GENERIC_ACTION_VERBS = frozenset(
+    {
+        "drink", "drinks", "eat", "eats", "use", "uses", "wear", "wears",
+        "try", "tries", "enjoy", "enjoys", "buy", "buys", "want", "wants",
+        "need", "needs",
+    }
+)
+
 
 def _significant_words(text: str) -> list[str]:
     # Punctuation is stripped here, not just for the stopword check below -
@@ -412,7 +431,28 @@ def shop_carries(query: str, catalog_sample: list) -> bool:
     # sample, not just the categories - a real match one word off from the
     # narrow keyword search's own match (already handled above by title) can
     # still show up in a product's description even when no category names it.
-    return any(_overlap(words, _product_text(p)) > 0 for p in catalog_sample)
+    #
+    # NINETEENTH-gap fix: found live, reported directly - "do you sell
+    # energy drinks?" on Kettle (a coffee roaster) returned True here,
+    # because "you drink" appears verbatim in one product's marketing copy
+    # ("We pick, you drink. Cancel whenever.") and `_overlap`'s substring
+    # check counted that as a real match for the query word "drinks". This
+    # is not evidence the shop carries anything remotely like "energy
+    # drinks" - it is a generic call-to-action verb ("drink"/"eat"/"use"/
+    # "try"/"enjoy"/"get"/"buy"/"have"/"want"/"need") that appears in
+    # almost any product's marketing copy regardless of what the product
+    # actually is, and on its own in a single-word fallback this weak, it
+    # can make an unrelated shop "carry" nearly anything a shopper asks
+    # for as long as the word also happens to double as an ordinary verb.
+    # Excluded here, not from the general stopword list, since these are
+    # real, legitimate SEARCH words elsewhere (a shopper asking "what can
+    # I drink here" should still work via the category/title checks above)
+    # - only excluded from being sufficient, by themselves, to establish
+    # this specific "does the shop carry this at all" floor.
+    generic_words = [w for w in words if w not in _GENERIC_ACTION_VERBS]
+    if not generic_words:
+        return False
+    return any(_overlap(generic_words, _product_text(p)) > 0 for p in catalog_sample)
 
 
 def _categories_of(p: Product | dict) -> list[str]:

@@ -1107,6 +1107,31 @@ class ExecutionService:
                         if best_match is not None:
                             candidates = [best_match]
                             semantic_match_confirmed = True
+                        else:
+                            # Found live, reported directly: "do you sell
+                            # energy drinks?" on Kettle - the narrow adapter
+                            # search for the model's proxy query ("coffee")
+                            # found real hits (Kettle's own catalog text
+                            # happens to contain the word "coffee"), so this
+                            # is the branch it actually took, not the
+                            # sibling wide-fallback branch below. The coarse
+                            # `_shop_carries_semantic` verdict said
+                            # "plausible" here too readily; asked the
+                            # sharper question ("does any real candidate
+                            # actually fit"), the best-match judge found
+                            # nothing - the same, stronger signal the
+                            # sibling fix below now honours. Previously left
+                            # `candidates` as the stale weak-match survivor
+                            # set, so the shopper still saw an unrelated
+                            # product list dressed as an answer even after
+                            # the more specific judge said no. Reject
+                            # outright instead, the same shape the sibling
+                            # `semantic_carries is False` branch above
+                            # already uses.
+                            candidates = []
+                            relevant = []
+                            weak_match_rejected = True
+                            weak_match_uncertain = False
 
                 if top_rated:
                     # Never invented: a product with no rating on this platform
@@ -1241,7 +1266,31 @@ class ExecutionService:
                     # unfiltered-browse substitution path - never the
                     # narrower keyword-matched result above, which already
                     # found something real.
-                    if query and not relevant:
+                if query and not relevant:
+                        # PRE-EXISTING crash, found live while verifying the
+                        # NINETEENTH-gap fix ("do you have oat milk?" on
+                        # Kettle, classified SUGGEST_ALTERNATIVE): this `if`
+                        # is a SIBLING of the `if not titles and action_type
+                        # is ActionType.RECOMMEND_PRODUCTS:` block above (same
+                        # indent level), not nested inside it - so
+                        # `wide_products`, only ever assigned inside that
+                        # RECOMMEND_PRODUCTS-only block, was genuinely unset
+                        # here for any SUGGEST_ALTERNATIVE turn that reaches
+                        # this line, raising `UnboundLocalError` and turning
+                        # what should be a graceful decline into a raw 500.
+                        # Not introduced by anything in this session's
+                        # relevance-honesty chain - a real, independent,
+                        # previously-undiscovered defect this diff happened
+                        # to be the first thing to actually exercise this
+                        # exact combination live. Fixed the same lazy-fetch
+                        # way `wide_products` is already built above -
+                        # reusing `wide_sample` if this turn already fetched
+                        # it, otherwise fetching once here.
+                        wide_products = (
+                            wide_sample
+                            if wide_sample is not None
+                            else await _full_catalog_sample(adapter)
+                        )
                         # ELEVENTH gap, found live re-testing the TENTH-gap
                         # fix: this deterministic gate used to check `query`
                         # (the model's own proxy term, e.g. "water bottle")
@@ -1327,6 +1376,34 @@ class ExecutionService:
                                     candidates = [best_match]
                                     titles = [best_match.title]
                                     semantic_match_confirmed = True
+                                else:
+                                    # Found live, reported directly: "do you
+                                    # sell energy drinks?" on Kettle. The
+                                    # shop-plausibility judge above
+                                    # (`_shop_carries_semantic`) is a coarse,
+                                    # loosely-worded check ("does this shop
+                                    # plausibly carry a category of thing
+                                    # like this") and can say True too
+                                    # readily; the best-match judge just
+                                    # above is asked the sharper question
+                                    # ("does any REAL candidate actually
+                                    # fit this description") and returning
+                                    # None here means it looked at the same
+                                    # real candidates and found not one of
+                                    # them genuinely matches. That is
+                                    # stronger, more specific evidence of
+                                    # "does not carry this" than the coarse
+                                    # judge's own "plausible" verdict, not
+                                    # weaker - falling through to "show all
+                                    # of them anyway" (the old behaviour)
+                                    # dressed a plain unrelated-category
+                                    # request as if it were answered, the
+                                    # identical dishonesty this whole
+                                    # relevance-honesty chain of fixes
+                                    # exists to close. Decline honestly
+                                    # instead, the same as the coarse
+                                    # judge's own False branch just below.
+                                    titles = []
                             else:
                                 titles = []
 
