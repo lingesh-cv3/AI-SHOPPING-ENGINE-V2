@@ -59,3 +59,9 @@ what*.py
 list*.py
 
 !testshopper.py
+
+# Shopper V2's permanent regression suite - deliberately tracked despite
+# matching test*.py above. Not one-off scratch: these are the Stage 1
+# false-substitution/false-decline/state-transition/tenant-isolation checks
+# a spec explicitly requires to persist as the permanent regression suite.
+!tests/shopper_v2/*.py
