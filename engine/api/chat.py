@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 from engine import db
 from engine import session as session_store
 from engine.execution import events as shopper_events
-from engine.execution import mission_ranking
+from engine.execution import mission_ranking, relevance
 from engine.execution import return_risk
 from engine.reasoning import cart_intent, explicit_extraction
 from engine.notify import confirm_order
@@ -469,6 +469,105 @@ async def _deterministic_why_reply(
         if others:
             reply += f" The others shown ({others}) were there as alternatives, not a single top pick."
     return reply
+
+
+#: NINETEENTH-gap fix, found from real shopper testing: an explicit repeat-
+#: add request ("add the Cork Massage Ball to my cart again") reliably (5/5
+#: live trials) got routed to `PROPOSE_CART_CHANGE` instead of `ADD_TO_CART`
+#: - the model, faced with a product already sitting in the cart, chose to
+#: ask "want me to add X?" rather than just doing it, even though the
+#: shopper's own words were an explicit, unambiguous instruction, not a
+#: suggestion for the assistant to make. `PROPOSE_CART_CHANGE`'s own prompt
+#: guidance ("when you want to suggest... rather than just doing it") gives
+#: the model no signal that an explicit repeat request is not this case -
+#: and per this session's own established finding (the "why" backstop
+#: above, the generic-browse-phrase detector, the mission-state backfill),
+#: prompt guidance alone is not reliable enough for a routing decision this
+#: codebase already treats deterministic detectors as necessary for.
+#: Deliberately narrow: fires only on an explicit add-again signal ("again",
+#: "another", "one more", or a bare repeated "add X") naming a product that
+#: is ALREADY a real, near-fully-matching line in the CURRENT cart - never
+#: for a genuinely new product, which still goes through the ordinary
+#: reasoning/ADD_TO_CART path unchanged.
+_REPEAT_ADD_WORDS = ("again", "another", "more", "once more", "one more")
+
+
+def _find_readd_target(message: str, cart_lines: list) -> object | None:
+    """The one existing cart line the shopper's own words both (a) name via
+    a near-full title match and (b) explicitly ask to add - never a fuzzy
+    or partial match, the same strict discipline already established for
+    the sibling ADD_TO_CART product-resolution override in
+    `engine/execution/service.py` (BUG-2b fix), extended here to deciding
+    the ACTION TYPE itself rather than which product an already-chosen
+    ADD_TO_CART resolves to.
+
+    Deliberately does NOT also require an "add"/"cart" word in the message
+    - found live that this excluded a real, unambiguous case ("one more
+    Cork Massage Ball please", no literal "add" or "cart"). The repeat
+    signal ("again"/"another"/"more") combined with a full, real title
+    match already narrows this enough on its own: those two things
+    together, in an active shopping conversation, do not have a plausible
+    reading other than "add one more of this"."""
+    if not cart_lines:
+        return None
+    lowered = message.lower()
+    has_repeat_signal = any(w in lowered for w in _REPEAT_ADD_WORDS)
+    said_words = set(relevance._significant_words(message))
+    for line in cart_lines:
+        title_words = set(relevance._significant_words(line.title))
+        if len(title_words) >= 2 and title_words <= said_words:
+            # A bare "add X" with no repeat word, naming something already
+            # in the cart, is ambiguous (did they mean to add a second one,
+            # or forget it's already there?) - only the explicit repeat
+            # signal is trusted to mean "yes, another one", to avoid ever
+            # silently incrementing a shopper's cart from an underspecified
+            # message.
+            if has_repeat_signal:
+                return line
+    return None
+
+
+async def _deterministic_readd_action(
+    *, connection_id: str, session_id: str, cart_id: str, message: str, cart_lines: list
+):
+    """Execute an explicit repeat-add directly through the ordinary Decision
+    Engine and Risk Gate - the same `_run_trusted_cart_action` path a
+    shopper's own tap or proposal-accept uses - rather than depending on the
+    model to propose ADD_TO_CART for a case it has been shown not to. Only
+    the ACTION TYPE and PRODUCT are decided deterministically; execution
+    itself still goes through the full pipeline, so a merchant policy or
+    risk classification change would still apply exactly as it would to any
+    other ADD_TO_CART. Returns `None` (let the normal pipeline run) when the
+    message doesn't match, never when it does and something goes wrong -
+    a real failure still gets a real answer instead of silently falling
+    through to a possibly-wrong model guess."""
+    target = _find_readd_target(message, cart_lines)
+    if target is None:
+        return None
+    executed, case_id, awaiting = await _run_trusted_cart_action(
+        connection_id=connection_id,
+        session_id=session_id,
+        cart_id=cart_id,
+        action_type=ActionType.ADD_TO_CART,
+        parameters={"product_id": target.product_id, "said": message},
+        rationale=f"Shopper explicitly asked to add {target.title} again; it is already a real line in this cart.",
+    )
+    if awaiting:
+        return "That needs someone at the shop to approve first - I've passed it on.", False, []
+    if executed is None:
+        return None
+    if executed.needs_choice:
+        return (
+            f"{target.title} has more than one option - which would you like?",
+            False,
+            executed.choices or [],
+        )
+    if not executed.succeeded:
+        # A real failure (e.g. now out of stock) deserves a real, honest
+        # answer, not a silent fallthrough that might let the model invent
+        # a different, wrong story about the same product.
+        return executed.shopper_summary or executed.summary or "That couldn't be added right now.", False, []
+    return executed.shopper_summary or executed.summary or "Done.", True, []
 
 
 def _unconfirmed_compare_items(message: str | None, comparison: list[dict]) -> list[str]:
@@ -935,6 +1034,36 @@ async def _process_turn(
             order = await adapter.get_order(req.order_id)
     except CommerceError:
         pass
+
+    # NINETEENTH-gap fix, found from real shopper testing: see
+    # `_deterministic_readd_action`'s own docstring above. Checked here,
+    # after `cart` is fetched and before reasoning ever runs, so an
+    # explicit repeat-add costs no model call and cannot be mis-routed to
+    # PROPOSE_CART_CHANGE - the failure this fix exists to close.
+    if not req.synthetic and not req.friction and req.cart_id and cart and cart.lines:
+        readd_result = await _deterministic_readd_action(
+            connection_id=req.connection_id,
+            session_id=req.session_id,
+            cart_id=req.cart_id,
+            message=req.message,
+            cart_lines=cart.lines,
+        )
+        if readd_result is not None:
+            readd_reply, readd_cart_changed, readd_choices = readd_result
+            await session_store.add_turn(
+                session_id=req.session_id,
+                connection_id=req.connection_id,
+                speaker="assistant",
+                text=readd_reply,
+            )
+            return ChatReply(
+                reply=readd_reply,
+                session_id=req.session_id,
+                used_model=False,
+                cart_changed=readd_cart_changed,
+                choices=readd_choices,
+            )
+
     friction_type = None
     if req.friction:
         try:
@@ -1257,6 +1386,14 @@ async def _process_turn(
         # this flag lets the reply say so instead of presenting it with
         # the same confident framing as a genuine match.
         weak_match_uncertain = bool(executed.payload.get("weak_match_uncertain"))
+        # TWENTIETH-gap fix: True when the semantic best-match judge
+        # confirmed which real candidate actually fits a taste/use-case
+        # description (see `_pick_best_semantic_match`'s own docstring) -
+        # always accompanied by `weak_match_uncertain` also being true, so
+        # checked first, ahead of it, to render a specific, confident
+        # recommendation instead of the generic "here's everything, not
+        # sure which fits" framing that flag alone would otherwise produce.
+        semantic_match_confirmed = bool(executed.payload.get("semantic_match_confirmed"))
         # True when real, relevant matches exist for the stated product
         # intent but none clear the shopper's own stated price limit - the
         # product/category intent must never be discarded just because a
@@ -1860,6 +1997,28 @@ async def _process_turn(
                 reply = (
                     f"I found options, but nothing fits {constraint}. "
                     "Want me to loosen one of those and look again?"
+                )
+            elif semantic_match_confirmed and products:
+                # TWENTIETH-gap fix: a real, judge-confirmed best match for
+                # a taste/use-case description with no literal keyword
+                # overlap - "something smooth and not too bitter" now leads
+                # with the one real coffee whose actual description best
+                # fits, not the same undifferentiated list every phrasing
+                # produced before. Checked ahead of `budget_relaxed`/
+                # `relevance_relaxed` below, since this same fallback path
+                # sets those flags too (`relevance_relaxed = bool(query)`
+                # fires unconditionally whenever this branch runs with a
+                # query) and their generic "here's everything instead"
+                # framing would otherwise win first and bury the specific,
+                # judge-confirmed pick behind an undifferentiated list
+                # again - exactly the bug this fix exists to close. Still
+                # an LLM judgment, not a certainty (the underlying
+                # deterministic search genuinely found nothing), so worded
+                # as a real but non-absolute recommendation rather than
+                # "here's exactly what you asked for".
+                reply = (
+                    f"Based on what you described, this looks like the best fit "
+                    f"this shop has:"
                 )
             elif budget_relaxed and products:
                 # Real matches for what was actually asked exist - they are

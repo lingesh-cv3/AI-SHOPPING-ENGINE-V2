@@ -515,6 +515,54 @@ class ExecutionService:
             logger.exception("semantic relevance judgment failed; degrading to deterministic verdict")
             return None
 
+    async def _pick_best_semantic_match(self, need: str, candidates: list):
+        """TWENTIETH-gap fix: `_shop_carries_semantic` only ever answers
+        "does this shop plausibly carry a category of thing like this" -
+        it does not rank WHICH of the real candidates that survived the
+        check best fits. Reproduced live and confirmed by real shopper
+        testing: "something smooth and not too bitter", "a mellow coffee",
+        "coffee with a gentle taste" and "something for someone who
+        doesn't like bitter coffee" all correctly cleared `judge_relevance`
+        (a coffee shop plausibly carries all of these) but then showed the
+        SAME undifferentiated 4-product list every time, because nothing
+        after that point could tell which real coffee actually fits a
+        taste description sharing no literal word with any product text.
+
+        Called ONLY after the deterministic/semantic "plausible" check has
+        already passed - this never decides whether to show something,
+        only which of the already-approved real candidates to lead with.
+        Returns the real `Product` object (never a synthesized one) or
+        `None` when the judge is unavailable, times out, says nothing
+        stands out, or (defensively) names an id not actually in
+        `candidates` - degrading to the existing "show all of them"
+        behavior in every one of those cases, never to a fabricated pick.
+        """
+        if self._reasoning is None or not getattr(self._reasoning, "enabled", False):
+            return None
+        by_id = {p.product_id: p for p in candidates}
+        payload = [
+            {
+                "product_id": p.product_id,
+                "title": p.title,
+                "description": p.description,
+            }
+            for p in candidates[:12]
+        ]
+        try:
+            product_id = await asyncio.wait_for(
+                self._reasoning.judge_best_match(need=need, candidates=payload),
+                timeout=12.0,
+            )
+        except TimeoutError:
+            logger.info("best-match judgment timed out; showing all candidates")
+            return None
+        except Exception:
+            logger.exception("best-match judgment failed; showing all candidates")
+            return None
+        if product_id is None:
+            return None
+        return by_id.get(product_id)
+
     async def _dispatch(self, adapter, case, action_type: ActionType) -> Executed:
         """Map an action onto a commerce call.
 
@@ -901,6 +949,12 @@ class ExecutionService:
                 # product is not withheld), only the confident framing is
                 # replaced with an honest one.
                 weak_match_uncertain = False
+                # TWENTIETH-gap fix: set when `_pick_best_semantic_match`
+                # confirms which real candidate best fits a taste/use-case
+                # description, letting chat.py render a confident, specific
+                # recommendation instead of the generic "here's everything"
+                # framing `weak_match_uncertain` alone would produce.
+                semantic_match_confirmed = False
                 # Cached and reused below (the `if not titles` browse-fallback
                 # branch) rather than fetched a second time - both branches
                 # page the same real catalog for the same failed query in the
@@ -1040,6 +1094,19 @@ class ExecutionService:
                         # a semantic judgment that could be wrong - never
                         # fully confirmed. Disclose it.
                         weak_match_uncertain = True
+                        # TWENTIETH-gap fix, same reasoning as the sibling
+                        # query-driven branch below: a taste/use-case
+                        # description ("a mellow coffee") can land here via
+                        # the category-only path too, and without this it
+                        # showed every candidate that survived price/weak-
+                        # match filtering undifferentiated, same as the
+                        # query-driven case before this fix.
+                        best_match = await self._pick_best_semantic_match(
+                            raw_said, candidates
+                        )
+                        if best_match is not None:
+                            candidates = [best_match]
+                            semantic_match_confirmed = True
 
                 if top_rated:
                     # Never invented: a product with no rating on this platform
@@ -1128,6 +1195,32 @@ class ExecutionService:
                         candidates = [p for p in candidates if p.rating is not None]
                         candidates.sort(key=lambda p: p.rating, reverse=True)
                     titles = [p.title for p in candidates[:6]]
+                    # TWENTIETH-gap fix, third call site: reproduced live
+                    # that several taste/use-case phrasings ("coffee with
+                    # a gentle taste", "a light, easy-drinking coffee",
+                    # "something with low acidity") never reached the
+                    # sibling fix above at all - `candidates` here already
+                    # came out non-empty from plain price/category
+                    # filtering over the wide sample (e.g. every coffee
+                    # passes when there's no price limit and no real
+                    # category named), so the `if query and not relevant`
+                    # branch below, gated on a still-empty result, never
+                    # ran, and the shopper got the same undifferentiated
+                    # browse this whole fix exists to replace. Whenever
+                    # this is genuinely a relevance-relaxed substitution
+                    # (a real query failed the narrow search and this is
+                    # standing in for it) with more than one real
+                    # candidate, the same best-match judgment applies here
+                    # too - never invents anything, only ranks among the
+                    # same real candidates already produced above.
+                    if query and len(candidates) > 1:
+                        best_match = await self._pick_best_semantic_match(
+                            raw_said, candidates
+                        )
+                        if best_match is not None:
+                            candidates = [best_match]
+                            titles = [best_match.title]
+                            semantic_match_confirmed = True
                     # A literal keyword-overlap relevance guard was tried
                     # here once (refuse this fallback outright when nothing
                     # in the browse shares a literal word with the failed
@@ -1207,6 +1300,33 @@ class ExecutionService:
                                 # this at all; it must never decide whether
                                 # to disclose that it's unconfirmed.
                                 weak_match_uncertain = True
+                                # TWENTIETH-gap fix: `judge_relevance` only
+                                # confirmed this SHOP plausibly carries a
+                                # category of thing like what was asked -
+                                # it never picked which real candidate best
+                                # fits. Without this, "something smooth and
+                                # not too bitter" reached this exact point
+                                # and then showed all of `candidates`
+                                # (every coffee that passed price/category)
+                                # undifferentiated - reproduced live, the
+                                # identical 4-item list for four different
+                                # taste phrasings. A second, narrower
+                                # judgment - over the SAME already-approved
+                                # candidate set, never a fresh fetch - picks
+                                # the one real product whose actual
+                                # description best fits. `None` (unavailable,
+                                # timed out, nothing stood out, or a
+                                # defensively-rejected invented id) leaves
+                                # `candidates`/`titles` untouched, degrading
+                                # to the existing "show all of them" honest
+                                # behavior exactly as before this fix.
+                                best_match = await self._pick_best_semantic_match(
+                                    raw_said, candidates
+                                )
+                                if best_match is not None:
+                                    candidates = [best_match]
+                                    titles = [best_match.title]
+                                    semantic_match_confirmed = True
                             else:
                                 titles = []
 
@@ -1249,6 +1369,7 @@ class ExecutionService:
                         "relevance_relaxed": relevance_relaxed,
                         "budget_relaxed": budget_relaxed,
                         "weak_match_uncertain": weak_match_uncertain,
+                        "semantic_match_confirmed": semantic_match_confirmed,
                         "max_price": max_price,
                         "products": [
                             {

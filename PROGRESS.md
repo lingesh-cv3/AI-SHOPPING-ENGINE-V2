@@ -1751,6 +1751,126 @@ cart, not the exact reported no-cart transcript), 5a, and 6 did not
 reproduce and were not independently re-diagnosed - treat as "not currently
 observed," not "confirmed fixed."
 
+**NINETEENTH gap - the "add X again" residual flagged above is now
+FIXED AND VERIFIED.** Root cause, confirmed by reading the actual response
+rather than guessed: "add the Cork Massage Ball to my cart again" was
+consistently (5/5 live trials) routed to `PROPOSE_CART_CHANGE`, not
+`RECOMMEND_PRODUCTS` as first suspected - the model, faced with a product
+already sitting in the cart, chose to ask "want me to add X?" rather than
+just doing it, even though the shopper's own words were an explicit,
+unambiguous instruction. `PROPOSE_CART_CHANGE`'s own prompt guidance ("when
+you want to suggest... rather than just doing it") gives the model no
+signal that an explicit repeat request is not this case, and per this
+session's own established finding, prompt guidance alone is not reliable
+enough for a routing decision this codebase already treats deterministic
+detectors as necessary for.
+
+Fixed with a deterministic backstop, the same shape as the fifth-round
+"why" backstop: `_find_readd_target`/`_deterministic_readd_action`
+(`engine/api/chat.py`) recognize an explicit repeat signal ("again",
+"another", "more", "one more") combined with a real, near-full title match
+against a product ALREADY in the current cart - never a fuzzy or partial
+match, the same strict discipline already established for the sibling
+ADD_TO_CART product-resolution override - and execute the add directly
+through `_run_trusted_cart_action`, the same Decision-Engine-and-Risk-Gate
+pipeline a shopper's own tap or proposal-accept already uses. Only the
+ACTION TYPE and PRODUCT are decided deterministically; execution itself
+still goes through the full pipeline unchanged. Deliberately does NOT also
+require a literal "add"/"cart" word in the message - a first version did,
+and it excluded a real, unambiguous case found live ("one more Cork Massage
+Ball please", no literal "add" or "cart") - the repeat signal plus a full
+real title match already narrows this enough on its own.
+
+Verified: 10/10 fresh phrasings ("add X again", "add another X", "one more
+X please", "can you add another X", "again, add X", etc.) now correctly
+increment quantity (1 -> 2), confirmed against the real cart each time, not
+just the reply text. A genuinely fresh product (never before in the cart)
+re-confirmed to still route through the ordinary model-driven ADD_TO_CART
+path unaffected (needs a size choice as normal, `used_model: true`) -
+this backstop cannot fire for anything not already a real line in the
+current cart.
+
+**A separate, pre-existing quirk was found while testing this fix, NOT
+caused by it and NOT investigated further (out of scope for this pass):**
+"also add a [real, uncarted product] to my cart" as a second message in a
+session sometimes returns a generic `RECOMMEND_PRODUCTS`-shaped reply with
+`used_model: false`, distinct from both this fix's new backstop (confirmed
+by trace: the message shares no words with anything already in the cart,
+so `_find_readd_target` returns `None` and never fires) and the ordinary
+model-driven ADD_TO_CART path (which a genuinely fresh, single-message add
+of the same product correctly uses). Not reproduced or root-caused deeply -
+flagged here so a future session does not mistake it for something this
+fix introduced.
+
+**TWENTIETH gap - the coffee taste-preference matching gap, open and
+independently reconfirmed since round 10, is now substantially fixed.**
+This was the single most repeatedly-confirmed real limitation across the
+entire session, including by real user testing: `judge_relevance` could
+confirm a shop plausibly carries "something smooth and not too bitter" as
+a *category* of thing, but nothing ever picked *which* real candidate
+actually fits a taste/use-case description sharing no literal word with
+any product text - every phrasing landed on the identical undifferentiated
+4-item Kettle coffee list regardless of what was actually asked.
+
+Built a second, narrower LLM judgment - `ReasoningService.judge_best_match`
+(`engine/reasoning/service.py`, new `best_match_prompt`/`best_match_tool`
+in `engine/reasoning/prompts.py`) and `ExecutionService.
+_pick_best_semantic_match` (`engine/execution/service.py`) - that ranks
+among the SAME real, already-approved candidates `judge_relevance` already
+confirmed plausible, never a fresh fetch, never an invented product. The
+model's returned `product_id` is verified against the real candidate id
+set before being trusted at all (the same never-trust-a-bare-id discipline
+already used for `cited_reason`/category validation) - a fabricated or
+absent id degrades to the existing "show all of them" behavior, never to
+a fabricated pick. Wired into all THREE places a taste/use-case query can
+land, found by testing each fresh phrasing individually rather than
+assuming one fix covered them all: the category-only-unverified branch,
+the query-driven weak-match branch, and (found only by testing "coffee
+with a gentle taste"/"a light, easy-drinking coffee"/"something with low
+acidity" specifically) the plain relevance-relaxed browse branch, which
+several genuine taste phrasings hit without ever reaching either of the
+first two because enough candidates already survived basic price/category
+filtering to make `titles` non-empty before any semantic check ran at all.
+
+A new `semantic_match_confirmed` flag threads through the payload,
+checked in `engine/api/chat.py` AHEAD of `budget_relaxed`/`relevance_relaxed`
+(both of which this same fallback path also sets, and whose generic
+"here's everything instead" framing would otherwise win first and bury
+the specific, judge-confirmed pick behind an undifferentiated list again).
+
+Verified live against Kettle with 7 taste/preference phrasings, some
+reused from the original user report, some newly constructed: "something
+smooth and not too bitter", "a mellow coffee", "coffee with a gentle
+taste", "something for someone who doesn't like bitter coffee", "a light,
+easy-drinking coffee", "something with low acidity", "a coffee that is not
+too intense" - **all 7 now return a single, specific, real product**
+(Brazil Cerrado Pulped Natural, House Filter Blend, Colombia Huila Washed,
+or Swiss Water Decaf depending on phrasing - genuinely different real
+coffees for genuinely different descriptions, not the same list every
+time), up from 0/7 at session start. Controls re-verified unaffected: "a
+fruity coffee" (a genuine keyword match) still returns its correct answer
+unchanged; "do you have tea?" (a genuinely unmatchable request) still
+honestly declines with zero products, not a forced fake match. Northfield
+kayak-family and "show me shoes" controls re-verified unaffected by this
+change (0 undisclosed, 4 confident options respectively).
+
+`fuzz.py` (20/20 sequences, 1200 assertions, every invariant held) and
+`auditroutes.py` (every probe held) both re-run clean after both the
+nineteenth and twentieth fixes together, on a cleanly restarted engine
+with no process interruption mid-run.
+
+Not moved to Completed.md - no `invariant-guard`/`value-auditor` pass has
+run against either the nineteenth or twentieth gap fix yet. Honest
+residual: `judge_best_match` is still an LLM judgment, not a certainty -
+it has not been adversarially stress-tested the way the false-substitution
+saga's mechanisms were across 16 rounds, and a dedicated adversarial pass
+(constructing phrasings designed to defeat it, checking for a wrong-but-
+confident pick rather than only an honest no-match) has not been run
+against this specific new mechanism. Given this session's own repeated
+lesson that a fix's first "N/N clean" batch has usually undersampled the
+actual failure shape, treat this as a real, substantial improvement -
+not a closed, audited guarantee - until that pass happens.
+
 ### Why the tests did not used to catch these
 
 **None of them could see the browser.** Every UI-state bug found by hand lived

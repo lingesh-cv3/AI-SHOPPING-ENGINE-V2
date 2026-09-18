@@ -959,3 +959,95 @@ def relevance_tool() -> dict[str, Any]:
             },
         },
     }
+
+
+#: TWENTIETH-gap fix: `judge_relevance` only ever answers "does this shop
+#: plausibly carry a CATEGORY of thing" - it was never asked to pick WHICH
+#: real candidate best fits, so a shop confirmed to plausibly carry
+#: "something smooth and not too bitter" still showed all four of its real
+#: coffees undifferentiated every time, regardless of phrasing ("a mellow
+#: coffee", "coffee with a gentle taste", "something for someone who
+#: doesn't like bitter coffee" all produced the identical list). Reproduced
+#: live and confirmed by a real shopper's own testing, not just synthetic
+#: phrasing - a keyword/stem matcher structurally cannot rank a taste
+#: description against product text with no shared literal word, which is
+#: exactly why this needs the same LLM judgment `judge_relevance` already
+#: uses for the yes/no case, extended here to a selection among real,
+#: already-fetched candidates rather than a plain boolean.
+_BEST_MATCH_SYSTEM_PROMPT = (
+    "You pick which ONE of a shop's real, already-fetched products best "
+    "matches a shopper's description, when a literal keyword search already "
+    "failed to find one. You are given the shopper's own words and a REAL "
+    "list of this shop's actual products with their real titles and "
+    "descriptions - you may only ever return a product_id from that exact "
+    "list, never invent one, never describe a product not shown to you. "
+    "Judge genuine semantic/use-case fit (a coffee described as 'red apple "
+    "and caramel, forgiving on any brewer' plausibly matches 'something "
+    "mellow and easy to drink'), not literal word overlap - that already "
+    "failed, which is why you were asked. If more than one candidate seems "
+    "roughly equally good, prefer the one whose actual description most "
+    "directly speaks to what the shopper said. If genuinely NONE of the "
+    "real candidates fit better than the others - the shopper's request is "
+    "too generic to distinguish between them, or none really fit at all - "
+    "say so honestly rather than picking one arbitrarily."
+)
+
+
+def best_match_prompt(need: str, candidates: list[dict]) -> str:
+    """Prompt for the semantic best-match judge (`best_match_tool()` below).
+
+    `candidates` is always the real, already-fetched product list a
+    deterministic check already found plausible for this shop to carry
+    (via `judge_relevance`) but could not rank - each entry a dict with
+    real `product_id`/`title`/`description` fields, never invented here.
+    The model's only job is to return one of these ids, or say none stand
+    out - it cannot add a product, alter a description, or see anything
+    not already real and already fetched.
+    """
+    listed = "\n".join(
+        f"- id={c['product_id']}: {c['title']} - {c.get('description') or '(no description)'}"
+        for c in candidates[:12]
+    )
+    return (
+        f"Shopper described wanting: {need!r}\n\n"
+        f"Real candidates this shop actually has (already confirmed plausible "
+        f"for this shop to carry):\n{listed}\n\n"
+        "Which ONE product_id best matches what the shopper described, based "
+        "on its real title/description? Only return an id from the list "
+        "above. If none genuinely stands out as a better fit than the "
+        "others, set matches to false and leave product_id empty rather "
+        "than guessing. Call judge_best_match with your answer."
+    )
+
+
+def best_match_tool() -> dict[str, Any]:
+    """Tool schema for the semantic best-match judge. Only ever selects
+    among ids already present in the real candidate list handed to it in
+    the prompt - the caller (`ReasoningService.judge_best_match`) validates
+    the returned id is actually one of those real candidates before
+    trusting it, the same never-trust-a-bare-id discipline already used
+    for `cited_reason`/category validation elsewhere in this codebase. No
+    action-type, variant, or risk field - cannot propose an action or be
+    classified by the risk gate.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "judge_best_match",
+            "description": "Pick which real candidate product best matches the shopper's description, if any genuinely stands out.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "matches": {
+                        "type": "boolean",
+                        "description": "True if one real candidate genuinely stands out as the best fit.",
+                    },
+                    "product_id": {
+                        "type": "string",
+                        "description": "The id of the best-matching real candidate, exactly as given. Required when matches is true.",
+                    },
+                },
+                "required": ["matches"],
+            },
+        },
+    }

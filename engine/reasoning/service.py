@@ -42,9 +42,12 @@ from .llm import LLMClient, LLMConfig, LLMUnavailable
 from .prompts import (
     PROPOSABLE,
     SYSTEM_PROMPT,
+    _BEST_MATCH_SYSTEM_PROMPT,
     _RELEVANCE_SYSTEM_PROMPT,
     _SYNTHESIS_SYSTEM_PROMPT,
     _synthesis_prompt,
+    best_match_prompt,
+    best_match_tool,
     propose_tool,
     relevance_judgment_prompt,
     relevance_tool,
@@ -473,6 +476,55 @@ class ReasoningService:
         args = call["arguments"] if isinstance(call.get("arguments"), dict) else {}
         plausible = args.get("plausible")
         return plausible if isinstance(plausible, bool) else None
+
+    async def judge_best_match(
+        self, *, need: str, candidates: list[dict]
+    ) -> str | None:
+        """Which of these real, already-fetched candidates best matches
+        `need`, when a literal keyword/stem search cannot rank them (a taste
+        or use-case description sharing no literal word with any product
+        text). TWENTIETH-gap fix - see `best_match_prompt`'s own docstring.
+
+        Returns a `product_id` ONLY when it is verified to be one of the
+        ids actually present in `candidates` - the model's raw output is
+        never trusted as-is, the same discipline already used for
+        `cited_reason`/category validation elsewhere in this codebase.
+        Returns `None` (not a made-up id, not the first candidate as a
+        guess) when the model says nothing stands out, when it names an id
+        not in the real list, or when it is unavailable/throttled - the
+        caller must treat `None` as "could not confirm a single best
+        match," never as permission to pick one itself."""
+        if self._client is None:
+            return None
+        valid_ids = {c["product_id"] for c in candidates}
+        prompt = best_match_prompt(need, candidates)
+        try:
+            result = await self._client.complete(
+                system=_BEST_MATCH_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[best_match_tool()],
+                force_tool=True,
+            )
+        except LLMUnavailable as exc:
+            logger.info("best-match judgment unavailable, degrading: %s", exc)
+            return None
+        call = next(
+            (c for c in result.tool_calls if c["name"] == "judge_best_match"), None
+        )
+        if call is None:
+            return None
+        args = call["arguments"] if isinstance(call.get("arguments"), dict) else {}
+        if args.get("matches") is not True:
+            return None
+        product_id = args.get("product_id")
+        if not isinstance(product_id, str) or product_id not in valid_ids:
+            logger.info(
+                "best-match judge named an id not in the real candidate "
+                "list (%r); discarding rather than trusting it",
+                product_id,
+            )
+            return None
+        return product_id
 
     # -- parsing -----------------------------------------------------------
 
