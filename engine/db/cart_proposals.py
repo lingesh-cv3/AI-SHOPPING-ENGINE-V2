@@ -75,18 +75,42 @@ async def get(connection_id: str, proposal_id: str) -> dict | None:
     return _as_dict(row) if row else None
 
 
-async def pending_for_cart(connection_id: str, cart_id: str) -> list[dict]:
+async def pending_for_cart(
+    connection_id: str, cart_id: str, session_id: str | None = None
+) -> list[dict]:
     """What a shopper still has to decide on for this cart, oldest first -
     so the earliest suggestion is the one they see first, the same reading
-    order the conversation itself would have offered it in."""
+    order the conversation itself would have offered it in.
+
+    `session_id` is optional only for backward compatibility with any other
+    caller that genuinely wants every proposal for a cart regardless of
+    which conversation created it (there is none today - grep confirms
+    `engine/api/chat.py::list_proposals` is the sole caller, and it always
+    has a real session_id to pass). Found live: a shopper who owns more
+    than one session over time (a real, ordinary case - re-opening the
+    shop later, or a demo/test identity reused across runs) can have more
+    than one cart of their own on record; `_mine`'s ownership check
+    confirms `session_id` and `cart_id` each independently belong to the
+    caller, but never that this SPECIFIC cart_id is the one THIS SPECIFIC
+    session created - so without this filter, a request for one of your
+    own conversations' pending proposals could surface a stale proposal
+    from a different conversation of your own that happens to reference a
+    cart_id you also separately own. Not a cross-shopper exposure (a
+    stranger's own session_id/cart_id pair still fails `_mine` before this
+    function ever runs) - a same-shopper, cross-conversation data-mixing
+    bug, closed the same way session/cart ownership is already scoped
+    everywhere else in this codebase."""
     async with session_scope() as db:
+        conditions = [
+            CartProposal.connection_id == connection_id,
+            CartProposal.cart_id == cart_id,
+            CartProposal.state == "PENDING",
+        ]
+        if session_id is not None:
+            conditions.append(CartProposal.session_id == session_id)
         result = await db.execute(
             select(CartProposal)
-            .where(
-                CartProposal.connection_id == connection_id,
-                CartProposal.cart_id == cart_id,
-                CartProposal.state == "PENDING",
-            )
+            .where(*conditions)
             .order_by(CartProposal.created_at.asc())
         )
         rows = list(result.scalars())

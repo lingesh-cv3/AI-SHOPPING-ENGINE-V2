@@ -2018,12 +2018,65 @@ an untrustworthy number. `fuzz.py` (1200 assertions, every invariant
 held) and `auditroutes.py` (every probe held) both clean on an
 uninterrupted engine run.
 
-Not moved to Completed.md - no `invariant-guard`/`value-auditor` pass has
-run against this fix, and the proposal-path variant-fill specifically
-still wants a clean, isolated live re-test (fresh demo database or a
-tighter test harness that doesn't share state with dozens of prior test
-runs) before being trusted as fully proven end to end, even though the
-code path itself is straightforward and traced correctly.
+**Follow-up, same session: both a dedicated `invariant-guard` pass and a
+clean, isolated live re-test have since run against this fix.**
+`invariant-guard` returned SAFE - the variant back-fill only fires when
+the model left `variant_id` unset, never overrides a model-specified
+one, only fills a value when exactly one distinct variant of that
+product already exists in the case's own already-authenticated cart,
+and the filled value is forwarded through the unchanged, risk-gated
+`accept_proposal` pipeline exactly as `chosen_variant` from a real tap
+would be. The isolated live re-test worked around the stale-data
+problem directly (a fresh cart, a fresh random session_id, and an empty
+`GET /api/chat/proposals` confirmed before each trial) rather than
+fighting the shared demo database: **5 of 5 independent fresh cart/
+session trials, varied phrasing, show the proposal's `variant_id`
+correctly filled with the real variant already in the cart, and
+accepting it correctly increments the existing line rather than
+re-asking for a size** - genuine end-to-end evidence, not a trace. The
+exclusion guard held on 3 further fresh phrasings in the same pass.
+
+**A separate, incidental finding from that same live re-test: `GET
+/api/chat/proposals` (`pending_for_cart` in `engine/db/cart_proposals.py`)
+filtered by `cart_id` only, not `session_id`, even though the route
+already accepts and could use `session_id`.** Investigated and fixed.
+Severity, established by reading `_mine`'s actual check rather than
+assumed: this is NOT a cross-shopper security exposure - `_mine`
+already requires both `session_id` and `cart_id` to independently
+belong to the calling visitor before this function ever runs, so a
+stranger's own session_id/cart_id pair still fails before reaching it.
+It is a real, narrower same-shopper, cross-conversation data-mixing bug:
+a shopper who owns more than one session/cart over time (an ordinary
+case - reopening the shop later, or accumulated demo/test identity
+reuse, exactly the condition this session's own testing kept hitting)
+could have a stale proposal from a *different* conversation of their
+own surface when asking about *this* conversation's proposals, because
+nothing checked that the specific cart_id belonged to the specific
+session_id being asked about.
+
+Fixed by adding an optional `session_id` filter to `pending_for_cart`
+and passing it from `list_proposals`, the function's sole caller
+(confirmed by grep). Reproduced the gap directly at the repository
+level before fixing (two proposals created under `sess_AAAA`/
+`sess_BBBB` sharing one `cart_id`; unfiltered query returned both,
+filtered query correctly returned only the matching session's own) and
+re-confirmed the fix does not disturb the ordinary single-session flow
+(create cart, tap-add a variant, ask to add it again, list proposals -
+the real, correctly-scoped proposal still appears). `fuzz.py` (1200
+assertions, every invariant held) and `auditroutes.py` (every probe
+held) both clean. A new dedicated `auditroutes.py` check for this exact
+scenario (two owned sessions/carts for one identity, confirming no
+cross-conversation mixing) was considered but not added this pass - it
+needs a two-session-per-identity test shape `auditroutes.py` doesn't
+currently have a pattern for, and the repository-level reproduction
+above already gives direct evidence of both the bug and the fix; a
+proper `auditroutes.py` addition is a reasonable follow-up, not a gap
+in this fix's own verification.
+
+Not moved to Completed.md - no `invariant-guard`/`value-auditor` pass
+has run against this specific session-scoping fix yet, even though the
+two items it follows (the variant-fill and exclusion-guard work) are
+now independently verified end to end above.
 
 ### Why the tests did not used to catch these
 

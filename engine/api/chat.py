@@ -2679,7 +2679,9 @@ async def list_proposals(
     nothing here has touched the cart yet."""
     belongs_to(key, connection_id)
     await _mine(who, connection_id, session_id=session_id, cart_id=cart_id)
-    pending = await db.cart_proposals.pending_for_cart(connection_id, cart_id)
+    pending = await db.cart_proposals.pending_for_cart(
+        connection_id, cart_id, session_id=session_id
+    )
     return {"proposals": pending}
 
 
