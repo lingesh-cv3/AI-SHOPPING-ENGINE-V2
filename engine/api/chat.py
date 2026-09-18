@@ -544,12 +544,29 @@ async def _deterministic_readd_action(
     target = _find_readd_target(message, cart_lines)
     if target is None:
         return None
+    # BUG found by adversarial audit of the first version of this function:
+    # `target` is a real, already-existing cart line - its own `variant_id`
+    # (when the line has one) is exactly as trustworthy as a shopper's own
+    # tap, per the same invariant `chosen_variant` already encodes elsewhere
+    # (a tap/known-real selection is trusted, a model's guess is not). The
+    # first version dropped it, passing only `product_id` - harmless for a
+    # single-variant product (nothing to choose), but for any multi-variant
+    # product already in the cart (the common case in a real footwear/
+    # apparel catalogue) this meant every re-dispatch landed on
+    # `needs_choice` and asked "which option would you like?" instead of
+    # ever incrementing anything - reproduced live, 9/10 fresh phrasings
+    # against a sized shoe. Passing `chosen_variant` here routes through the
+    # identical trusted-variant path a real tap uses, so the exact variant
+    # already in the cart is incremented directly.
+    params = {"product_id": target.product_id, "said": message}
+    if getattr(target, "variant_id", None):
+        params["chosen_variant"] = target.variant_id
     executed, case_id, awaiting = await _run_trusted_cart_action(
         connection_id=connection_id,
         session_id=session_id,
         cart_id=cart_id,
         action_type=ActionType.ADD_TO_CART,
-        parameters={"product_id": target.product_id, "said": message},
+        parameters=params,
         rationale=f"Shopper explicitly asked to add {target.title} again; it is already a real line in this cart.",
     )
     if awaiting:
