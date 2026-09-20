@@ -3914,6 +3914,34 @@ select.card-picker {
 .v2-panel-head {
   padding: 10px 14px;
   border-bottom: 1px solid #eee;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.v2-switch-classic {
+  font-size: 11px;
+  background: none;
+  border: none;
+  color: #555;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+.v2-switch-back {
+  position: fixed;
+  right: 16px;
+  bottom: 84px;
+  font-size: 11px;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 999px;
+  padding: 4px 10px;
+  color: #555;
+  cursor: pointer;
+  z-index: 40;
 }
 
 .v2-panel-body {

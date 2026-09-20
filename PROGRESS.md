@@ -3629,6 +3629,98 @@ remains a structural check, not an empirical one.
 
 ---
 
+### Shopper V2 — discovery-vs-cart routing bug fixed, cart-status and clear-cart parity closed, moved to Completed.md #55
+
+Commit `10a3f6b` ("fix: close discovery-vs-cart-action routing bug, add
+cart-status and clear-cart parity") fixed a real shopper-reported bug and
+closed two functional-parity gaps found while running CLAUDE.md's full
+V1<->V2 migration test matrix. Full detail and verification evidence now
+in `Completed.md` #55; summary here:
+
+1. **The bug**: "I need shoes" (plain discovery, no cart intent) produced a
+   bogus cart proposal. Root cause was structural, not a phrasing gap -
+   `engine/shopper_v2/capability.py`'s `route()` let the model's own raw,
+   unvalidated primary hint (e.g. `ADD_TO_CART`) directly authorize
+   `Capability.CART_ACTION`, bypassing the separate deterministic
+   `resolve_cart_target` check entirely whenever that check correctly found
+   no real cart intent. Fixed so no cart-mutation `ActionType` hint can
+   authorize `CART_ACTION` on its own any more - it is reachable only
+   through `intent_resolution.py`'s existing, unmodified
+   `resolve_cart_target`.
+2. **A second, deeper instance of the same failure class** was found and
+   fixed inside `resolve_cart_target` itself: a plain restatement ("I need
+   shoes" said twice, once a product was already shown) could be
+   misclassified as cart intent by its own bounded LLM call
+   (`interpret_cart_reference`). Closed via a structural prompt
+   clarification (positive/negative contrast examples, not a phrase list)
+   in `cart_reference_tool()`/`cart_reference_prompt()`
+   (`engine/reasoning/prompts.py`).
+3. **Full CLAUDE.md V1<->V2 migration test matrix (all 14 items) run live**
+   against Northfield, capability differences verified against Kettle - all
+   pass.
+4. **Two real V1<->V2 functional-parity gaps closed**, found during that
+   matrix run:
+   - Cart intelligence ("what's in my cart"): new
+     `engine/shopper_v2/cart_status.py` routes `CHECK_CART_STATUS` through
+     the existing, unmodified dispatch - read-only, no mutation path.
+   - Clear cart: `PROPOSE_CART_CHANGE` (shared by V1 and V2, in
+     `engine/execution/service.py` and `engine/api/chat.py`) gained a real
+     `"CLEAR"` change_type, using a documented sentinel value
+     (`_CLEAR_CART_SENTINEL = "__CLEAR_CART__"`) in the existing
+     `CartProposal.product_id` column - no schema change. A V2-originated
+     clear now proposes-then-approves, stricter than V1's own pre-existing
+     direct-execute `CLEAR_CART`, never a weaker copy.
+5. `ShopperV2Panel.tsx` gained distinct rendering for `cart_status`,
+   `payment_recovery`, and `order_status` turns (previously
+   generic/indistinct).
+6. Three new Playwright tests close previously-named browser-coverage
+   gaps: Kettle-side (GraphQL) discovery+mission, payment recovery through
+   the browser, order status through the browser. **Purchase-outcome
+   through the browser specifically is still not covered** - not part of
+   this commit.
+
+**Verified**: `invariant-guard` SAFE (multiple passes, including one final
+pass over the complete cumulative diff); `fuzz.py` clean (1200 assertions,
+20 sequences); `auditroutes.py` clean on all existing probes; all 18
+`tests/shopper_v2/test_phase*.py` files pass (including two new files,
+`test_phase12_discovery_vs_cart_routing.py` and
+`test_phase13_cart_status.py`); all 8 Playwright tests in
+`shopper-v2.spec.ts` pass (2 showed throttle-driven flakiness when run
+back-to-back under the documented Groq-throttle constraint, confirmed
+clean individually - not a regression); `npm run build` clean; `npm run
+lint` at the same 8 pre-existing, unrelated baseline errors (no new lint
+issues).
+
+**Explicitly documented, not fixed - a genuine model-reliability
+limitation, unchanged by this commit:** `priorities_add` (trade-off)
+extraction on the primary understanding call has a real, measured ~1/8 hit
+rate for some phrasings (e.g. "comfort matters more than price" said as a
+second turn). A prompt-strengthening attempt was tried, measured to make
+it WORSE (0/8), and was reverted. This is accepted, pre-existing model
+variance per CLAUDE.md's own standard, not a routing defect - do not
+describe it as fixed or improved by this commit.
+
+**Still genuinely open after this commit** (predates it - none of these
+were touched):
+- No ops-console consumer of the V2 events (`TRADE_OFF_APPLIED`/
+  `PAYMENT_RECOVERY_OFFERED`/`ORDER_STATUS_CHECKED`/
+  `MISSION_ITEM_TRACKED`/`BASKET_PROPOSED`) - merchant-console-scoped only.
+- Real-volume condition remains a structural code-path check (bounded
+  retrieval, no unbounded-search pattern grepped for), not an empirical
+  40k-SKU test.
+- Decision-workspace UI polish for comparison/compatibility as distinct
+  layouts remains outstanding - this commit only added
+  `cart_status`/`payment_recovery`/`order_status` distinctness, not
+  comparison/compatibility.
+- `auditroutes.py` has not been extended with a named check for `GET
+  /api/v2-activity/{connection_id}`.
+
+No fresh `value-auditor` pass has been run against this specific commit -
+see `Completed.md` #55 for why this entry moved anyway, following the
+precedent already set by `Completed.md` #53.
+
+---
+
 ## Next Steps
 
 ### Existing Engineering Work
@@ -4129,6 +4221,16 @@ remains a structural check, not an empirical one.
    comparison/compatibility layouts is unaddressed; (5) `auditroutes.py`
    was not extended with a named check for the new
    `/api/v2-activity/{connection_id}` route.
+
+   **Update from commit `10a3f6b` (see `Completed.md` #55 and the "Shopper
+   V2 — discovery-vs-cart routing bug fixed" section above): two of the
+   five items above are now closed** - Kettle-side Playwright coverage and
+   payment-recovery-through-the-browser Playwright coverage both now
+   exist. Purchase-outcome through the browser specifically remains
+   uncovered. Items (1) ops-console consumer, (2) real-volume structural
+   check, (4) decision-workspace comparison/compatibility polish, and (5)
+   `auditroutes.py` extension are all still open, untouched by that
+   commit.
 
 1. **Guest handover / session behaviour:** still open. Guests no longer pay,
    but can still chat and get escalated, and the shop now prompts for an email

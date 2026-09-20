@@ -13,10 +13,15 @@ import {
  * architecture (`engine/shopper_v2/`), connected to the actual storefront.
  *
  * Deliberately a SEPARATE, self-contained panel rather than a modification
- * of `ChatWidget.tsx` (V1's own assistant) - V1 stays completely
- * untouched and is what a real shopper still gets by default; this is an
- * additive, opt-in "try the new assistant" surface, exactly mirroring the
- * backend's own "V1 stays live while V2 is validated" rule (CLAUDE.md).
+ * of `ChatWidget.tsx` (V1's own assistant) - V1's own code is completely
+ * untouched. As of the main-Shopper cutover, `App.tsx` renders this
+ * component (not `ChatWidget`) as the default assistant a normal shopper
+ * sees (`defaultOpen`), with `ChatWidget` kept fully intact behind an
+ * explicit rollback control (`assistantMode` in App.tsx) rather than
+ * deleted - exactly the "V1 stays live as a fallback while V2 is the main
+ * path" shape CLAUDE.md's migration section describes. This component
+ * itself does not know or care whether it is the main path or an opt-in
+ * extra; that decision belongs entirely to its caller.
  *
  * Every section below renders ONLY fields the real `/api/v2/chat` response
  * actually returned this turn - `shopping_state`, `evidence`, `products`,
@@ -140,11 +145,25 @@ function MissionSidebar({ state }: { state: ShoppingStateV2 }) {
 export function ShopperV2Panel({
   cartId,
   onCartChanged,
+  defaultOpen = false,
+  onSwitchToClassic,
 }: {
   cartId?: string;
   onCartChanged?: () => void;
+  /** Main-Shopper cutover: the caller (App.tsx) passes `true` here to make
+   *  this the default-open assistant a normal shopper sees, rather than a
+   *  "beta" a shopper has to opt into - see App.tsx's own `assistantMode`
+   *  state and CLAUDE.md's V1<->V2 migration notes. Defaults to `false` so
+   *  nothing about this component's own behavior changes for any other
+   *  caller that doesn't pass it. */
+  defaultOpen?: boolean;
+  /** Rollback control, rendered only when the caller wants one (App.tsx's
+   *  main-Shopper path does) - switches the caller back to the V1
+   *  ChatWidget. This component never decides on its own to hide itself;
+   *  it only ever calls back up to whoever owns that decision. */
+  onSwitchToClassic?: () => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const [sessionId] = useState(
     () =>
       `sess_v2_${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)}`,
@@ -239,13 +258,23 @@ export function ShopperV2Panel({
         data-testid="shopper-v2-toggle"
         onClick={() => setOpen((v) => !v)}
       >
-        {open ? "Close" : "Try the new assistant (V2 beta)"}
+        {open ? "Close" : "Chat with us"}
       </button>
 
       {open && (
         <div className="v2-panel" data-testid="shopper-v2-panel">
           <div className="v2-panel-head">
-            <span className="eyebrow">Shopper V2 - {getConnection()}</span>
+            <span className="eyebrow">Assistant - {getConnection()}</span>
+            {onSwitchToClassic && (
+              <button
+                type="button"
+                className="v2-switch-classic"
+                data-testid="shopper-v2-switch-classic"
+                onClick={onSwitchToClassic}
+              >
+                Switch to classic assistant
+              </button>
+            )}
           </div>
 
           <div className="v2-panel-body">

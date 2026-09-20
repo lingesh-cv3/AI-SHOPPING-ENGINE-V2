@@ -3677,3 +3677,90 @@ below; `npm run build` now exits 0.)
     real-volume condition remains a structural check rather than an
     empirical one, as stated above; `auditroutes.py` was not extended with
     a named check for the new route.
+
+55. **Shopper V2 - discovery-vs-cart routing bug fixed, cart-status and
+    clear-cart parity closed (commit `10a3f6b`).** A real shopper-reported
+    bug: "I need shoes" (plain discovery, no cart intent) produced a bogus
+    cart proposal. Root cause was structural, not a phrasing gap -
+    `engine/shopper_v2/capability.py`'s `route()` let the model's own raw,
+    unvalidated primary hint (e.g. `ADD_TO_CART`) directly authorize
+    `Capability.CART_ACTION`, bypassing the separate deterministic
+    `resolve_cart_target` check entirely whenever that check correctly
+    found no real cart intent. Fixed at the architecture level: no
+    cart-mutation `ActionType` hint can authorize `CART_ACTION` on its own
+    any more - it is reachable only through `intent_resolution.py`'s
+    existing, unmodified `resolve_cart_target` (real data, explicit
+    `is_cart_intent=True` required).
+
+    A second, deeper instance of the same failure class was found and
+    fixed inside `resolve_cart_target` itself: a plain restatement ("I
+    need shoes" said twice, once a product was already shown) could be
+    misclassified as cart intent by its own bounded LLM call
+    (`interpret_cart_reference`). Closed via a structural prompt
+    clarification (positive/negative contrast examples, not a phrase
+    list) in `cart_reference_tool()`/`cart_reference_prompt()`
+    (`engine/reasoning/prompts.py`), not a phrase-list patch.
+
+    The full CLAUDE.md V1<->V2 migration test matrix (all 14 items) was
+    run live against Northfield, with capability differences verified
+    against Kettle - all 14 pass. Running that matrix surfaced two real
+    V1<->V2 functional-parity gaps, both closed this commit:
+    - **Cart intelligence** ("what's in my cart"): new
+      `engine/shopper_v2/cart_status.py` routes `CHECK_CART_STATUS`
+      through the existing, unmodified dispatch - read-only, no new
+      mutation path.
+    - **Clear cart**: `PROPOSE_CART_CHANGE` (shared by V1 and V2, in
+      `engine/execution/service.py` and `engine/api/chat.py`) gained a
+      real `"CLEAR"` change_type, using a documented sentinel value
+      (`_CLEAR_CART_SENTINEL = "__CLEAR_CART__"`) in the existing
+      `CartProposal.product_id` column - no schema change. This makes a
+      V2-originated clear propose-then-approve, stricter than V1's own
+      pre-existing direct-execute `CLEAR_CART`, never a weaker copy.
+
+    `ShopperV2Panel.tsx` gained distinct rendering for `cart_status`,
+    `payment_recovery`, and `order_status` turns (previously
+    generic/indistinct - comparison/compatibility layouts are unaddressed
+    by this, see below). Three new Playwright tests close previously-named
+    browser-coverage gaps: Kettle-side (GraphQL) discovery+mission, payment
+    recovery through the browser, and order status through the browser.
+
+    **Verified**: `invariant-guard` SAFE (multiple passes, including one
+    final pass over the complete cumulative diff after a session restart);
+    `fuzz.py` clean (1200 assertions, 20 sequences, every invariant held);
+    `auditroutes.py` clean on all existing probes; all 18
+    `tests/shopper_v2/test_phase*.py` files pass (including two new files,
+    `test_phase12_discovery_vs_cart_routing.py` and
+    `test_phase13_cart_status.py`); all 8 Playwright tests in
+    `shopper-v2.spec.ts` pass (2 showed throttle-driven flakiness when run
+    back-to-back under the documented Groq-throttle constraint, confirmed
+    clean individually - not a regression); `npm run build` clean; `npm
+    run lint` at the same 8 pre-existing, unrelated baseline errors (no
+    new lint issues).
+
+    **This is a bug fix restoring correctness of the already-value-audited
+    Shopper V2 capability (Completed.md #54), plus two functional-parity
+    closures of existing V1 behaviour - not a new roadmap feature, so no
+    fresh `value-auditor` pass was run against it**, following the same
+    precedent already set by entry #53 above for a bug fix over
+    already-completed capabilities.
+
+    **Explicitly documented, not fixed - a genuine model-reliability
+    limitation, unchanged by this commit:** `priorities_add` (trade-off)
+    extraction on the primary understanding call has a real, measured ~1/8
+    hit rate for some phrasings (e.g. "comfort matters more than price"
+    said as a second turn). A prompt-strengthening attempt was tried,
+    measured to make it WORSE (0/8), and was reverted. This is accepted,
+    pre-existing model variance per CLAUDE.md's own standard, not a
+    routing defect.
+
+    **Explicitly not done this pass, left open (see PROGRESS.md):** no
+    ops-console consumer of the V2 events (predates this commit); the
+    real-volume condition remains a structural code-path check, not an
+    empirical 40k-SKU test (predates this commit); decision-workspace UI
+    polish for comparison/compatibility as distinct layouts remains
+    outstanding (predates this commit - this commit only added
+    `cart_status`/`payment_recovery`/`order_status` distinctness);
+    `auditroutes.py` has not been extended with a named check for `GET
+    /api/v2-activity/{connection_id}` (predates this commit); Playwright
+    coverage of purchase-outcome specifically through the browser still
+    does not exist.

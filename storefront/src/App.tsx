@@ -156,6 +156,34 @@ export default function App() {
   const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
   const [openedForDeadSearch, setOpenedForDeadSearch] = useState(false);
 
+  // Main-Shopper V1<->V2 cutover. V2 (ShopperV2Panel, real /api/v2/chat
+  // traffic) is the default assistant a normal shopper sees - V1
+  // (ChatWidget, unmodified) remains fully intact and reachable through the
+  // "Switch to classic assistant" control, never deleted or disabled.
+  // Two controlled rollback mechanisms, per CLAUDE.md's migration section:
+  // an operator-level one (VITE_SHOPPER_DEFAULT=v1 in storefront/.env.local,
+  // set at build time, no code change needed to roll every shopper back)
+  // and a per-session one (the in-panel link below, remembered for the rest
+  // of this browser session via sessionStorage so a shopper's own choice
+  // survives a page reload but never leaks to another shopper or tab).
+  const [assistantMode, setAssistantMode] = useState<"v1" | "v2">(() => {
+    if (import.meta.env.VITE_SHOPPER_DEFAULT === "v1") return "v1";
+    try {
+      const stored = sessionStorage.getItem("cv3_assistant_mode");
+      if (stored === "v1" || stored === "v2") return stored;
+    } catch {
+      /* sessionStorage unavailable - fall through to the default */
+    }
+    return "v2";
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("cv3_assistant_mode", assistantMode);
+    } catch {
+      /* best effort only - never block on this */
+    }
+  }, [assistantMode]);
+
   // Pipeline stages, rule names, token counts. Off by default, on for demos.
   const [showEngine, setShowEngine] = useState(false);
   
@@ -702,11 +730,16 @@ export default function App() {
         </>
       )}
 
-      {shopView && (
-        <ShopperV2Panel cartId={cart?.cart_id} onCartChanged={refreshCart} />
+      {shopView && assistantMode === "v2" && (
+        <ShopperV2Panel
+          cartId={cart?.cart_id}
+          onCartChanged={refreshCart}
+          defaultOpen
+          onSwitchToClassic={() => setAssistantMode("v1")}
+        />
       )}
 
-      {shopView && (
+      {shopView && assistantMode === "v1" && (
         <ChatWidget
           sessionId={sessionId}
           cartId={cart?.cart_id}
@@ -736,6 +769,17 @@ export default function App() {
           }
           onUnread={(n) => setUnread((prev) => prev + n)}
         />
+      )}
+
+      {shopView && assistantMode === "v1" && (
+        <button
+          type="button"
+          className="v2-switch-back"
+          data-testid="assistant-switch-to-v2"
+          onClick={() => setAssistantMode("v2")}
+        >
+          Try the new assistant
+        </button>
       )}
     </>
   );

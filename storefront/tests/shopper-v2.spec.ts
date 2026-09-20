@@ -22,8 +22,15 @@ const KETTLE = '/kettle';
 
 async function openShopperV2(page: Page, path: string = NORTHFIELD) {
   await page.goto(path);
-  await page.getByTestId('shopper-v2-toggle').click();
-  await expect(page.getByTestId('shopper-v2-panel')).toBeVisible();
+  // Post-cutover, the panel opens by DEFAULT (App.tsx's `assistantMode`
+  // defaults to "v2", ShopperV2Panel's `defaultOpen` is true) - only click
+  // the toggle if it isn't already open, so this helper works whether or
+  // not a given environment/run happens to start it open.
+  const panel = page.getByTestId('shopper-v2-panel');
+  if (!(await panel.isVisible().catch(() => false))) {
+    await page.getByTestId('shopper-v2-toggle').click();
+  }
+  await expect(panel).toBeVisible();
 }
 
 async function sendV2(page: Page, message: string) {
@@ -32,6 +39,61 @@ async function sendV2(page: Page, message: string) {
 }
 
 test.describe.configure({ mode: 'serial' });
+
+test('main-Shopper cutover: V2 is the default assistant, reaches /api/v2/chat, and V1 rollback is available', async ({ page }) => {
+  // No toggle click here, deliberately - a normal shopper opening the real
+  // storefront must see V2 open by itself.
+  await page.goto(NORTHFIELD);
+  await expect(page.getByTestId('shopper-v2-panel')).toBeVisible();
+
+  const v2Request = page.waitForRequest((req) => req.url().includes('/api/v2/chat'));
+  await sendV2(page, 'I need shoes');
+  const req = await v2Request;
+  expect(req.url()).toContain('/api/v2/chat');
+
+  // The rollback control is present and switches to the real, unmodified
+  // V1 ChatWidget - never removed, always one click away.
+  await page.getByTestId('shopper-v2-switch-classic').click();
+  await expect(page.getByTestId('shopper-v2-panel')).toHaveCount(0);
+  await expect(page.getByTestId('assistant-switch-to-v2')).toBeVisible();
+});
+
+test('REGRESSION: "I need shoes" through the real main-Shopper UI is discovery only - no cart proposal, no mutation, no false claim', async ({ page }) => {
+  test.setTimeout(180000);
+  // The exact bug this whole migration effort started from, verified
+  // through the actual normal storefront entry point, not a direct API
+  // call and not the old opt-in toggle.
+  await page.goto(NORTHFIELD);
+  await expect(page.getByTestId('shopper-v2-panel')).toBeVisible();
+
+  await sendV2(page, 'I need shoes');
+  await expect(page.getByTestId('shopper-v2-product-card').first()).toBeVisible({
+    timeout: 30000,
+  });
+  await expect(page.getByTestId('shopper-v2-approve')).toHaveCount(0);
+  await expect(page.getByTestId('shopper-v2-turns')).not.toContainText(
+    /added to your cart|i'd like to add/i,
+  );
+
+  // Then the positive case in the SAME real conversation: explicit intent
+  // still produces a real proposal requiring a separate, explicit approval
+  // before the cart actually changes.
+  const approveButton = page.getByTestId('shopper-v2-approve');
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await sendV2(page, "I'll take this");
+    try {
+      await approveButton.waitFor({ timeout: 20000 });
+      break;
+    } catch {
+      if (attempt === 3) {
+        throw new Error('cart-intent turn did not produce an approvable proposal after 4 attempts');
+      }
+      await page.waitForTimeout(15000);
+    }
+  }
+  await approveButton.click();
+  await expect(page.getByTestId('shopper-v2-in-cart')).toBeVisible({ timeout: 15000 });
+});
 
 test('Shopper V2 panel is reachable and discovery returns a real, grounded product', async ({ page }) => {
   await openShopperV2(page);

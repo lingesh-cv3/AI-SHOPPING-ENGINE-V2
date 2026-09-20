@@ -147,6 +147,20 @@ test.describe('Checkout flow', () => {
 });
 
 test.describe('Transcript integrity', () => {
+  // These tests exercise ChatWidget (V1) transcript behavior specifically -
+  // proactive dead-search opening, option-button persistence, payment-
+  // decline handling. Post main-Shopper cutover (App.tsx's `assistantMode`),
+  // V1 is no longer the default-mounted assistant, so each test here forces
+  // "v1" via the same sessionStorage key App.tsx itself reads, before any
+  // page script runs - the real, unmodified ChatWidget rollback path a
+  // shopper reaches via "Switch to classic assistant"/"Try the new
+  // assistant", not a special test-only code path.
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      sessionStorage.setItem('cv3_assistant_mode', 'v1');
+    });
+  });
+
   // Issue #1: restored turns used to carry text only, so a reload mid-choice
   // left a question on screen with nothing left to tap.
   test('Issue #1: option buttons survive a reload', async ({ page }) => {
