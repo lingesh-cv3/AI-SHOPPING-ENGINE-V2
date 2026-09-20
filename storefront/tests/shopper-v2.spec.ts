@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 
 const NORTHFIELD = '/northfield';
+const KETTLE = '/kettle';
 
 /**
  * Browser verification that Shopper V2 (`engine/shopper_v2/`) is actually
@@ -19,8 +20,8 @@ const NORTHFIELD = '/northfield';
  * variance.
  */
 
-async function openShopperV2(page: Page) {
-  await page.goto(NORTHFIELD);
+async function openShopperV2(page: Page, path: string = NORTHFIELD) {
+  await page.goto(path);
   await page.getByTestId('shopper-v2-toggle').click();
   await expect(page.getByTestId('shopper-v2-panel')).toBeVisible();
 }
@@ -156,6 +157,60 @@ test('multi-item mission: independent tracking, refinement, and a real basket pr
     }
   }
   await expect(page.getByTestId('shopper-v2-proposal-badge').first()).toContainText('PROPOSED');
+});
+
+test('Kettle & Bloom (GraphQL): discovery and multi-item mission work through the browser, not just Northfield', async ({ page }) => {
+  // Closes a real, previously-named gap: every test above ran against
+  // Northfield (REST) only. Kettle is GraphQL, and this is the first
+  // browser-level confirmation the V2 panel works there too, not just
+  // over direct HTTP (already covered by the live Python suites).
+  test.setTimeout(120000);
+  await openShopperV2(page, KETTLE);
+
+  await sendV2(page, 'I need a fruity coffee');
+  await expect(page.getByTestId('shopper-v2-product-card').first()).toBeVisible({
+    timeout: 30000,
+  });
+
+  await sendV2(page, 'a coffee mug and some filters');
+  await expect(page.getByTestId('shopper-v2-mission-sidebar')).toBeVisible({
+    timeout: 30000,
+  });
+  const missionItems = page.getByTestId('shopper-v2-mission-item');
+  await expect(missionItems).toHaveCount(2, { timeout: 15000 });
+});
+
+test('order status is reachable through the browser and shown as a distinct state', async ({ page }) => {
+  // Closes a real, previously-named gap: order status/purchase outcome
+  // was only ever verified at the live Python/HTTP level, never driven
+  // through the actual panel. Asking with nothing purchased yet is itself
+  // a real, valid outcome to verify - the honest-decline path, shown with
+  // its own capability badge and distinct order-status note, not folded
+  // into generic prose.
+  test.setTimeout(60000);
+  await openShopperV2(page);
+
+  await sendV2(page, 'what did I purchase?');
+  await page.waitForTimeout(6000);
+
+  await expect(page.getByTestId('shopper-v2-capability').last()).toContainText('Order status');
+});
+
+test('payment recovery is reachable through the browser and never claims an autonomous charge', async ({ page }) => {
+  // Closes a real, previously-named gap: payment recovery was only ever
+  // verified at the live Python/HTTP level. Northfield has no recovery
+  // capability, so the honest, capability-aware escalation path is the
+  // one this browser test exercises - still a real, distinct answer, not
+  // a fabricated fix, and shown with its own note that nothing is charged
+  // automatically.
+  test.setTimeout(60000);
+  await openShopperV2(page);
+
+  await sendV2(page, 'my card was declined, can you retry the payment?');
+  await page.waitForTimeout(6000);
+
+  await expect(page.getByTestId('shopper-v2-capability').last()).toContainText('Payment recovery');
+  await expect(page.getByTestId('shopper-v2-payment-recovery-note')).toBeVisible();
 });
 
 test('trade-off statement is grounded and shown with a capability badge', async ({ page }) => {

@@ -153,6 +153,16 @@ CART_MUTATING: frozenset[ActionType] = frozenset(
 #: (see `_full_catalog_sample`'s own docstring), not claimed solved.
 _MAX_CATALOG_SCAN = 2000
 
+#: `CartProposal.product_id` (engine/db/models.py) is a required, non-null
+#: column shared by every change_type - a CLEAR proposal (see the
+#: PROPOSE_CART_CHANGE dispatch below) has no single product to name, so it
+#: stores this fixed sentinel there instead of leaving the column null or
+#: altering its schema. Never a real, adapter-fetchable product id - any
+#: reader of a proposal's product_id (accept_proposal's staleness check,
+#: any UI rendering a proposal) must treat this value as "no specific
+#: product" for change_type == "CLEAR", never fetch it as a real product.
+_CLEAR_CART_SENTINEL = "__CLEAR_CART__"
+
 
 async def _full_catalog_sample(adapter, page_size: int = 200) -> list:
     """Page through as much of the real catalog as `_MAX_CATALOG_SCAN` allows,
@@ -1701,7 +1711,32 @@ class ExecutionService:
                     # deterministically rather than failing a proposal the
                     # model clearly did intend to make.
                     change_type = "REPLACE" if replaces_id else "ADD"
-                if change_type not in {"ADD", "REMOVE", "REPLACE", "CHANGE_QUANTITY"} or not product_id:
+                # "CLEAR" - propose emptying the whole cart, not one line.
+                # Genuinely additive to the existing ADD/REMOVE/REPLACE/
+                # CHANGE_QUANTITY set (shared by V1 and V2, both of which
+                # call this same dispatch): closes a real V1->V2 parity gap
+                # (V1's ActionType.CLEAR_CART executes directly, with no
+                # approval step; V2 could never construct anything but a
+                # PROPOSE_CART_CHANGE candidate, so before this it had no
+                # way to support clearing at all). This makes clearing
+                # STRICTER than V1's own direct-execute CLEAR_CART, not a
+                # weaker copy - a shopper must still explicitly accept the
+                # proposal before anything is removed, exactly like every
+                # other change_type here.
+                #
+                # `CartProposal.product_id` (models.py) is a required,
+                # non-null column shared with every other change_type and
+                # is NOT altered here (no migration, no schema change,
+                # nothing that could fail against the already-created
+                # `cv3.db` table) - a CLEAR proposal stores the fixed
+                # `_CLEAR_CART_SENTINEL` in that column instead of a real
+                # product id. `accept_proposal` (engine/api/chat.py) and
+                # every other reader of a proposal's `product_id` must
+                # treat this sentinel as "no specific product" for CLEAR,
+                # never as a real, adapter-fetchable id.
+                if change_type == "CLEAR":
+                    product_id = _CLEAR_CART_SENTINEL
+                if change_type not in {"ADD", "REMOVE", "REPLACE", "CHANGE_QUANTITY", "CLEAR"} or not product_id:
                     return Executed(
                         succeeded=False,
                         action_type=str(action_type),
@@ -1716,6 +1751,34 @@ class ExecutionService:
                         summary="A replacement needs to name what it replaces.",
                         error_code="VALIDATION_ERROR",
                         final_state=str(CaseState.FAILED),
+                    )
+                if change_type == "CLEAR":
+                    if not case.cart_id:
+                        return Executed(
+                            succeeded=False,
+                            action_type=str(action_type),
+                            summary="There is no cart to propose clearing.",
+                            error_code="CART_NOT_FOUND",
+                            final_state=str(CaseState.FAILED),
+                        )
+                    proposal = await db.cart_proposals.create(
+                        connection_id=case.connection_id,
+                        session_id=case.session_id or "",
+                        shopper_id=None,
+                        cart_id=case.cart_id,
+                        change_type="CLEAR",
+                        product_id=_CLEAR_CART_SENTINEL,
+                        reason=str(params.get("proposal_reason") or "you asked me to"),
+                        evidence=[],
+                        mission_item_id=params.get("mission_item_id")
+                        if isinstance(params.get("mission_item_id"), str)
+                        else None,
+                    )
+                    return Executed(
+                        succeeded=True,
+                        action_type=str(action_type),
+                        summary="Proposed clearing your cart.",
+                        payload={"proposal": proposal, "product_title": "your whole cart"},
                     )
                 try:
                     product = await adapter.get_product(product_id)

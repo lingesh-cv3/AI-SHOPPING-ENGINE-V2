@@ -74,6 +74,7 @@ from .checkout import run_checkout_turn
 from .compare import run_compare_turn
 from .compatibility import run_compatibility_turn, run_complementary_turn
 from .context import build_turn_context
+from .cart_status import run_cart_status_turn
 from .order_status import run_order_status_turn
 from .payment_recovery import run_payment_recovery_turn
 from .evidence import TurnEvidence, build_evidence
@@ -153,10 +154,6 @@ _UNIMPLEMENTED_CAPABILITY_REPLIES: dict[Capability, str] = {
         "I can't re-rank based on a stated trade-off through this "
         "conversation path yet - it's a planned capability, not something "
         "I can do here today."
-    ),
-    Capability.CART_STATUS: (
-        "I can't check your cart through this conversation path yet - "
-        "please use the cart panel directly."
     ),
     Capability.UNKNOWN: (
         "I'm not sure how to help with that through this conversation "
@@ -614,6 +611,47 @@ async def run_turn(
             evidence=evidence,
             used_model=False,
             trace={**trace.as_dict(), "order_id": payload.get("order_id") if payload else None},
+        )
+
+    if capability is Capability.CART_STATUS:
+        # Cart intelligence / "what's in my cart" - see cart_status.py's
+        # own docstring. A real V1 parity gap closed: V1's chat.py has a
+        # dedicated CHECK_CART_STATUS branch precisely because this
+        # question used to fall through to an unrelated browse answer.
+        # Read-only, reuses the existing CHECK_CART_STATUS dispatch
+        # unmodified - never a proposal, never a mutation.
+        if decision is None or gate is None or execution is None:
+            reply_text = (
+                "I can't check your cart through this conversation path "
+                "right now - please use the cart panel directly."
+            )
+            evidence = TurnEvidence(query=None, products=[], no_match_reason=None)
+            trace.finish()
+            return TurnResultV2(
+                reply=reply_text,
+                state=new_state,
+                evidence=evidence,
+                used_model=False,
+                trace=trace.as_dict(),
+            )
+        reply_text, payload = await run_cart_status_turn(
+            decision=decision,
+            gate=gate,
+            execution=execution,
+            connection_id=connection_id,
+            session_id=session_id,
+            cart_id=cart_id,
+            message=message,
+        )
+        evidence = TurnEvidence(query=None, products=[], no_match_reason=None)
+        trace.response_used_model = False
+        trace.finish()
+        return TurnResultV2(
+            reply=reply_text,
+            state=new_state,
+            evidence=evidence,
+            used_model=False,
+            trace={**trace.as_dict(), "cart_item_count": (payload or {}).get("item_count")},
         )
 
     if capability is not Capability.DISCOVER:

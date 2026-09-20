@@ -41,6 +41,16 @@ interface TurnV2 {
   proposalIds?: string[];
   capability?: string;
   state?: ShoppingStateV2;
+  /** The real order id this turn's ORDER_STATUS answer named, if any -
+   *  straight from `trace.order_id` (engine/shopper_v2/orchestrator.py's
+   *  ORDER_STATUS branch), never invented client-side. Lets the panel
+   *  show order status as its own distinct, labeled fact rather than
+   *  indistinguishable prose. */
+  orderId?: string;
+  /** The real item count `trace.cart_item_count` returned for a
+   *  CART_STATUS turn (engine/shopper_v2/cart_status.py), so "what's in
+   *  my cart" reads as a distinct, labeled fact too. */
+  cartItemCount?: number;
 }
 
 const CAPABILITY_LABELS: Record<string, string> = {
@@ -51,6 +61,7 @@ const CAPABILITY_LABELS: Record<string, string> = {
   trade_off: "Trade-off re-rank",
   mission: "Mission tracking",
   cart_action: "Cart proposal",
+  cart_status: "Your cart",
   checkout: "Checkout preparation",
   payment_recovery: "Payment recovery",
   order_status: "Order status",
@@ -178,6 +189,8 @@ export function ShopperV2Panel({
           proposalIds,
           capability: reply.trace?.capability as string | undefined,
           state: reply.shopping_state,
+          orderId: reply.trace?.order_id as string | undefined,
+          cartItemCount: reply.trace?.cart_item_count as number | undefined,
         },
       ]);
     } catch (err) {
@@ -315,6 +328,33 @@ export function ShopperV2Panel({
                       This is a prepared total, not a completed payment - payment
                       only ever happens from your own explicit tap on the real
                       checkout screen.
+                    </p>
+                  )}
+                  {t.capability === "payment_recovery" && (
+                    <p
+                      className="v2-payment-recovery-note"
+                      data-testid="shopper-v2-payment-recovery-note"
+                    >
+                      Nothing gets charged automatically - any payment fix needs
+                      someone at the shop to approve it first.
+                    </p>
+                  )}
+                  {t.capability === "order_status" && t.orderId && (
+                    <p
+                      className="v2-order-status-note"
+                      data-testid="shopper-v2-order-status-note"
+                    >
+                      Order {t.orderId}
+                    </p>
+                  )}
+                  {t.capability === "cart_status" && t.cartItemCount !== undefined && (
+                    <p
+                      className="v2-cart-status-note"
+                      data-testid="shopper-v2-cart-status-note"
+                    >
+                      {t.cartItemCount === 0
+                        ? "Your real cart is empty."
+                        : `${t.cartItemCount} item(s) in your real cart.`}
                     </p>
                   )}
                 </div>

@@ -2749,6 +2749,13 @@ async def accept_proposal(
     stale_reason = None
     if db.cart_proposals.is_stale(proposal):
         stale_reason = "it's been a while since I suggested that"
+    elif proposal["change_type"] == "CLEAR":
+        # No single product to revalidate - a CLEAR proposal's product_id
+        # is the fixed sentinel (engine/execution/service.py's
+        # _CLEAR_CART_SENTINEL), never a real id, so there is nothing for
+        # adapter.get_product to fetch here. The only thing that could make
+        # this proposal stale is age, already checked above.
+        pass
     else:
         try:
             fresh = await adapter.get_product(proposal["product_id"])
@@ -2806,6 +2813,12 @@ async def accept_proposal(
         if proposal.get("variant_id"):
             add_params["chosen_variant"] = proposal["variant_id"]
         parameters_by_step.append((ActionType.ADD_TO_CART, add_params))
+    elif change_type == "CLEAR":
+        # The real, existing CLEAR_CART dispatch (engine/execution/
+        # service.py) - the same one V1's direct-execute path already
+        # used; a CLEAR proposal only changes WHEN it runs (after explicit
+        # approval), never WHAT it does.
+        parameters_by_step.append((ActionType.CLEAR_CART, {}))
 
     await db.cart_proposals.set_state(req.connection_id, proposal_id, state="ACCEPTED")
     try:

@@ -41,9 +41,38 @@ def main() -> int:
         "SUGGEST_COMPLEMENTARY routes to COMPLEMENTARY",
         route("SUGGEST_COMPLEMENTARY") is Capability.COMPLEMENTARY,
     )
+    # A real, live-reproduced bug: "I need shoes" (plain discovery) made
+    # the PRIMARY model call hint ADD_TO_CART, and `route()` used to trust
+    # that hint alone to authorize Capability.CART_ACTION - producing a
+    # bogus cart proposal for a discovery statement with zero real cart
+    # intent behind it. Fixed structurally: `route()` never grants
+    # CART_ACTION for any cart-mutation ActionType hint by itself: only
+    # `intent_resolution.py::resolve_cart_target`'s separate, deterministic
+    # check (real shown/cart data, a second bounded interpretation call,
+    # explicit is_cart_intent=True required) may ever set CART_ACTION - see
+    # test_phase4_no_fabricated_cart_claim.py and
+    # test_phase4_intent_resolution.py for that check's own coverage.
     check(
-        "ADD_TO_CART routes to CART_ACTION (never silently to DISCOVER)",
-        route("ADD_TO_CART") is Capability.CART_ACTION,
+        "ADD_TO_CART's raw model hint alone routes to DISCOVER - it is not "
+        "real cart-intent signal by itself (regression for a real bug: "
+        "'I need shoes' produced a bogus cart proposal from this hint)",
+        route("ADD_TO_CART") is Capability.DISCOVER,
+    )
+    check(
+        "REMOVE_CART_LINE's raw model hint alone routes to DISCOVER too",
+        route("REMOVE_CART_LINE") is Capability.DISCOVER,
+    )
+    check(
+        "UPDATE_CART_QUANTITY's raw model hint alone routes to DISCOVER too",
+        route("UPDATE_CART_QUANTITY") is Capability.DISCOVER,
+    )
+    check(
+        "CLEAR_CART's raw model hint alone routes to DISCOVER too",
+        route("CLEAR_CART") is Capability.DISCOVER,
+    )
+    check(
+        "PROPOSE_CART_CHANGE's raw model hint alone routes to DISCOVER too",
+        route("PROPOSE_CART_CHANGE") is Capability.DISCOVER,
     )
     check(
         "PREPARE_CHECKOUT routes to CHECKOUT",

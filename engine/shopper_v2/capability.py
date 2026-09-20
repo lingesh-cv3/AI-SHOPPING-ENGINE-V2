@@ -16,6 +16,37 @@ and routed to an honest "not yet available through V2" response rather
 than silently falling through to discovery and answering the wrong
 question. COMPATIBILITY/COMPLEMENTARY/TRADE_OFF remain the next Phase 3
 work; CHECKOUT/ORDER_STATUS remain future Phase 4/5 work.
+
+**DISCOVERY vs CART_ACTION - a hard rule, not a phrase list.** A live,
+real-shopper-reproduced bug: "I need shoes" (plain discovery) produced a
+cart proposal, because the PRIMARY model call's own `hinted_action_type` -
+the model's raw, unvalidated first-pass guess at what the shopper wants,
+made before any real product is even shown - was trusted by `route()`
+below to mean the same thing as the shopper actually authorizing a cart
+mutation. A model asked to name an action for a shopping-goal statement
+will sometimes guess `ADD_TO_CART` even though the shopper never said
+anything resembling "add"/"buy"/"take" - the model is not being asked
+"is this cart intent", it is being asked "what single action fits this
+turn", and for a strong product statement it can pick the closest-sounding
+action label even when that's wrong.
+
+So `_ACTION_TYPE_TO_CAPABILITY` below deliberately does NOT map any
+cart-mutation `ActionType` (`ADD_TO_CART`/`REMOVE_CART_LINE`/
+`UPDATE_CART_QUANTITY`/`CLEAR_CART`/`PROPOSE_CART_CHANGE`) to
+`Capability.CART_ACTION`. `route()`'s mapping is a routing HINT only, and
+it is structurally forbidden from ever authorizing a cart mutation by
+itself - `Capability.CART_ACTION` can ONLY be reached one way in this
+codebase: `orchestrator.py`'s call to `intent_resolution.py::resolve_cart_target`,
+a SEPARATE, narrow, deterministic check that requires the interpreter to
+return an explicit, positive `is_cart_intent=True` AND a resolvable real
+target before anything downstream ever treats a turn as a cart operation
+(see that module's own docstring - `is_cart_intent=False` structurally
+means "fall through to whatever `route()` said," which is DISCOVER for any
+message with no clear cart-type hint). A raw cart-type hint from the
+primary call, with nothing behind it, therefore lands on `Capability.DISCOVER`
+here - correct, since a shopping-goal statement IS a discovery request,
+and the real gate for a cart action is `resolve_cart_target`, not this
+mapping.
 """
 
 from __future__ import annotations
@@ -53,11 +84,20 @@ _ACTION_TYPE_TO_CAPABILITY: dict[str, Capability] = {
     "SUGGEST_COMPLEMENTARY": Capability.COMPLEMENTARY,
     "CART_INTELLIGENCE": Capability.CART_STATUS,
     "CHECK_CART_STATUS": Capability.CART_STATUS,
-    "ADD_TO_CART": Capability.CART_ACTION,
-    "REMOVE_CART_LINE": Capability.CART_ACTION,
-    "UPDATE_CART_QUANTITY": Capability.CART_ACTION,
-    "CLEAR_CART": Capability.CART_ACTION,
-    "PROPOSE_CART_CHANGE": Capability.CART_ACTION,
+    # Deliberately NOT mapped to Capability.CART_ACTION - see this module's
+    # own docstring. The primary model call's raw guess at one of these
+    # ActionTypes is not real cart-intent signal on its own (a live bug:
+    # "I need shoes" produced ADD_TO_CART from the primary call). Routing
+    # these to DISCOVER means a genuine cart-intent message still gets a
+    # correct answer, because `orchestrator.py` runs the SEPARATE,
+    # deterministic `resolve_cart_target` check on every turn regardless of
+    # what `route()` returns here, and only THAT check may ever set
+    # `Capability.CART_ACTION`.
+    "ADD_TO_CART": Capability.DISCOVER,
+    "REMOVE_CART_LINE": Capability.DISCOVER,
+    "UPDATE_CART_QUANTITY": Capability.DISCOVER,
+    "CLEAR_CART": Capability.DISCOVER,
+    "PROPOSE_CART_CHANGE": Capability.DISCOVER,
     "PREPARE_CHECKOUT": Capability.CHECKOUT,
     "RETRY_PAYMENT": Capability.PAYMENT_RECOVERY,
     "OFFER_ALTERNATE_PAYMENT": Capability.PAYMENT_RECOVERY,

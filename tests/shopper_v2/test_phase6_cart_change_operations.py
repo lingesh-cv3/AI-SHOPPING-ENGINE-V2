@@ -1,7 +1,8 @@
-"""Generalized cart-change operations: REMOVE and CHANGE_QUANTITY proposals
-through `cart_proposal.py::run_cart_change_proposal_turn`, plus the honest
-"clear" decline (see cart_proposal.py's own docstring for why CLEAR_CART is
-not routed through the reused proposal mechanism).
+"""Generalized cart-change operations: REMOVE, CHANGE_QUANTITY, and CLEAR
+proposals through `cart_proposal.py::run_cart_change_proposal_turn` - see
+that module's own docstring for how CLEAR was added to the existing,
+shared `PROPOSE_CART_CHANGE` mechanism (V1<->V2 parity migration), never a
+new commerce implementation.
 
 Live: requires the Northfield demo merchant backend on 8001 (creates and
 mutates a real cart). Does not require the engine (port 8000) - calls
@@ -53,16 +54,25 @@ async def main() -> None:
 
         state = ShoppingStateV2(session_id=session_id, connection_id=connection_id)
 
-        # 1. "clear" is an honest, explicit decline - never a fabricated mutation.
+        # 1. "clear" now proposes (never mutates directly) - a real, stored
+        #    CLEAR proposal, stricter than V1's own direct-execute
+        #    CLEAR_CART (see cart_proposal.py's docstring on why).
         clear_reply, clear_proposal = await run_cart_change_proposal_turn(
             decision=engine.decision, gate=engine.gate, execution=engine.execution,
             connection_id=connection_id, session_id=session_id, cart_id=cart.cart_id,
             message="clear my cart", state=state, operation="clear", hinted_product_id=None,
         )
-        check("clear is explicitly not supported - no proposal fabricated", clear_proposal is None)
+        check("a CLEAR proposal is created, not a fabricated decline", clear_proposal is not None)
         check("clear reply is honest, not silent", bool(clear_reply))
-        cart_after_clear_attempt = await adapter.get_cart(cart.cart_id)
-        check("the real cart is untouched by the clear decline", len(cart_after_clear_attempt.lines) == 1)
+        cart_after_clear_proposal = await adapter.get_cart(cart.cart_id)
+        check(
+            "the cart is NOT mutated by proposing a clear",
+            len(cart_after_clear_proposal.lines) == 1,
+        )
+        check(
+            "the stored proposal's change_type is CLEAR",
+            clear_proposal is not None and clear_proposal.get("change_type") == "CLEAR",
+        )
 
         # 2. REMOVE proposal is created, cart not yet mutated.
         remove_reply, remove_proposal = await run_cart_change_proposal_turn(
@@ -103,6 +113,56 @@ async def main() -> None:
             message="remove that", state=state, operation="remove", hinted_product_id="P3001",
         )
         check("no cart_id -> honest decline, no proposal created", no_cart_proposal is None)
+
+        # 6. Approving the CLEAR proposal (the same mechanics
+        #    engine/api/chat.py::accept_proposal uses - decision -> risk ->
+        #    execute_case) actually empties the real cart, and only after
+        #    approval - never before (checks 1's own assertion above).
+        from engine.decision import operation_for
+        from engine.execution import service as execution_service
+        from engine.db import record_case
+        from shared.models import ActionType, ProposedAction
+
+        check(
+            "the stored proposal's product_id is the documented sentinel, "
+            "never a real product id",
+            clear_proposal is not None
+            and clear_proposal.get("product_id") == execution_service._CLEAR_CART_SENTINEL,
+        )
+
+        clear_action = ProposedAction(
+            action_type=ActionType.CLEAR_CART,
+            operation=operation_for(ActionType.CLEAR_CART),
+            parameters={},
+        )
+        trace3 = await engine.decision.decide([clear_action], connection_id=connection_id)
+        risk3 = engine.gate.classify(trace3.selected)
+        check("CLEAR_CART is auto-approved (non-financial)", str(risk3.outcome) == "AUTO")
+
+        case_id3 = await record_case(
+            connection_id=connection_id, friction=None, query="accept clear",
+            cart_id=cart.cart_id, order_id=None, session_id=session_id,
+            reasoning={"used_model": False, "model_name": None, "diagnosis": None,
+                       "evidence": [], "fallback_reason": None, "model_reply": None,
+                       "shopper_reply": None, "prompt_tokens": None, "completion_tokens": None},
+            decision={
+                "proposed": [{"action_type": str(clear_action.action_type), "parameters": {},
+                              "rationale": None, "confidence": None}],
+                "rejected": [],
+                "selected_action": str(trace3.selected.action.action_type),
+                "selection_reason": trace3.selected.selection_reason,
+            },
+            risk={"outcome": str(risk3.outcome), "rule": risk3.policy_rule,
+                  "reason": risk3.reason, "financial": risk3.properties.financial},
+        )
+        executed3 = await engine.execution.execute_case(connection_id, case_id3)
+        check("the real CLEAR_CART executes successfully once approved", executed3.succeeded)
+
+        cart_after_clear = await adapter.get_cart(cart.cart_id)
+        check(
+            "the cart is genuinely empty only after the proposal is approved",
+            len(cart_after_clear.lines) == 0,
+        )
 
     finally:
         await engine.close()

@@ -20,20 +20,20 @@ guess is not") for a path with no tap UI yet: the model's inferred target
 is never enough on its own; a second, explicit shopper action is always
 required before anything in a cart actually changes.
 
-`PROPOSE_CART_CHANGE`'s own `proposal_change_type` already supports "ADD",
-"REMOVE", and "CHANGE_QUANTITY" (`accept_proposal`/`execute_case`'s
-dispatch, both unmodified) - this module maps this package's own
-`operation` vocabulary ("add"/"remove"/"set_quantity") onto that existing,
-already-real set, never inventing a new one. "clear" (emptying the whole
-cart) is NOT supported through this mechanism: `PROPOSE_CART_CHANGE`'s own
-change_type enum has no "CLEAR" option, and `ActionType.CLEAR_CART` itself
-executes directly in V1 (no proposal step) via a dispatch this package
-does not call, by design (see this module's own hard safety rule above).
-Building a new proposal semantic for it, or executing `CLEAR_CART`
-directly from V2, would either duplicate commerce logic or weaken the
-"propose then approve" guarantee this module exists to hold - so a
-"clear my cart" turn gets an honest, explicit "not supported this way -
-use the cart panel" reply instead of either.
+`PROPOSE_CART_CHANGE`'s own `proposal_change_type` supports "ADD",
+"REMOVE", "CHANGE_QUANTITY", and (as of the V1<->V2 parity migration)
+"CLEAR" (`accept_proposal`/`execute_case`'s dispatch, both extended there,
+not forked or duplicated here) - this module maps this package's own
+`operation` vocabulary ("add"/"remove"/"set_quantity"/"clear") onto that
+existing, real set. "clear" (emptying the whole cart) needs no product
+reference at all - `intent_resolution.py` already returns
+`operation="clear"` with no `product_id` for exactly this case. Genuinely
+STRICTER than V1's own direct-execute `ActionType.CLEAR_CART` (no proposal
+step there): a V2-originated clear is always propose-then-approve, same as
+every other change_type this module builds - never a weaker copy of V1's
+behavior, never a new commerce implementation (the actual clearing still
+happens through `ActionType.CLEAR_CART`'s existing, unmodified dispatch,
+reached only after the shopper's own explicit accept).
 
 Call path, identical to V1's (see `engine/api/chat.py` around its own
 `engine.decision.decide` / `engine.gate.classify` / `db.record_case` /
@@ -85,19 +85,16 @@ _NEEDS_APPROVAL_REPLY = (
     "I can suggest that, but someone at the shop needs to approve it "
     "first - I've passed it on."
 )
-_CLEAR_NOT_SUPPORTED_REPLY = (
-    "I can't clear your whole cart through this conversation path yet - "
-    "please use the cart panel to empty it."
-)
-
-#: This package's own operation vocabulary -> the real, existing
-#: `proposal_change_type` values `accept_proposal`'s dispatch already
-#: understands (engine/api/chat.py / engine/execution/service.py, both
-#: unmodified).
+#: This package's own operation vocabulary -> the real
+#: `proposal_change_type` values `accept_proposal`'s dispatch understands
+#: (engine/api/chat.py / engine/execution/service.py - CLEAR added there
+#: as part of the V1<->V2 parity migration, ADD/REMOVE/CHANGE_QUANTITY
+#: pre-existing and unmodified).
 _CHANGE_TYPE_FOR_OPERATION = {
     "add": "ADD",
     "remove": "REMOVE",
     "set_quantity": "CHANGE_QUANTITY",
+    "clear": "CLEAR",
 }
 
 
@@ -123,9 +120,10 @@ async def run_cart_change_proposal_turn(
     EXISTING `/api/chat/proposals/{id}/accept` (or `/reject`) route to
     actually act on it. Nothing in this function mutates a cart.
 
-    `operation` is one of "add"/"remove"/"set_quantity"/"clear" - see this
-    module's own docstring for why "clear" is explicitly unsupported here
-    rather than faked.
+    `operation` is one of "add"/"remove"/"set_quantity"/"clear". "clear"
+    needs no product reference at all - `intent_resolution.py` already
+    returns it with no `product_id`, and no product-resolution step below
+    applies to it.
 
     `mission_item_id`, when given (only ever by
     `basket_proposal.py`, for a multi-item mission's own proposals), is
@@ -135,9 +133,6 @@ async def run_cart_change_proposal_turn(
     proposal fulfills which tracked item. `reason`, when given, overrides
     the default "you asked me to" - `basket_proposal.py` uses this to name
     the mission item in the stored, ops-visible proposal reason."""
-    if operation == "clear":
-        return (_CLEAR_NOT_SUPPORTED_REPLY, None)
-
     if not cart_id:
         return (_NO_CART_REPLY, None)
 
@@ -145,26 +140,31 @@ async def run_cart_change_proposal_turn(
     if change_type is None:
         return (_NO_TARGET_REPLY, None)
 
-    # Resolution order: the model's own hint, IF it turns out to name a
-    # real product (verified inside execute_case's own PROPOSE_CART_CHANGE
-    # dispatch, via a real adapter.get_product call - not re-verified here,
-    # to avoid a second, redundant fetch) - otherwise, for "add" only, if
-    # exactly one product is currently under consideration
-    # (`active_products`, set by a prior discovery/compare turn), that one.
-    # Never guessed at when ambiguous, and never a fallback at all for
-    # remove/set_quantity (a cart-line reference is expected to already be
-    # resolved by `intent_resolution.py`'s cart-aware resolution before
-    # this function is ever called for those operations).
-    product_id = hinted_product_id
-    if not product_id and operation == "add":
-        candidates = list(dict.fromkeys(state.active_products))
-        if len(candidates) == 1:
-            product_id = candidates[0]
+    if operation == "clear":
+        product_id = None
+        quantity_param = None
+    else:
+        # Resolution order: the model's own hint, IF it turns out to name a
+        # real product (verified inside execute_case's own
+        # PROPOSE_CART_CHANGE dispatch, via a real adapter.get_product call
+        # - not re-verified here, to avoid a second, redundant fetch) -
+        # otherwise, for "add" only, if exactly one product is currently
+        # under consideration (`active_products`, set by a prior discovery/
+        # compare turn), that one. Never guessed at when ambiguous, and
+        # never a fallback at all for remove/set_quantity (a cart-line
+        # reference is expected to already be resolved by
+        # `intent_resolution.py`'s cart-aware resolution before this
+        # function is ever called for those operations).
+        product_id = hinted_product_id
+        if not product_id and operation == "add":
+            candidates = list(dict.fromkeys(state.active_products))
+            if len(candidates) == 1:
+                product_id = candidates[0]
 
-    if not product_id:
-        return (_NO_PRODUCT_REPLY if operation == "add" else _NO_TARGET_REPLY, None)
+        if not product_id:
+            return (_NO_PRODUCT_REPLY if operation == "add" else _NO_TARGET_REPLY, None)
 
-    quantity_param = quantity if operation == "set_quantity" else None
+        quantity_param = quantity if operation == "set_quantity" else None
 
     proposed = ProposedAction(
         action_type=ActionType.PROPOSE_CART_CHANGE,
@@ -255,6 +255,7 @@ async def run_cart_change_proposal_turn(
         "add": f"add {title} to your cart",
         "remove": f"remove {title} from your cart",
         "set_quantity": f"change {title} to quantity {quantity or 1}",
+        "clear": "clear your whole cart",
     }[operation]
     qty_note = (
         f" You asked for {quantity} - I can only propose one for now; "

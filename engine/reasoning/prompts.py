@@ -1132,6 +1132,29 @@ def cart_reference_prompt(
     parts.append(f"Products currently SHOWN to the shopper (for 'add'):\n{shown or '  (none)'}")
     parts.append(f"Lines currently IN the shopper's cart (for 'remove'/'set_quantity'/'clear'):\n{cart_list or '  (empty)'}")
     parts.append(
+        "is_cart_intent is true when the shopper has made a clear DECISION "
+        "to add, remove, change the quantity of, or clear something right "
+        "now - 'I'll take this', 'add that', 'get me the first one', "
+        "'I'll take it', 'remove the shoes', 'make that two', 'clear my "
+        "cart' are all clearly is_cart_intent=true, even when the only "
+        "reference is a bare pronoun like 'this'/'it'/'that one' next to "
+        "one clearly identifiable item - a decision does not need extra "
+        "verbs beyond the one it already has.\n\n"
+        "is_cart_intent is false when the shopper is only stating or "
+        "restating what kind of product they want, want to see, or are "
+        "looking for - a search/discovery statement, not a decision - "
+        "EVEN IF it happens to name the same category, or the same "
+        "product, as something already shown. A live, real bug this "
+        "distinction exists to prevent: a shopper already shown a running "
+        "shoe who then said 'I need running shoes' again (still just "
+        "describing what they want, no decision made) was wrongly read as "
+        "is_cart_intent=true, fabricating a cart proposal nobody asked "
+        "for. The test is whether the shopper is DECIDING to act versus "
+        "still DESCRIBING what they want - 'I need running shoes'/'show me "
+        "shoes'/'what do you have' are false; 'I'll take this'/'add that'/"
+        "'I want to buy it' are true, because the second group states a "
+        "decision about a specific thing while the first group only names "
+        "a category or repeats a want.\n\n"
         "What operation does this message ask for - add/remove/set_quantity/"
         "clear/none? If add/remove/set_quantity and you can tell which item, "
         "give its 1-based position in the RELEVANT list above "
@@ -1166,7 +1189,14 @@ def cart_reference_tool() -> dict[str, Any]:
                 "properties": {
                     "is_cart_intent": {
                         "type": "boolean",
-                        "description": "True if the message asks to change the cart in some way.",
+                        "description": (
+                            "True ONLY if the shopper is explicitly asking to change "
+                            "their cart right now (add/remove/change quantity/clear). "
+                            "False for a message that merely states or restates what "
+                            "product or category they want or are looking for, even "
+                            "if it names something already shown - that is still "
+                            "discovery, not cart intent."
+                        ),
                     },
                     "operation": {
                         "type": "string",
