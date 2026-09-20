@@ -378,7 +378,13 @@ current shape produces exactly the generic output this document is trying to
 stop. Closing it needs a second reasoning pass over the executed result, or a
 different pipeline shape — it is architecture work, and it belongs at the top
 of the shopper queue rather than inside a checkbox note. See PROGRESS.md,
-Next Steps, item 0.
+Next Steps, item 0 (V1's `synthesize()` fix) and PROGRESS.md's Shopper V2
+section (V2's structural fix, a different pipeline shape entirely — see
+"Shopper V2" under Architecture below). Building one of these four items
+against V2 specifically is not yet unblocked either: V2's own retrieval
+layer has real, measured gaps of its own (PROGRESS.md, Shopper V2 §E) that
+should be closed first, the same standing rule this section already states
+for V1.
 
 ### Before building anything from the roadmap
 
@@ -565,12 +571,77 @@ engine/execution/    carrying actions out
 engine/api/          routes, auth, accounts, shopper sessions
 engine/db/           models, repository, keys, shopper accounts
 engine/session/      conversation memory
+engine/shopper_v2/   the target conversational architecture - see below
 engine/notify/       order-confirmation mail (fails soft; recorded, not
                      delivered, until the MAILER_SMTP_HOST env var is set)
 adapters/            one per platform
 shared/              the commerce interface and action types
 storefront/          React, Vite
 ```
+
+### Shopper V2 — the target conversational architecture
+
+`engine/shopper_v2/` (route: `/api/v2/chat`, `engine/api/chat_v2.py`) is the
+**target** shopper conversational architecture. It is additive: **V1
+(`engine/api/chat.py` and everything above) remains fully live and is what
+the real storefront uses today** - V2 is not a replacement in progress, it
+is a parallel path being built out and validated before anything switches
+over. Do not describe V2 as superseding V1 anywhere in this codebase's
+docs until a real cutover has actually happened and is verified.
+
+V2 is no longer purely read-only - as of the cart-proposal, checkout,
+payment-recovery, and basket-proposal work (see PROGRESS.md's Shopper V2
+section), it can act, not just discover, exactly as this section already
+anticipated below: every such action still routes through the same,
+unmodified Decision Engine → Risk Gate → execution → adapter pipeline
+everything else does, and still only ever constructs a
+`PROPOSE_CART_CHANGE`/`PREPARE_CHECKOUT`/`CHECK_ORDER_STATUS`/recovery
+candidate - never a direct cart mutation. A cart only ever actually
+changes after a shopper's separate, explicit call to the existing,
+unmodified `POST /api/chat/proposals/{id}/accept` route.
+
+V2 owns: understanding (turning a shopper message into a typed
+`StateDelta`), state (`ShoppingStateV2`, a typed view over the same
+`shopping_states` table V1 already uses), context assembly, retrieval,
+evidence, and response grounding. Its one architectural achievement so far
+is structural: the model's pre-fetch reply and proposed actions are
+discarded before retrieval ever runs (`engine/shopper_v2/understanding.py`),
+so `respond.py` has no way to generate shopper-facing text from anything
+other than the real, already-fetched evidence - the reply-before-data
+defect (below) cannot recur on this path by construction, not by
+discipline. This is a **second, independent fix** for that defect,
+alongside the `ReasoningService.synthesize()` fix V1 already has (Next
+Steps item 0 in PROGRESS.md) - neither supersedes the other.
+
+**V2 does not own, and must never import, the Decision Engine, Risk Gate,
+execution's mutation paths, adapters' write methods, or anything
+cart/checkout/payment.** Those remain exactly as authoritative for V2 as
+for V1 - a V2 feature that needs to act, not just discover, routes through
+the same Decision Engine → Risk Gate → execution → adapter pipeline
+everything else does. See `engine/shopper_v2/orchestrator.py`'s own
+docstring for the enforced import boundary, and PROGRESS.md's Shopper V2
+section for exactly what is and is not built as of the last reconciliation.
+
+**Shopper features from the Shopper Roadmap above remain the target
+product regardless of which pipeline eventually serves them** - moving to
+V2 changes the architecture serving a feature, not which features are
+worth building.
+
+**Technology choices are evidence-gated, not assumed.** Semantic retrieval,
+vector search, reranking, PostgreSQL, LangGraph, or any other named
+technology in `SHOPPER_V2_STAGE2_SPEC.md`'s decision table is adopted only
+when a measured gap in `SHOPPER_V2_BASELINE_REPORT.md` (or its successor)
+actually justifies it - never by default, never because it is popular. As
+of the last measurement, every real gap found traces to the existing
+deterministic/state layer, not to a genuine semantic-matching failure - see
+PROGRESS.md's Shopper V2 section, part E. **Do not solve retrieval
+correctness through an endless sequence of phrase-specific keyword
+patches** - the pre-V2 history of `engine/execution/relevance.py` (~20
+documented point-fixes, each for one reproduced phrase) is the worked
+example of that failure mode; V2's typed contracts
+(`engine/shopper_v2/contracts.py`) and evaluation corpus exist specifically
+so the next fix is chosen from measured evidence about a whole pipeline
+stage, not from one more reproduced sentence.
 
 Two handwritten walkthroughs live in `Readme.MD`, not here, because they are
 longer than anything that belongs in a practice file: "Adding a platform" (one

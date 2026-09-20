@@ -59,6 +59,52 @@ operator key must be typed rather than built in.
 Reported after a walkthrough. **Not a complete list** - walk the product before
 trusting anything.
 
+**Shopper V2 discovery: `respond.py`'s synthesis pass can fabricate a
+personalization claim with nothing in state to back it.** Live-reproduced
+during the trade-off reasoning/re-ranking slice (session
+`sess_live_tradeoff_seeded`, message "lightweight is what matters",
+`conn_demo`, `ShoppingStateV2.priorities == []` at the time): the reply
+said "This option perfectly aligns with your priority for lightweight
+footwear" on a turn where no priority was actually captured that turn.
+`respond.py` already has an anti-fabrication guard for a fictional CART
+claim (`_claims_a_cart_action`) but never inherited V1's equivalent guard
+for a fabricated PRIORITY/PERSONALIZATION claim
+(`mission_ranking.has_stated_priority`/`stated_terms`, the exact mechanism
+V1's own `_honest_synthesis` uses for this). Smallest safe fix: apply that
+same existing check inside `respond.py`'s synthesis-acceptance branch,
+mirroring the cart-claim guard's own shape - not attempted yet, to avoid
+scope creep beyond the slice that found it. See PROGRESS.md's Shopper V2
+section, trade-off reasoning writeup, for the full account.
+
+**Shopper V2 multi-item missions budget bug - FIXED and regression-tested
+this session, not yet re-value-audited.** `engine/shopper_v2/missions.py`
+previously treated a numeric "under X" budget statement on one mission item
+as free text only, hardcoding `item_state_dict["budget_amount"]` to `None`
+regardless of what the shopper said, so `mission_ranking.rank_and_filter`
+never enforced a real price ceiling for a multi-item mission and an
+over-budget product could be shown as a verified match (live-reproduced
+last session: a genuinely-in-budget ₹4,299 product dropped out after "under
+5000 for the shoes," while nothing enforced the ceiling for products that
+should have been excluded either). Fixed by adding a deterministic
+regex-based extractor (`_extract_budget`, new `_BUDGET_PATTERN`) that
+parses "under/below/less than/up to/no more than/max <amount>" out of an
+item's constraint text and passes the numeric result as
+`item_state_dict["budget_amount"]` - no new model call, reuses the existing
+unmodified `mission_ranking.rank_and_filter` numeric hard-filter. Added a
+regression check to `test_phase7_missions.py`'s existing live "under 5000"
+test asserting every real candidate returned actually respects the stated
+budget (fetches real price via `adapter.get_product`). Verified this
+session: `test_phase7_missions.py`, `test_phase4_cart_proposal.py`,
+`test_phase8_basket_proposal.py`, and `test_phase1_findings.py` all pass
+clean against the live running engine/merchant, no regressions.
+`invariant-guard`/`value-auditor` were not re-run specifically for this
+fix (pure decision-support numeric-filter change, no ActionType/execution/
+risk surface touched - the same category invariant-guard already covered
+as SAFE for this batch, see below). Stays here rather than moving to
+Completed.md because it's one fix inside a larger uncommitted batch that
+has not cleared value-auditor as a whole - see the batch-level finding
+below.
+
 **Round 8 of the honesty/relevance hardening pass - two real, verified fixes
 (`c377250`, `6e650b1`), following a value-auditor pass that found the
 round-7 "fixes" still broken.** Both problems this session has repeatedly
@@ -2091,6 +2137,1498 @@ should extend the Playwright suite to them rather than reach for
 
 ---
 
+## Shopper V2 — Conversational Architecture (Stage 1 + Stage 2A)
+
+Reconciled against the actual repository on 2026-09-18: `git log`, the
+current contents of `engine/shopper_v2/`, `engine/api/chat_v2.py`,
+`tests/shopper_v2/*.py`, `SHOPPER_V2_STAGE2_SPEC.md`, and
+`SHOPPER_V2_BASELINE_REPORT.md`. This section replaces having no record of
+Shopper V2 in this file at all - prior to this reconciliation, PROGRESS.md
+contained zero mentions of it despite commit `cfc2b46` and an uncommitted
+Stage 2A already existing in the working tree.
+
+**V2 is a new, additive, read-only-so-far conversational path living
+entirely under `engine/shopper_v2/` and `engine/api/chat_v2.py`
+(`/api/v2/chat`). V1 (`engine/api/chat.py` and everything it calls) is
+completely unmodified and remains the only path with a real frontend
+consumer.** Nothing below implies V1 has been replaced, deprecated, or is
+being phased out - see CLAUDE.md's Architecture section for the standing
+rule that V1 stays live while V2 is validated.
+
+### A. Verified complete
+
+- **`/api/v2/chat` route, wired and isolated** (`engine/api/chat_v2.py`,
+  commit `cfc2b46`). Reuses V1's exact auth/ownership dependencies
+  (`any_key`, `belongs_to`, `require_owner`, `visitor`) - no new auth code.
+  Confirmed by reading: does not import `engine.api.chat`, and nothing in
+  `engine.api.chat` imports it.
+- **The enforced call order that structurally fixes the reply-before-data
+  defect for this path**: `understand -> StateDelta -> ShoppingStateV2 ->
+  context -> retrieve -> evidence -> respond`
+  (`engine/shopper_v2/orchestrator.py::run_turn`). The model's pre-fetch
+  `reply` and `actions` are read and immediately discarded inside
+  `understanding.py` - confirmed by reading, not assumed - so there is no
+  variable carrying pre-fetch text past that point for `respond.py` to
+  accidentally use. This is the one thing V2 does that V1's own
+  reply-before-data fix (Next Steps item 0 below, `d2db753` /
+  `ReasoningService.synthesize()`) does **not** do: V1's fix adds a *second*
+  model call after execution for two action types; V2 removes the
+  pre-fetch reply from the pipeline entirely, for every turn on this path.
+  **These are two separate, parallel fixes for the same named defect, not
+  the same fix described twice** - V1's is a patch on the existing
+  pipeline shape; V2's is a different pipeline shape. Neither supersedes
+  the other; V1's fix is still what a real shopper on `/northfield` or
+  `/kettle` actually experiences today.
+- **Typed `ShoppingStateV2`** (`engine/shopper_v2/state.py`) - a typed view
+  over the existing `shopping_states` table and lock (`engine/db/shopping_state.py`),
+  not a new table or schema. `StateDelta` (`understanding.py`) reshapes the
+  existing `propose_actions` tool output; no new prompt, no new tool
+  schema, no new LLM client.
+- **Stale-goal / query-fallback fix, live-verified in code**: `orchestrator.py`
+  deliberately falls back to the raw shopper message, not the stored
+  `goal`, for retrieval (its own comment records the exact regression this
+  fixed - every later turn re-searching the first turn's goal forever).
+  Confirmed still in place. Finding 4's constraint-only-turn residual gap
+  (noted here as open in the previous reconciliation) is now closed - see
+  "Phase 1" below.
+- **`ProductSearchResult` unwrapping fix**: `retrieval.py` reads `.products`
+  off the real `ProductSearchResult` object (not a bare list), confirmed
+  by reading the code against `shared/models/commerce.py`.
+- **Stage 1 regression suite, all passing as of this reconciliation** (re-run
+  2026-09-18, model-free where documented): `test_multiturn_continuity.py`,
+  `test_regression_false_decline.py`, `test_regression_false_substitution.py`,
+  `test_state_transitions.py`, `test_tenant_isolation_v2.py`,
+  `test_zero_data_platform_down.py` - 6/6 files pass.
+- **Tenant isolation on `/api/v2/chat`**: `test_tenant_isolation_v2.py`
+  passes (refused without a key, accepted with the shop's own, refused
+  another merchant's key, refused a different shopper's session even with
+  the same publishable key). `auditroutes.py` also re-run clean against the
+  full route set, V2 included in the same running engine.
+- **Zero-data / platform-down honesty on V2**: `test_zero_data_platform_down.py`
+  passes - no fabricated product, no raw exception reaching the reply.
+- **V1 fully preserved**: confirmed by `git status`/`git diff` - no V1 file
+  (`engine/api/chat.py`, `engine/execution/*`, `engine/decision/*`,
+  `engine/risk/*`) has ever been modified by any V2 or Stage 2A commit or
+  working-tree change. `fuzz.py` and `auditroutes.py` both clean against
+  the live engine with V2 present.
+- **Commit `cfc2b46`** - "feat: add isolated Shopper V2 read-only
+  architecture" - is the only commit on this branch touching
+  `engine/shopper_v2/`. Everything else described in this section (Stage
+  2A) is **uncommitted**, confirmed by `git status --short` still showing
+  `engine/shopper_v2/contracts.py`, `engine/shopper_v2/eval/`,
+  `tests/shopper_v2/test_stage2a_*.py`, `SHOPPER_V2_STAGE2_SPEC.md`, and
+  `SHOPPER_V2_BASELINE_REPORT.md` as untracked.
+
+### B. Implemented but not fully verified
+
+- **Stage 2A typed retrieval contracts** (`engine/shopper_v2/contracts.py`):
+  `SearchIntent`, `CandidateSet`, `HardFilterResult`, `RankingResult`,
+  `VerifiedProductEvidence`, all Pydantic, all covered by
+  `tests/shopper_v2/test_stage2a_contracts.py` (8/8 pass, model-free).
+  **Now wired into the live `/api/v2/chat` route** as of Phase 1 (see
+  below) - `SearchIntent`/`CandidateSet` are built by
+  `engine/shopper_v2/pipeline.py` on every real turn, not only inside the
+  offline eval package. `HardFilterResult`/`RankingResult` themselves are
+  still only instantiated inside `engine/shopper_v2/eval/adapt.py` for
+  measurement - `pipeline.py` achieves the same fixes by calling
+  `evidence.build_evidence` directly (now Finding-2/3-fixed) rather than by
+  constructing those two contract types at runtime; genuinely still open,
+  not silently done.
+- **Stage 2A evaluation corpus and baseline runner**
+  (`engine/shopper_v2/eval/corpus.py`, `runner.py`, `adapt.py`,
+  `metrics.py`, `run_baseline.py`) - 20 cases / 24 turns, ground truth
+  hand-traced against the real seeded catalogs (not LLM-decided).
+  `tests/shopper_v2/test_stage2a_eval.py` (9/9 pass, model-free,
+  server-free) verifies the infrastructure itself (corpus loading, metric
+  arithmetic, deterministic repeatability, tenant/merchant separation,
+  zero-data/platform-down stubs). The corpus's *content* (whether its
+  ground truth stays correct as the catalog changes) has not been
+  independently re-verified by anyone other than the session that wrote
+  it.
+- **`invariant-guard` pass on Stage 2A** - run and returned SAFE (no import
+  of `engine.decision`/`engine.risk`/`engine.api`/execution mutation
+  paths; only `adapter.search_products` called; no model assertion of
+  risk/price/stock/existence; tenant separation preserved by construction).
+  Not yet followed by an independent `value-auditor` pass, because Stage 2A
+  is explicitly measurement infrastructure, not a shopper-facing feature -
+  the value bar does not apply to it the way it applies to a feature (see
+  CLAUDE.md's Feature Implementation Rules); this is noted here rather than
+  silently skipped.
+
+### C. Currently in progress
+
+Nothing is mid-implementation as of this reconciliation. Stage 1 and Stage
+2A are each internally complete for their own stated scope; no partially-
+written code exists under `engine/shopper_v2/`.
+
+### D. Not yet implemented (in V2)
+
+Everything below is either V1-only today, or not built anywhere:
+
+- **Mission-based / multi-item shopping.** `SearchIntent.mission_context`
+  (Stage 2A contract) and `ShoppingStateV2.goal`/`mission_status` exist as
+  fields, but nothing in V2 assembles a multi-item, cross-product mission
+  response - each V2 turn is still one query, one response. Explicitly
+  out of scope for Stage 2A per its own spec (§12).
+- **Product comparison.** No `COMPARE_PRODUCTS`-equivalent turn type exists
+  in V2 at all - confirmed by reading `chat_v2.py`/`orchestrator.py`, which
+  have exactly one turn shape (discovery). `SearchIntent.is_comparison`
+  exists as an anticipatory field, unused.
+- **Trade-off reasoning, personalization beyond `memory_facts` pass-through,
+  compatibility/complementary-product reasoning.** `evidence.py` accepts a
+  `memory_facts` parameter and passes it to the existing
+  `mission_ranking.rank_and_filter`, but this has not been independently
+  tested against V2's own route - it is reused, not verified in this
+  context. `Product.compatible_with` (populated in both demo catalogs) is
+  never read anywhere under `engine/shopper_v2/`.
+- **Cart, cart proposals, shopper approval/rejection, Decision Engine,
+  Risk Gate, execution, checkout, payment recovery, purchase outcome,
+  post-purchase.** All explicitly out of scope for V2's current stage by
+  design - `orchestrator.py`'s own docstring states V2 must never import
+  `engine.decision`, `engine.risk`, or `engine.execution`'s mutation paths,
+  and confirmed by reading that it does not. This is not a gap to close
+  next; it is the architectural boundary V2 Stage 1/2A were built to
+  respect.
+- **A shopper-facing UI for V2.** Confirmed by search: nothing under
+  `storefront/src` references `/api/v2/chat` or any V2 type. The
+  storefront a real shopper uses today is entirely V1.
+- **Merchant-facing measurement of V2 activity.** No merchant report or
+  ops-stats surface reads anything from `/api/v2/chat`'s traffic.
+- **Return-risk prevention, proactive assistance, multimodal shopping.**
+  Roadmap items (CLAUDE.md Phase 2/3), not built in V1 or V2.
+
+### E. Known limitations (Stage 2A's measured findings, updated after
+Phase 1's fixes - see `SHOPPER_V2_BASELINE_REPORT.md` for each finding's
+original trace, and "Phase 1" below for the fix and its live verification)
+
+1. **CLOSED.** A stopword substring-matching gap in Northfield's own
+   initial search (`sample_merchant/store.py`) - ordinary words like
+   "for"/"the" substring-match inside unrelated titles. **No code change
+   was needed or made**: confirmed (again, deliberately, in Phase 1) that
+   the existing re-scoring safety net in `evidence.py` already catches
+   every case this produces before it reaches a shopper. `sample_merchant/store.py`
+   itself is intentionally a bad-search demo platform by design (its own
+   docstring) and was correctly left untouched.
+2. **FIXED, live-verified.** `mission_ranking.rank_and_filter`'s
+   `DEFAULT_LIMIT=4` cut conflated hard filtering with soft ranking,
+   silently dropping a genuinely correct lexical match once more than 4
+   candidates were returned with no other ranking signal. Fixed in
+   `engine/shopper_v2/evidence.py::build_evidence` (calls `rank_and_filter`
+   with an uncapped limit) - `mission_ranking.py` itself is unmodified.
+   Live-verified against Kettle: "espresso blends" now verifies both
+   KB-BLD-05 and KB-SUB-14 (previously only KB-SUB-14). Also closed by a
+   new deterministic regression test
+   (`tests/shopper_v2/test_phase1_findings.py`) and re-measured in the
+   Stage 2A corpus (`kb-lang-01`).
+3. **FIXED, live-verified.** `weak_single_word_match`'s `top_score == 1`
+   rule could not distinguish "the one correct product, named in one word"
+   from "a coincidental one-word overlap." Fixed in the same
+   `build_evidence` function: a weak match is now confirmed only when it
+   is the SOLE hard-filter survivor, with no real rival to be ambiguous
+   against (a diverging query is still never overridden -
+   `relevance.py`/`mission_ranking.py` themselves are unmodified).
+   Live-verified against Northfield: "I need sneakers" now verifies P1003
+   (previously withheld as "weak"); "waterproof jacket" now verifies P2002.
+4. **FIXED, live-verified.** A bare constraint-refinement turn with no
+   product noun ("under 2000") used to search the literal budget sentence
+   and find zero candidates, losing the prior turn's product context.
+   Fixed by a new, additive, V2-owned table
+   (`engine/shopper_v2/db_models.py::SearchContextV2`, via
+   `search_context.py`) recording the last query that actually verified a
+   product, and `pipeline.py::run_discovery_turn` falling back to it only
+   when this turn's own query finds nothing. Live-verified end to end
+   against the real running engine: "I need sneakers" -> "under 2000" ->
+   "actually make that under 1000" now correctly finds P1003 within the
+   2000 budget on turn 2, and correctly reports no match on turn 3 once
+   the same product no longer fits. **The frozen Stage 2A eval corpus
+   still shows the pre-fix numbers for this finding's cases** - the eval
+   runner builds `SearchIntent` directly from ground truth and does not
+   call `pipeline.py`, by its own stated reproducibility design (see
+   `eval/runner.py`'s docstring) - extending the harness to exercise
+   `pipeline.py` end-to-end remains real, undone work (see item 5 below).
+5. **FIXED, live-verified.** V2's `evidence.py` never called the LLM
+   semantic-judge fallback (`judge_relevance`/`judge_best_match`) V1
+   already has. Restored in `pipeline.py::_try_semantic_judge` - bounded
+   (only runs when the deterministic layer found nothing, at most two
+   model calls, never on an already-confident turn), and only ever trusts
+   a product id verified present in the real fetched sample. Live-verified
+   against Kettle: "a fruity coffee" now correctly surfaces KB-ETH-01
+   ("Blueberry, jasmine, and a syrupy body") with `llm_judge_used=true`,
+   `llm_judge_result=true`, `model_calls=2` visible in the turn's own
+   trace. Same frozen-corpus caveat as item 4 above.
+6. **Still not justified by any evidence gathered so far.** Neither
+   semantic retrieval nor reranking - every gap found and now fixed traced
+   to the deterministic/state layer, not to a genuine "shares no literal
+   word at all" failure only embeddings could close (item 5's fix restored
+   an *existing* LLM capability, not a new retrieval technology). Still
+   unmeasured at CV3's real ~40,000-SKU client volume - item 2's fix
+   (a candidate-count-dependent bug) is the concrete reason this
+   conclusion could still change at real scale, unchanged from the prior
+   reconciliation.
+
+### F. Immediate next work
+
+1. **Extend the Stage 2A eval harness to exercise `pipeline.py` directly**
+   (not just `evidence.build_evidence` in isolation) so Findings 4 and 5's
+   fixes are covered by the same repeatable, automated corpus that already
+   covers Findings 2 and 3 - currently verified only by live manual testing
+   against the running engine (documented above) and a new focused test
+   file, not by the frozen corpus itself.
+2. **Build a large synthetic catalogue** (SHOPPER_V2_BASELINE_REPORT.md
+   §10's stated limitation, unchanged) before trusting any Stage 2A
+   percentage at CV3's real client scale - now sharper given Finding 2 was
+   confirmed to be exactly the kind of candidate-count-dependent bug that
+   gets worse, not better, at real volume.
+3. **Phase 3** (comparison, compatibility, complementary reasoning,
+   trade-offs) - all already exist as real, tested V1 capabilities
+   (`ActionType.COMPARE_PRODUCTS`/`CHECK_COMPATIBILITY`/`SUGGEST_COMPLEMENTARY`)
+   that Phase 1's capability router (`capability.py`) now correctly
+   recognizes and routes to an honest "not yet available" reply rather than
+   silently mishandling as discovery - implementing each as a real,
+   read-only V2 capability (calling the same adapter read-only methods V1
+   already uses, never forking them) is the next scoped unit of work.
+4. Only after real-volume data exists (item 2): re-run Stage 2A's baseline
+   and decide, from the new numbers, whether semantic retrieval has become
+   justified - not before.
+
+### Phase 1 — Foundation, Discovery Quality, Findings 2-5 Closed
+(verified 2026-09-18, uncommitted)
+
+New files: `engine/shopper_v2/capability.py` (read-only capability
+routing, driven by a routing-only `hinted_action_type` label the model may
+propose - never its parameters, never the `ProposedAction` object itself,
+confirmed by `invariant-guard`), `tracing.py` (structured per-turn trace,
+now also returned on `ChatReplyV2.trace`), `db_models.py`/`search_context.py`
+(the new `shopper_v2_search_context` table, additive, created automatically
+by `create_schema`'s existing `create_all` call - no migration, no ALTER
+TABLE, no V1 table touched), `pipeline.py` (the production discovery
+pipeline wiring Stage 2A's typed contracts into the live route and closing
+Findings 4-5).
+
+Modified, all under `engine/shopper_v2/` or `engine/api/chat_v2.py` (never
+V1, never `engine/decision`/`engine/risk`/`engine/execution`/`adapters`,
+confirmed by `git diff --stat` and by an independent `invariant-guard` pass
+that returned SAFE): `evidence.py` (Findings 2-3), `understanding.py` (the
+`hinted_action_type` label), `orchestrator.py` (capability routing +
+tracing + calls `pipeline.py` instead of `retrieval.py`/`evidence.py`
+inline), `chat_v2.py` (`trace` field on the response).
+
+**Verification performed:**
+- `invariant-guard` - SAFE (full report on file; confirmed no forbidden
+  import, no risk/price/stock assertion from the model, tenant scoping
+  intact, no secret leaked via the new `trace` field).
+- All 8 pre-existing `tests/shopper_v2/*.py` files still pass, re-run
+  against the restarted live engine.
+- 2 new test files, both passing: `test_phase1_capability_routing.py`
+  (9 checks, model-free), `test_phase1_findings.py` (8 checks - Findings
+  2/3 as deterministic function calls, Finding 4's `search_context` table
+  as an isolated-db round-trip).
+- `fuzz.py` - clean, "every invariant held" (V1 regression).
+- `auditroutes.py` - clean, every route still correctly locked/scoped.
+- **Live manual verification against the real running `/api/v2/chat`**
+  (not just static code or unit tests): Findings 2, 3, 4, and 5 each
+  reproduced fixed with real HTTP calls against Northfield and Kettle,
+  full turn traces captured and matching the expected mechanism for each
+  fix (see item-by-item detail in §E above).
+- Stage 2A baseline re-run: overall Recall@4 0.667 -> 0.917, Precision@4
+  0.667 -> 0.917, false-substitution rate 0.083 -> 0.0 - the portion of the
+  improvement the frozen, LLM-free eval harness can actually see (Findings
+  2-3; Findings 4-5 require live/LLM verification, done separately, see
+  above). Full numbers in `engine/shopper_v2/eval/results/baseline_latest.json`.
+
+**Not done in Phase 1** (genuinely open, not silently skipped): Phase 3's
+read-only decision-support capabilities. The eval-harness-vs-live-
+verification gap for Findings 4-5 (item 1 in "Immediate next work" above).
+
+### Phase 3, first slice — Comparison (verified 2026-09-18, uncommitted)
+
+New file: `engine/shopper_v2/compare.py`. Modified:
+`engine/shopper_v2/orchestrator.py` (a real `Capability.COMPARE` branch,
+plus persisting `ShoppingStateV2.active_products` - populated from
+whatever a discovery turn actually verified and showed, its own documented
+existing purpose per `engine/db/models.py::ShoppingState.active_products`,
+never used by V2 until now).
+
+Both products are always fetched fresh via `adapter.get_product` (the same
+read-only method V1's own `COMPARE_PRODUCTS` already uses, Completed.md
+#27's guarantee) - never recalled from anything cached earlier in the
+conversation. Reply generated via `ReasoningService.synthesize(kind="comparison", ...)`
+- the same existing, tool-schema-restricted-to-text method `respond.py`
+already uses for discovery, not a new capability - falling back to a
+deterministic two-line summary when the model is unavailable.
+
+**Verification performed:**
+- `invariant-guard` - SAFE (full report on file; confirmed read-only,
+  no forbidden import, no unverified id can enter evidence, no cross-tenant
+  write path, honest degrade on <2 products or a failed fetch). One minor,
+  pre-existing V1 documentation nit was flagged (`ReasoningService.synthesize`'s
+  own docstring says "no tool schema" while its implementation does pass
+  a text-only one) - not a security issue, not touched, out of scope (V1
+  file).
+- New test file `tests/shopper_v2/test_phase3_compare.py` - 11 checks,
+  model-free and adapter-free (a local stub), all passing: fewer than two
+  active products, a successful two-product comparison, a partial fetch
+  failure, and a duplicated single id never compared against itself.
+- All 10 `tests/shopper_v2/*.py` files still pass, `fuzz.py` clean,
+  `auditroutes.py` clean, re-run against the restarted live engine.
+- **Live manual verification against the real running `/api/v2/chat`**:
+  "show me trail shoes" (verifies P1001+P1005, persists both to
+  `active_products`) followed by "please compare the Trailblazer Running
+  Shoe and the Fell Runner Trail Shoe" correctly routed to
+  `capability=compare`, fetched both fresh, and produced a real,
+  grounded, non-generic comparison sentence contrasting their actual
+  attributes (cushioned midsole/comfort vs. aggressive lugs/trail
+  traction). **Observed, not fixed here**: a shorter phrasing ("compare
+  the top two") did not reliably get classified as `COMPARE_PRODUCTS` by
+  the model on every attempt - a model-intent-classification reliability
+  question, not a defect in the routing/execution code itself (when the
+  model DID propose `COMPARE_PRODUCTS`, the capability executed correctly
+  every time). Not investigated further in this phase; noted as a real,
+  observed limitation rather than glossed over.
+
+**Not done in this slice**: compatibility, complementary reasoning, and
+trade-off re-ranking - `capability.py` still routes these to the static
+"not yet available" reply. These remain the next scoped units of Phase 3
+work.
+
+### Phase 4, first slice — Cart proposal + approval + execution integration
+(verified 2026-09-18, uncommitted)
+
+**The first and only place under `engine/shopper_v2/` that reaches the
+Decision Engine, Risk Gate, and ExecutionService** - and it does so by
+calling their existing, unmodified public methods
+(`decision.decide`/`gate.classify`/`execution.execute_case`, plus
+`engine.db.record_case` - the exact same functions
+`engine/api/chat.py::accept_proposal`/`_process_turn` themselves call),
+never by reimplementing any of them. Confirmed by `git diff --stat`: zero
+changes to `engine/decision/`, `engine/risk/`, `engine/execution/`,
+`adapters/`, or `engine/api/chat.py`.
+
+New file: `engine/shopper_v2/cart_proposal.py`. Modified:
+`orchestrator.py` (a real `Capability.CART_ACTION` branch, now accepts
+`decision`/`gate`/`execution`/`cart_id`), `understanding.py` (a narrow
+`hinted_product_id` string, only for `ADD_TO_CART`/`PROPOSE_CART_CHANGE`,
+never trusted directly - independently re-verified by the existing
+execution dispatch's own `adapter.get_product` call), `capability.py`
+(docstring), `chat_v2.py` (a `cart_id` field + `db.owners.CART` ownership
+check, structurally identical to `chat.py::_mine`'s own check).
+
+**The hard safety rule, enforced in code, confirmed by `invariant-guard`**:
+`cart_proposal.py` can only ever construct an
+`ActionType.PROPOSE_CART_CHANGE` candidate - never `ADD_TO_CART`/
+`REMOVE_CART_LINE`/`UPDATE_CART_QUANTITY`/`CLEAR_CART`/any financial action
+type directly (confirmed: exactly one `ProposedAction(` construction
+exists in all of `engine/shopper_v2/`, hardcoded to `PROPOSE_CART_CHANGE`).
+A cart can therefore only ever actually change after a shopper's SEPARATE,
+explicit call to the pre-existing, unmodified
+`POST /api/chat/proposals/{id}/accept` route - no new V2 approval endpoint
+was added. This mirrors invariant 4 ("a tap is trusted; the model's guess
+is not") for a path with no tap UI yet.
+
+**A real, live-discovered bug found and fixed during this phase, not
+swept under the rug**: `respond.py`'s discovery-synthesis LLM call (used
+on the unrelated DISCOVER path) was reproduced live fabricating "I've
+added them to your cart as requested" on a turn that never called
+`cart_proposal.py`/`decision`/`gate`/`execution` at all - a direct
+violation of "ground every response in the actual result." Fixed with a
+deterministic, closed-class guard (`_claims_a_cart_action` in
+`respond.py`, reused in `compare.py`) that discards any synthesized reply
+containing cart/order-mutation-claim language and falls back to the
+existing deterministic summary instead. This is a V2-only fix (`engine/reasoning/`
+untouched) and is itself covered by a new regression test.
+
+**Verification performed:**
+- `invariant-guard` (4th independent pass this build, most thorough given
+  the stakes) - SAFE. Confirmed: no `ProposedAction` other than
+  `PROPOSE_CART_CHANGE` anywhere in `engine/shopper_v2/`; the real mutation
+  only ever happens via the unmodified `accept_proposal` route;
+  `hinted_product_id` is independently re-verified before use; the
+  `cart_id` ownership check is structurally identical to V1's own;
+  `db.idempotency` is untouched, its guard still lives entirely inside
+  `execute_case`; no payment/financial action type is reachable anywhere
+  in the new code; the anti-fabrication guard's phrase list is narrow
+  enough not to false-positive on ordinary discovery/comparison text.
+- New test files, both passing: `test_phase4_cart_proposal.py` (12
+  checks, against the REAL live `engine.decision`/`engine.risk`/
+  `engine.execution` objects and the real Northfield HTTP backend, an
+  isolated sqlite db - never `cv3.db`) and
+  `test_phase4_no_fabricated_cart_claim.py` (5 checks, model-free,
+  proves the anti-fabrication guard directly).
+- All 13 `tests/shopper_v2/*.py` files pass. `fuzz.py` clean ("every
+  invariant held"). `auditroutes.py` clean.
+- **Direct mechanism verification against the real, live engine
+  singleton** (decoupled from whether the model happens to classify a
+  given live turn's intent as CART_ACTION - see below): a real cart is
+  created via the existing REST route, a real `PROPOSE_CART_CHANGE`
+  proposal is created through the real decision/risk/execution pipeline
+  (AUTO outcome), the cart is confirmed UNCHANGED before approval, the
+  existing accept-proposal mechanics are then run (same functions
+  `engine/api/chat.py::accept_proposal` calls) and the cart is confirmed
+  to hold exactly the approved product afterward, a retry of the same
+  case is confirmed NOT to double-add (idempotency holds), and the
+  proposal is confirmed invisible under a different `connection_id`
+  (tenant isolation holds). Separately confirmed live: proposing a
+  size-variant product (P1001) correctly asks which size rather than
+  guessing - the existing "never guess a size" invariant holds through
+  this new path too.
+- **Live HTTP verification against the real running `/api/v2/chat` +
+  the real running `/api/chat/proposals` routes**: cart creation, a
+  discovery turn, and the anti-fabrication guard all confirmed live
+  (`response_used_model=false` when the model's synthesis was caught
+  fabricating a claim, twice reproduced).
+
+**Observed, not fixed, and explicitly not treated as a Phase 4 defect**:
+the model did not reliably classify "add that to my cart" /
+"add the X to my cart" as `ADD_TO_CART`/`PROPOSE_CART_CHANGE` on every
+live HTTP attempt during this verification session - `understand()`'s
+call to `reason()` has no cart/product context to reason from (V1's own
+`_process_turn` passes cart/products/friction; V2's `understand()`
+currently passes none of that). This is the same class of model-
+classification reliability already observed for Comparison (Phase 3's
+own PROGRESS.md entry) and is NOT unique to V2: **V1 has no deterministic
+routing bridge for `ADD_TO_CART` either** (confirmed by reading
+`engine/reasoning/cart_intent.py` - it has exactly one bridge function,
+`wants_cart_intelligence`, and nothing analogous for adding to cart), so
+this is a pre-existing, project-wide characteristic being surfaced by a
+new path, not a new defect introduced by this phase. Per this project's
+own explicit rule against endless phrase-specific patching, no new
+keyword-detection bridge was added for this either - the mechanism itself
+was instead verified directly (above), decoupled from the routing
+question.
+
+**Not done in this slice**: REMOVE_CART_LINE/UPDATE_CART_QUANTITY/CLEAR_CART-
+shaped proposals (only ADD is wired), multi-item basket proposals,
+checkout, payment, payment recovery, purchase outcome, post-purchase.
+`Capability.CHECKOUT`/`ORDER_STATUS` still route to the static "not yet
+available" reply.
+
+### Phase 4 continuation — general cart-intent interpretation
+(verified 2026-09-19, uncommitted)
+
+Closes the observed gap from Phase 4's own report: the general-purpose
+`propose_actions` tool did not reliably classify "add that to my cart",
+"add the first one", "I'll take this", "put two of those in my cart",
+"get me the Trailblazer", or a bare "add it" as `ADD_TO_CART`/
+`PROPOSE_CART_CHANGE`. **Not solved with phrase-specific patches** - a
+second, narrow, bounded LLM interpretation
+(`ReasoningService.interpret_cart_reference`, new in
+`engine/reasoning/service.py`/`prompts.py`, mirroring the existing
+`judge_relevance`/`judge_best_match` pattern exactly) handles the general
+class of the problem, and everything it returns is deterministically
+validated against real data before anything is proposed
+(`engine/shopper_v2/intent_resolution.py`).
+
+The new tool's output is a STRUCTURED REFERENCE, never an executable
+action: `is_cart_intent` (bool), `reference_type`
+(ordinal/pronoun/name/none), `position` (int), `named_hint` (string),
+`quantity` (int) - no action-type field, no product-id-to-be-trusted
+field, no variant, no price. `intent_resolution.py` then resolves it:
+`position` only ever indexes into the real, already-shown
+`active_products` list; `named_hint` is only ever matched against real
+product titles via the existing `engine.execution.relevance.best_matches_with_score`
+(reused, not a new heuristic) - first against what's already shown, then,
+if unmatched there, via a live, bounded adapter search accepted ONLY when
+exactly one confident match comes back; a bare pronoun ("it"/"that one")
+resolves only when exactly one product is in view. Every ambiguous case
+(an out-of-range position, a pronoun with several products shown, a name
+matching more than one) returns no product id and an honest clarifying
+question instead - never a guess (requirement 4).
+
+**Requirement 9's guarantee (a plain discovery statement can never become
+a cart action) is structural, not a prompt instruction**: `resolve_cart_target`
+returns `is_cart_intent=False` immediately whenever `active_products` is
+empty, before the LLM is ever called - confirmed live (see below) and by
+`invariant-guard`.
+
+New file: `engine/shopper_v2/intent_resolution.py`. Modified:
+`engine/reasoning/prompts.py`/`service.py` (the new bounded tool - additive,
+V1 does not call it), `engine/shopper_v2/orchestrator.py` (a new step 5b
+that can override capability routing to `CART_ACTION` or return an early
+clarifying question), `cart_proposal.py` (an optional `quantity`, stored on
+the proposal but explicitly NOT forwarded into the ADD_TO_CART execution
+parameters - the shopper is told honestly that only one will be added now
+rather than the request being silently dropped or a second, unrequested
+mutation invented), `tracing.py` (two new trace fields).
+
+**Verification performed:**
+- `invariant-guard` (5th independent pass this build) - **SAFE**. Confirmed
+  the new tool schema carries no action/id/variant/price/risk field,
+  `position`/`named_hint` are never trusted directly (bounds-checked
+  index; name matches re-verified via `best_matches_with_score` against
+  real fetched products), ambiguity always asks, `intent_resolution.py`
+  never imports `engine.decision`/`engine.risk`/`engine.execution`,
+  `cart_proposal.py` still only ever constructs `PROPOSE_CART_CHANGE`
+  (re-verified after the `quantity` addition - not forwarded into any
+  mutation), and zero changes touch `engine/api/chat.py`/`engine/decision/`/
+  `engine/risk/`/`engine/execution/`/`adapters/`/payment/checkout.
+- New test file `test_phase4_intent_resolution.py` - 14 checks, model-free
+  (a scripted `CartReferenceIntent` stub, not a real model call): no-active-
+  products never becomes cart intent even when scripted to say yes,
+  ordinal resolves to the real position, out-of-range ordinal asks rather
+  than guesses, pronoun resolves only when unambiguous, name resolves
+  against shown products, an unshown name resolves via a live verified
+  search, a genuine follow-up question is never treated as cart intent,
+  interpreter-unavailable and reasoning-disabled both degrade honestly.
+- All 14 `tests/shopper_v2/*.py` files pass. `fuzz.py` clean. `auditroutes.py`
+  clean.
+- **Live HTTP verification of the complete flow through `/api/v2/chat`**:
+  "Do you have an insulated water bottle?" (discover, verifies P3001,
+  `cart_intent_detected=false`) -> "I'll take this" (a phrase never
+  special-cased anywhere in this codebase - correctly detected as cart
+  intent via the general interpreter, resolved to P3001 via the pronoun
+  path, proposal created) -> the cart confirmed empty before approval ->
+  `POST /api/chat/proposals/{id}/accept` (the pre-existing, unmodified V1
+  route) -> cart confirmed to hold exactly P3001 afterward. Separately
+  verified live: two products shown ("show me trail shoes" -> P1001+P1005),
+  "add it to my cart" correctly detected as cart intent but genuinely
+  ambiguous - the reply asked "Which one did you mean? 1. Trailblazer
+  Running Shoe; 2. Fell Runner Trail Shoe" rather than guessing, and no
+  proposal was created.
+
+**Not done in this continuation**: the interpreter is only invoked for
+ADD-shaped intent; "remove that from my cart"/"take one off"-shaped
+natural-language references are not yet resolved this way (REMOVE/quantity-
+change proposals remain unwired generally, per Phase 4's own "not done"
+note above).
+
+### Phase 3 continuation — Compatibility + Complementary
+(verified 2026-09-19, uncommitted)
+
+Both real, read-only V2 capabilities now. Reuses
+`engine.execution.product_relations` (pure, deterministic, unmodified -
+confirmed zero diff) - the exact same functions V1's own
+`CHECK_COMPATIBILITY`/`SUGGEST_COMPLEMENTARY` dispatch already calls.
+`check_compatibility(a, b)` only ever returns "compatible" (a real,
+merchant-declared relationship in either direction) or an honest "unknown"
+- there is deliberately no path to a fabricated "not compatible" verdict,
+per that module's own long-standing docstring, unchanged. Both products
+(compatibility) or the anchor plus its declared complements (complementary)
+are always fetched fresh via `adapter.get_product`, same "never stale"
+guarantee `compare.py` already established. The complementary reply's
+optional synthesis reuses `_claims_a_cart_action` (Phase 4's anti-
+fabrication guard) too, so an informational reply can't fabricate a cart
+claim either.
+
+New file: `engine/shopper_v2/compatibility.py`. Modified:
+`orchestrator.py` (two new read-only branches - neither calls
+`decision`/`gate`/`execution`).
+
+**Verification performed:**
+- `invariant-guard` (6th independent pass this build) - SAFE; confirmed
+  `product_relations.py` has zero diff, no decision/risk/execution import
+  or call anywhere in the new code, the verdict can never be a fabricated
+  "not compatible," and the complementary reply is grounded only in the
+  real `compatible_with` list.
+- New test file `test_phase3_compatibility.py` - 9 checks, model-free:
+  a declared-compatible pair confirmed, an undeclared pair reads as
+  honestly unknown (never a false "not compatible"), fewer-than-two
+  products declines honestly, real declared complements are named, no
+  declared complements is stated honestly rather than invented, no
+  product in view declines honestly.
+- All 15 `tests/shopper_v2/*.py` files pass. `fuzz.py` clean.
+  `auditroutes.py` clean.
+- **Live verification against BOTH real merchants** (direct calls against
+  the real running Northfield/Kettle HTTP backends, decoupled from the
+  separate, already-documented multi-item-discovery-turn limitation that
+  currently prevents a single discovery message from populating
+  `active_products` with two named-but-different products - a pre-existing
+  characteristic of the discovery layer, not something this capability
+  introduces): Northfield's Marathon Pro Racing Shoe + Compression Calf
+  Sleeves confirmed compatible (a real declared relationship); its
+  complements correctly named (Compression Calf Sleeves, Race Belt);
+  Kettle's Burr Hand Grinder correctly complemented with House Filter
+  Blend (cross-platform - GraphQL, not REST); an undeclared Kettle pair
+  (Ethiopia Guji Natural + Nightshift Dark Roast) correctly read as
+  unconfirmed, never asserted incompatible.
+
+**Not done**: resolving "these two" from a single multi-item discovery
+turn (depends on the discovery-layer limitation noted above, not on this
+capability itself) - `active_products` currently needs to be populated by
+two separate turns (e.g. discover, then compare) to reach two real ids for
+compatibility to check.
+
+### Phase 5, first slice — Checkout continuity
+(verified 2026-09-19, uncommitted)
+
+**The second place under `engine/shopper_v2/` that reaches the Decision
+Engine, Risk Gate, and ExecutionService** (after `cart_proposal.py`), via
+the same already-reviewed public methods. Unlike `PROPOSE_CART_CHANGE`,
+`ActionType.PREPARE_CHECKOUT` is declared non-financial/reversible
+(`shared/models/action.py`, unmodified) and mutates nothing, so it
+completes in the same turn - no separate approval step, the same way V1
+already runs it inline. The existing dispatch's own "did the shopper
+actually ask to pay" word-list gate and its empty-cart/no-cart checks
+(`engine/execution/service.py`, unmodified, confirmed zero diff) are
+reused as-is, not reimplemented.
+
+**Invariant 3 preserved exactly as V1 already preserves it**: this module
+has no path to `/api/chat/pay` at all - it cannot construct a request
+toward it, take a card, or assert a charge happened. The reply is built by
+a plain, deterministic function (`_deterministic_checkout_reply`) from the
+REAL `Executed.payload` only - no LLM synthesis call exists on this path
+at all, so there is no text-generation step that could ever claim payment
+succeeded. Actually charging a card remains only reachable through the
+shopper's own separate, explicit call to the existing, unmodified
+`/api/chat/pay` route.
+
+New file: `engine/shopper_v2/checkout.py`. Modified: `orchestrator.py`
+(one new `Capability.CHECKOUT` branch).
+
+**Verification performed:**
+- `invariant-guard` (7th independent pass this build, focused specifically
+  on invariant 3 given this is the closest V2 code has come to the
+  payment boundary) - SAFE; confirmed no financial `ActionType` appears
+  anywhere in this slice, no path to `/api/chat/pay` exists, the reply
+  text never contains "paid"/"charged"/payment-complete language, the
+  "asked to pay" gate is reused not duplicated, and
+  `engine/execution/service.py` has zero diff.
+- New test file `test_phase5_checkout.py` - 10 checks against the REAL
+  live `engine.decision`/`engine.risk`/`engine.execution` objects and the
+  real Northfield HTTP backend (isolated sqlite db): no cart_id declines
+  honestly, an empty cart declines with the real reason, not mentioning
+  payment declines checkout, a real cart with a real line produces a real
+  payload naming the real product and the real total, the reply never
+  claims payment happened, the demo cards are named honestly (not a real
+  payment method), and checkout itself never mutates the cart.
+- All 16 `tests/shopper_v2/*.py` files pass. `fuzz.py` clean.
+  `auditroutes.py` clean.
+- **Live HTTP verification of the complete flow**: discovery (verifies
+  P3001) -> "add it" (general cart intent) -> proposal -> approved via
+  the existing V1 route (cart now holds 1 item, 1159.82 INR) -> "I'm
+  ready to checkout and pay now" correctly routed to `capability=checkout`
+  and replied with the exact real total (1159.82 INR, matching the
+  accept step's own real result byte-for-byte) and the real demo card
+  list, explicitly stating payment itself requires a separate step it
+  cannot perform. Separately confirmed: a plain "I need running shoes"
+  stays `capability=discover`, never checkout.
+
+**Not done**: no payment recovery, no purchase outcome, no post-purchase -
+all still route to the static "not yet available" reply or don't exist as
+a capability yet.
+
+### Phase 5 continuation — Payment recovery, capability-aware
+(verified 2026-09-19, uncommitted)
+
+**The most financially-sensitive slice added to Shopper V2 so far** - and
+the one that most directly demonstrates the flagship platform-independence
+claim (CLAUDE.md's Architecture section) through V2 specifically: the
+identical shopper message produces genuinely different, correct outcomes
+on Northfield versus Kettle, decided entirely by what each platform
+declared, not by a branch in this code.
+
+`payment_recovery.py` proposes all three recovery `ActionType`s
+(`RETRY_PAYMENT`/`OFFER_ALTERNATE_PAYMENT`/`SPLIT_PAYMENT` - all map to
+`Operation.RECOVER_PAYMENT`, `engine/decision/engine.py`, unmodified) as
+candidates and lets the real, unmodified `DecisionEngine` decide: on
+Northfield (never declares `Operation.RECOVER_PAYMENT`), none survive
+capability filtering and the engine automatically substitutes
+`ESCALATE_TO_HUMAN` instead - non-financial, so it actually runs. On
+Kettle (declares `ALTERNATE_METHOD`/`PAYMENT_LINK`/`RETRY_SAME_METHOD`), a
+real candidate survives - but **all three recovery action types are
+declared `financial=True` in the unmodified `shared/models/action.py`**,
+so the Risk Gate's `FINANCIAL_ALWAYS_HUMAN` rule (checked before any
+merchant policy, cannot be switched off) unconditionally classifies it
+`HUMAN`. **This module therefore never calls `execution.execute_case` for
+an actual recovery action on any platform - only for the non-financial
+`ESCALATE_TO_HUMAN` substitution.** Recording the case alone is enough to
+place a real, visible entry in the existing ops queue for a person to act
+on - reusing `db.record_case` exactly as `cart_proposal.py`/`checkout.py`
+already do.
+
+New file: `engine/shopper_v2/payment_recovery.py`. Modified:
+`orchestrator.py` (one new `Capability.PAYMENT_RECOVERY` branch),
+`capability.py` (the three recovery `ActionType`s now route here instead
+of falling through to UNKNOWN), and the Phase 1 capability-routing test
+was honestly updated to match this real new behavior (still asserts a
+genuinely unmapped financial type, `ISSUE_REFUND`, correctly routes to
+UNKNOWN - not weakened).
+
+**Verification performed:**
+- `invariant-guard` (8th independent pass this build, focused specifically
+  on invariant 2/FINANCIAL_ALWAYS_HUMAN given this is the most
+  financially-sensitive slice yet) - SAFE. Confirmed line by line:
+  `execute_case` is called in exactly one branch
+  (`trace.escalated_because_empty`), whose selected action is
+  `ESCALATE_TO_HUMAN` by construction of the unmodified `DecisionEngine`
+  itself, not an assumption; `FINANCIAL_ALWAYS_HUMAN` is confirmed, by
+  reading the real unmodified gate, to fire before any merchant-policy
+  rule for all three recovery types; no reply string ever claims a
+  payment was retried/recovered/fixed; zero changes to
+  `shared/models/action.py`/`engine/decision/`/`engine/risk/`/
+  `engine/execution/`/`engine/api/chat.py`/`adapters/`.
+- New test file `test_phase5_payment_recovery.py` - 12 checks against the
+  REAL live `engine.decision`/`engine.risk`/`engine.execution` objects and
+  BOTH real merchant HTTP backends (isolated sqlite db): no cart_id
+  declines honestly; Northfield (no declared recovery capability)
+  auto-escalates with a real case recorded; Kettle (declares recovery
+  capability) selects a real recovery action but is unconditionally
+  classified `HUMAN` and never executed, with a real `PENDING_APPROVAL`
+  case recorded; the two platforms are confirmed to produce different
+  outcomes for the byte-identical message.
+- All 17 `tests/shopper_v2/*.py` files pass. `fuzz.py` clean.
+  `auditroutes.py` clean.
+- **Live HTTP verification through the real running `/api/v2/chat` on
+  BOTH merchants** with the identical message ("Can you retry my payment
+  or offer an alternate payment method, my card was declined?"):
+  Northfield correctly escalated (`selected_action=ESCALATE_TO_HUMAN`,
+  `risk_outcome=AUTO`, a real case id returned); Kettle correctly selected
+  a real recovery action but required human approval
+  (`selected_action=RETRY_PAYMENT`, `risk_outcome=HUMAN`,
+  `escalated_because_unsupported=false`, a real case id returned) - the
+  exact capability-aware difference, now demonstrated live through V2.
+  **Observed, not fixed** (same already-documented, project-wide model-
+  classification reliability characteristic as Comparison/Checkout): this
+  specific phrasing did not route correctly on every single attempt
+  (occasionally misclassified as `discover`) - not investigated further,
+  per the same standing decision against phrase-specific patching.
+
+**Not done**: no purchase outcome, no post-purchase, no way for a real
+operator action taken on the resulting ops-queue case to be reported back
+into the V2 conversation (the shopper is told "they'll follow up," which
+happens through existing, separate channels, not through this
+conversation path).
+
+### Frontend connection — Shopper V2 reachable from the real storefront
+(verified 2026-09-19, uncommitted)
+
+**Every capability slice above (discovery through payment recovery) was,
+until now, only verified via direct HTTP calls, not through the actual
+browser a real shopper uses.** This closes that gap: a new, additive,
+self-contained panel (`storefront/src/ShopperV2Panel.tsx`) is now rendered
+alongside V1's existing `ChatWidget` on the real shop pages -
+**`ChatWidget.tsx` itself is completely unmodified**, and V1 remains
+exactly what a shopper gets by default. The new panel is opt-in ("Try the
+new assistant (V2 beta)").
+
+Backend: `TurnResultV2`/`ChatReplyV2` gained a `products` field (real,
+already-verified `Product` data only - nothing new the model could assert
+unverified; every field was already independently confirmed by the
+existing evidence/relevance layer before this field existed) so the
+frontend can render product cards instead of only prose.
+
+Frontend: `api.ts` gained `chatV2()` and typed interfaces for
+`ChatReplyV2`. `ShopperV2Panel.tsx` calls `api.chatV2()` for every
+message, and when a reply carries a `cart_proposal_id`, renders
+Approve/Reject buttons that call the EXISTING, unmodified
+`api.acceptProposal()`/`api.rejectProposal()` - the same V1 functions
+`ProposalsPanel.tsx` already uses. **The panel contains no direct
+cart-mutation call and no reference to `api.pay()`/`/api/chat/pay`
+anywhere** - the only way anything can change is through that one existing
+approval call. `App.tsx`'s diff is two lines: one import, one rendered
+component alongside the existing `ChatWidget`.
+
+**Verification performed:**
+- `invariant-guard` (9th independent pass this build, and the first to
+  review actual frontend code) - **SAFE**. Confirmed the new `products`
+  field only ever carries already-verified data, the panel has no direct
+  cart-mutation or payment path (grepped for `addLine`/`changeLine`/
+  `api.pay`/direct `fetch` - none present), tenant/session scoping is
+  preserved (a fresh `crypto.randomUUID()` session id per mount, the app's
+  own already-scoped `cartId` prop on every call, `db.owners.CART`
+  checked server-side), and `App.tsx`'s change is minimal and purely
+  additive. This pass also independently re-confirmed (without relying on
+  the earlier per-slice passes' history) that the full Phase 4/5
+  Decision/Risk/Execution reach from `engine/shopper_v2/` still holds -
+  consistent with, and additional assurance on top of, invariant-guard
+  passes 5-8 above.
+- `npm run build` (the real typecheck guard, not `dev` - CLAUDE.md's own
+  documented gap) - clean, zero errors.
+- `npm run lint` - the new files (`ShopperV2Panel.tsx`, the `api.ts`
+  additions) produce ZERO lint errors. 8 pre-existing lint errors were
+  found in three unrelated, untouched files
+  (`PaymentsPanel.tsx`/`ProductDetail.tsx`/`TasksPanel.tsx`) - confirmed
+  via `git diff --stat` on those files (empty) that they predate this
+  session and are not a regression introduced here.
+- **A new, real Playwright browser spec** (`storefront/tests/shopper-v2.spec.ts`),
+  run against a real Chromium browser driving the real dev server, the
+  real engine, and the real Northfield backend - not a simulation:
+  1. The V2 panel is reachable and a discovery message ("I need running
+     shoes") produces a real product card naming the real product
+     (Trailblazer Running Shoe).
+  2. A plain discovery statement never shows a cart-approval control (no
+     `approve` button rendered) - requirement 9's guarantee, now also
+     confirmed at the UI layer, not only in the API response.
+  3. **The full natural-language flow**: "show me the Insulated Water
+     Bottle 750ml" → a real product card → "I'll take this" (general cart
+     intent, retried up to 4 times per the model-classification
+     reliability characteristic already documented, same accommodation
+     `checkout.spec.ts` already makes elsewhere) → a real Approve button →
+     clicking it calls the real, unmodified accept-proposal route → the
+     panel shows the real "Added..." result → the shared cart id
+     (`sessionStorage`, the same one the rest of the storefront uses)
+     is confirmed present. **All 3 tests passed on the first run.**
+- **V1 regression checked with a real, careful before/after comparison**,
+  not assumed: running the existing `checkout.spec.ts` suite showed 2
+  failures. Both were re-run in isolation - one passed cleanly alone
+  (confirming Groq-throttle-related flakiness from running the full suite
+  back-to-back, CLAUDE.md's own documented constraint, not a regression);
+  the other ("Issue #5: a declined payment does not fabricate a shopper
+  turn") was verified, via `git stash` of exactly the three modified
+  frontend files and a clean re-run against the UNMODIFIED baseline, to
+  **fail identically before this session's frontend changes existed** -
+  confirmed pre-existing, not introduced here, before restoring the
+  stashed changes and re-confirming the V2 spec and `npm run build` both
+  still pass afterward.
+- All 17 `tests/shopper_v2/*.py` files pass. `fuzz.py` clean.
+  `auditroutes.py` clean.
+
+**Not done**: no visual polish pass (the panel uses minimal, functional
+styling only), no UI for compatibility/complementary/checkout/payment-
+recovery replies beyond plain text (they render as ordinary assistant
+turns - functional, not yet a dedicated "decision workspace" UI per the
+original research brief's fuller vision), no fix attempted for the 2
+pre-existing V1 Playwright flakes (out of scope - not introduced by, or
+related to, this work).
+
+### Shopper V2 feature matrix
+
+Status values: VERIFIED (implemented, integrated, and covered by a passing
+test at minimum), PARTIAL (implemented but with a known, traced gap or
+missing independent verification), NOT IN V2 (exists in V1 or is an
+explicit architectural boundary V2 does not cross), NOT IMPLEMENTED (does
+not exist anywhere in the repository), DEFERRED (a named roadmap item, not
+started), BLOCKED (blocked on a named, specific prerequisite).
+
+| Feature | Status | Evidence |
+|---|---|---|
+| Discovery | VERIFIED for single-item queries incl. weak/ambiguous and constraint-refinement turns; PARTIAL overall | Findings 2-5 fixed and live-verified (PROGRESS.md Phase 1); no multi-item mission assembly yet |
+| Intent extraction | PARTIAL | `understand()` reuses V1's `reason()` tool call correctly; `StateDelta.search_query` is still always `None` (query CARRYING is handled via `search_context.py`); general cart-reference intent ("add that"/"the first one"/"I'll take this") now VERIFIED live via a dedicated bounded interpreter (`intent_resolution.py`) |
+| Mission shopping | VERIFIED (single-turn intro + refinement); no numeric per-item budget yet | `Capability`-independent step 4b/`missions.py`; live-verified end to end over real HTTP - see the dated writeup below |
+| Multi-turn state | VERIFIED | `ShoppingStateV2` persistence VERIFIED (`test_multiturn_continuity.py`, `test_state_transitions.py`); retrieval's use of that state across turns (Finding 4) fixed and live-verified |
+| Deterministic ranking | VERIFIED (small catalog) | Correctly reuses `mission_ranking.rank_and_filter`, unmodified; Finding 2's candidate-count-cut defect fixed in `evidence.py`'s own call, live-verified; not yet checked at real (~40,000-SKU) volume |
+| Recommendations | VERIFIED (small catalog) | Finding 3's weak-single-word ceiling fixed and live-verified; not yet checked at real volume |
+| Recommendation explanations | PARTIAL | Grounded-by-construction (evidence exists before `respond.py` runs) - the structural defect is fixed; explanation *quality* not independently value-audited |
+| Comparison | VERIFIED (small catalog) | `Capability.COMPARE` real, read-only, live-verified against Northfield (`compare.py`); reuses V1's `adapter.get_product`/`synthesize(kind="comparison")` unmodified; model-intent-classification reliability for short phrasings observed, not yet investigated |
+| Trade-offs | VERIFIED (single-item + per mission-item); model-extraction reliability varies | `tradeoff.py`, reuses unmodified `mission_ranking.rank_and_filter` for both re-ranking and grounded reasons; live-verified end to end - see dated writeup below |
+| Personalization | PARTIAL | `memory_facts` passed through to existing ranking function; untested independently in V2's own route |
+| Compatibility | VERIFIED (both merchants) | `Capability.COMPATIBILITY`/`compatibility.py`, reuses unmodified `product_relations.check_compatibility`; live-verified on Northfield and Kettle |
+| Complementary reasoning | VERIFIED (both merchants) | `Capability.COMPLEMENTARY`/`compatibility.py`, reuses unmodified `product_relations.complementary_product_ids`; live-verified cross-platform |
+| Multi-item mission | VERIFIED (single-turn intro/refinement + basket proposal) | Independent per-item tracking/refinement live-verified (`test_phase7_missions.py`); multi-item basket proposal live-verified end to end through real accept (`test_phase8_basket_proposal.py`, dated writeup below) |
+| Cart intelligence | NOT IN V2 | `engine/execution/cart_intelligence.py` exists and is reused by V1; not yet wired into V2 |
+| Cart proposals | VERIFIED (ADD/REMOVE/CHANGE_QUANTITY); CLEAR explicitly unsupported | `Capability.CART_ACTION`/`cart_proposal.py::run_cart_change_proposal_turn`, always `PROPOSE_CART_CHANGE`, never a direct mutation; general natural-language cart-intent (not phrase-specific) live-verified end-to-end for add/remove/set_quantity incl. ambiguous-reference handling (`test_phase6_cart_change_operations.py`); "clear my cart" gets an honest, explicit decline rather than a fabricated mutation - `PROPOSE_CART_CHANGE`'s `proposal_change_type` has no CLEAR variant and V1's own `accept_proposal` dispatch (off-limits to modify) doesn't support one either, so this is a named architectural blocker, not an oversight |
+| Shopper approval/rejection | VERIFIED | Reuses the existing, unmodified `POST /api/chat/proposals/{id}/accept`/`/reject` routes directly - no new V2 approval endpoint |
+| Decision Engine integration | VERIFIED | `cart_proposal.py` calls `decision.decide(...)` - the real, unmodified `DecisionEngine`, live-verified |
+| Risk Gate integration | VERIFIED | `cart_proposal.py` calls `gate.classify(...)` - the real, unmodified `RiskGate`, live-verified (PROPOSE_CART_CHANGE and the subsequent ADD_TO_CART both classified AUTO) |
+| Execution | VERIFIED (ADD path) | `execution.execute_case(...)` - the real, unmodified `ExecutionService`; idempotency confirmed live (a retried case never double-adds) |
+| Checkout | VERIFIED (read-only) | `Capability.CHECKOUT`/`checkout.py`, real `PREPARE_CHECKOUT` via Decision/Risk/Execution, no path to `/api/chat/pay`, live-verified end-to-end incl. real total |
+| Payment recovery | VERIFIED (both platforms, capability-aware) | `Capability.PAYMENT_RECOVERY`/`payment_recovery.py`; never executes a financial action (FINANCIAL_ALWAYS_HUMAN); live-verified different, correct outcomes on Northfield vs. Kettle |
+| Purchase outcome | VERIFIED | `Capability.ORDER_STATUS`/`order_status.py`, reuses the existing `CHECK_ORDER_STATUS` dispatch via Decision/Risk/Execution unmodified; never infers success from an attempted payment, only the real adapter-returned order; live-verified against a real completed checkout (`test_phase6_order_status.py`) |
+| Post-purchase | PARTIAL | Order status/line-item disclosure covered above, ownership-gated exactly as V1; no broader post-purchase capability (returns, reorder, etc.) exists in V1 to expose through V2 yet, so this remains partial by definition of what V1 itself offers |
+| Return-risk prevention | DEFERRED | Roadmap item (Phase 2) |
+| Proactive assistance | DEFERRED | Roadmap item (Phase 3) |
+| Multimodal | DEFERRED | Roadmap item (Phase 2/3) |
+| Shopper UI (V2) | VERIFIED (decision-workspace elements added) | `ShopperV2Panel.tsx`, additive alongside unmodified V1 `ChatWidget`; live-verified in a real Chromium browser via Playwright across discovery, multi-item mission, trade-off, and cart-intent→approval→mutation flows; now shows a mission sidebar (goals/budget/constraints/priorities/tracked items), a capability badge per turn, per-product grounded "why" reasons, and an explicit PROPOSED-vs-in-cart distinction; still not a full redesign of every listed workspace section (see dated writeup) |
+| Outcome instrumentation | VERIFIED (connected to existing infra) | `orchestrator.py` now writes real `ShopperEvent` rows via the EXISTING, unmodified `engine.execution.events` module for discovery/comparison/compatibility/complementary impressions, cart proposals, checkout, payment recovery, order status, mission tracking, basket proposals, and trade-off re-ranks; live-verified (`test_phase11_measurement.py`) incl. tenant isolation; no second measurement system created |
+| Merchant measurement (of V2) | NOT IN V2 | No merchant report reads V2 traffic yet - the events exist and are tenant-isolated, but no merchant-facing surface queries them |
+| Platform independence | VERIFIED | Stage 2A baseline explicitly ran both Northfield and Kettle, confirmed to behave differently (see `SHOPPER_V2_BASELINE_REPORT.md` §5) |
+| Security / tenant isolation | VERIFIED | `test_tenant_isolation_v2.py` and `auditroutes.py` both pass; Phase 4's new `cart_id` ownership check (`db.owners.CART`) confirmed structurally identical to V1's own by `invariant-guard`, and a proposal confirmed invisible under a different `connection_id` in `test_phase4_cart_proposal.py` |
+
+---
+
+### Shopper V2 — continuation: purchase outcome + generalized cart operations
+
+New files: `engine/shopper_v2/order_status.py`. Modified:
+`engine/shopper_v2/cart_proposal.py` (renamed `run_cart_add_proposal_turn`
+→ `run_cart_change_proposal_turn`, added an `operation` parameter mapping
+onto `PROPOSE_CART_CHANGE`'s existing `proposal_change_type` values),
+`engine/shopper_v2/intent_resolution.py` (now also fetches real cart lines
+via `adapter.get_cart` and resolves remove/set_quantity references against
+them, never against a fresh catalog search), `engine/shopper_v2/
+understanding.py` (extracts `hinted_order_id`/`hinted_quantity` as
+additional untrusted routing labels), `engine/shopper_v2/orchestrator.py`
+(wires `Capability.ORDER_STATUS`, threads `cart_id` into
+`resolve_cart_target`, branches cart-intent handling on `operation`),
+`engine/reasoning/prompts.py`/`service.py` (the bounded
+`interpret_cart_reference` tool now returns an `operation` field —
+add/remove/set_quantity/clear/none — and accepts a second "real cart
+lines" context list, generalizing the existing non-phrase-specific
+approach rather than adding keyword patches), `engine/api/chat_v2.py`
+(threads `owner_keys` through to `run_turn` for order ownership checks).
+
+**Purchase outcome / post-purchase (roadmap items 1-2):** implemented by
+reusing the existing `CHECK_ORDER_STATUS` action end to end (Decision →
+Risk → `record_case` → `execute_case`, same functions V1's own route
+calls). Line items are only ever disclosed after a real
+`db.owners.owner_of(connection_id, ORDER, order_id)` check against the
+caller's held keys — reproduces V1's own ownership gate exactly, not a
+weaker V2-only version. Never infers a purchase succeeded from an
+attempted payment; only from the real order the adapter returns.
+Live-verified end to end (`tests/shopper_v2/test_phase6_order_status.py`):
+a real checkout against Northfield, a real order lookup with line-item
+disclosure to the real owner, the same order id queried by a non-owner
+(base status shown, line items withheld), a nonexistent order id (honest
+not-found, not fabricated), and tenant isolation (`owner_of` returns
+`None` under a different `connection_id` for the same real order id).
+
+**Cart operations (roadmap item 3):** REMOVE and CHANGE_QUANTITY now go
+through the same "propose then approve" pattern ADD already used —
+`cart_proposal.py` never builds anything but a `PROPOSE_CART_CHANGE`
+candidate for any of the three; a cart only actually changes after the
+shopper's separate, explicit call to the existing, unmodified
+`POST /api/chat/proposals/{id}/accept`. `intent_resolution.py` extends
+the same bounded-interpreter approach used for ADD ("add that"/"the first
+one") to remove/set_quantity phrasings ("remove that", "remove the
+shoes", "make that quantity two"), validating the model's structured
+output against the real, freshly-fetched cart contents rather than
+against what was merely shown/discovered — a reference resolved for
+"remove" is never a fresh catalog search result, only a real line already
+in the cart. Ambiguous references still ask rather than guess (unchanged
+requirement, exercised by the existing ordinal/pronoun/name test matrix
+plus new cases). Live-verified
+(`tests/shopper_v2/test_phase6_cart_change_operations.py`): a REMOVE
+proposal is created without mutating the real cart until approved, same
+for CHANGE_QUANTITY, no-target and no-cart_id both decline honestly.
+
+CLEAR_CART is a **named, deliberate blocker, not an oversight**:
+`PROPOSE_CART_CHANGE`'s `proposal_change_type` enum (in the unmodified
+`accept_proposal`/`execute_case` dispatch) has no "CLEAR" value, and V1's
+own `accept_proposal` (off-limits to modify per this codebase's own
+architecture boundary) has no path that would apply one even if it
+existed. Building a new proposal semantic for it, or having V2 call
+`CLEAR_CART` directly (bypassing the propose-then-approve pattern this
+whole package exists to enforce), were both rejected as exactly the
+fabricated-functionality anti-pattern this document's own maintenance
+note warns against. "Clear my cart" through V2 gets an explicit, honest
+decline pointing at the cart panel instead.
+
+**Verification performed this slice:** `invariant-guard` SAFE on the full
+diff (see its report: all six invariants hold, idempotency ledger
+untouched, `engine/api/chat.py`/`engine/decision/`/`engine/risk/`/
+`adapters/` write paths confirmed absent from the diff via
+`git diff --stat`). `auditroutes.py` clean (all locked routes, shopper
+scoping, and public routes as expected). `fuzz.py` (seed 98261929, 20
+sequences x 12 steps, 1200 assertions) clean — every invariant held,
+including cart-line-level tracking through the new remove/quantity paths
+this slice's `cart_proposal.py` generalization touches. New tests
+(`test_phase6_order_status.py`, `test_phase6_cart_change_operations.py`)
+and pre-existing V2 tests (`test_phase4_cart_proposal.py`, updated for the
+renamed function; `test_phase4_intent_resolution.py`;
+`test_phase1_capability_routing.py`) all pass live against Northfield.
+**Not done this slice:** browser/Playwright verification of the new
+capabilities (order status, remove/set_quantity through the real
+`ShopperV2Panel.tsx` UI) — the panel itself was not extended to expose
+these turns distinctly; a shopper can trigger them by typing the right
+sentence, but nothing in the UI names "order status" or "cart change" as
+a distinct state the way discovery/comparison results are shown.
+Kettle-side verification of order status/cart operations also not done
+this slice (Northfield only).
+
+**Not started in that slice, picked up next:** multi-item shopping
+missions, multi-item basket/cart proposals, trade-off reasoning and
+re-ranking, a dedicated shopper decision-workspace UI, outcome/interaction
+measurement, and the final continuous browser journeys.
+
+### Shopper V2 — continuation: multi-item shopping missions
+
+New files: `engine/shopper_v2/missions.py`,
+`tests/shopper_v2/test_phase7_missions.py`. Modified:
+`engine/shopper_v2/state.py` (new `MissionItem` model +
+`ShoppingStateV2.mission_items` field, additive - existing single-item
+fields unchanged), `engine/db/models.py` (`mission_items` JSON column on
+`shopping_states`), `engine/db/session.py` (idempotent `ALTER TABLE`
+migration, same pattern as every other column added after that table's
+creation), `engine/db/shopping_state.py` (`get`/`merge` extended for the
+new column, same "replaced wholesale" semantics as `active_products`),
+`engine/reasoning/prompts.py`/`service.py` (a third bounded interpreter,
+`interpret_mission_items`/`mission_reference_tool`, same shape as
+`interpret_cart_reference`: the model sees only position+label pairs for
+existing items, never a real internal `item_id`, and
+`missions.py::_resolve_target` deterministically resolves any claimed
+reference against the real current list before anything is written),
+`engine/shopper_v2/orchestrator.py` (new step 4b, gated by "a mission is
+already being tracked" or "this message contains a comma/'and'/'&'" - a
+cost-only heuristic that only decides whether to spend a bounded LLM call,
+never the actual outcome).
+
+**Outcome (roadmap item 4):** "I need running shoes, socks and a
+hydration bottle" is tracked as three independent items, each retrieved
+and relevance-verified separately (reusing the existing
+`retrieval.retrieve` + `evidence.build_evidence` - no new ranking/
+relevance logic), so a later "make the shoes lightweight" or "under 5000
+for the shoes" updates only that item's own constraints, never the whole
+mission or a different item. Live-verified over real HTTP against
+Northfield: three items tracked in one turn (`P1001`/`P3002` came back as
+real, adapter-fetched candidates for two of them; the third, "hydration
+bottle", got an honest "I couldn't find anything matching... yet" -
+Northfield genuinely doesn't sell one, not a bug), then a follow-up
+ordinal refinement ("under 5000 for the shoes") correctly updated only the
+`running shoes` item.
+
+**A real bug found and fixed during that live verification, not caught by
+the unit tests written first:** the initial implementation mutated
+`MissionItem` objects in place while resolving a refinement, and
+`run_mission_turn` then tried to detect "what changed this turn" by
+diffing the new list against the caller's own `state.mission_items` -
+which had *already been mutated by the same call*, since Python holds
+those objects by reference. Every refinement therefore diffed as "no
+change," and the shopper got a bare "Noted." instead of a real per-item
+reply. The model-free unit tests written first did not catch this because
+they only asserted final field *values*, never exercised
+`run_mission_turn`'s own before/after diff on a refinement turn. Fixed by
+(a) deep-copying every item before any mutation in
+`apply_mission_message`, so the caller's original state object is never
+touched, and (b) having that function report which `item_id`s it actually
+touched directly, rather than making the caller reconstruct that by
+diffing snapshots at all. A regression case reproducing the exact live
+sequence (new item, then a real HTTP-shaped refinement) is now in
+`test_phase7_missions.py`, confirmed to fail against the pre-fix code and
+pass against the fix. This is the same class of lesson CLAUDE.md's own
+working-practices section already names ("a test written from a guess at
+the bug's output... can pass for the wrong reason") - the live walkthrough
+caught what the unit tests, written from the same author's assumptions
+about what "touched" meant, could not.
+
+**A known, honest limitation, not fixed this slice:** per-item budget
+statements like "under 5000" are stored as free-text `constraints` (the
+only field the bounded interpreter currently extracts for a refinement),
+which `mission_ranking.rank_and_filter` treats as a literal text/keyword
+match against product title and description - not as a numeric price
+comparison the way the single-item path's dedicated `budget_amount` field
+is. Confirmed live: after "under 5000 for the shoes," the previously-found
+Trailblazer Running Shoe (₹4,299, genuinely under 5,000) dropped out of
+`candidates` because "under 5000" does not appear as text in that
+product's title or description. Closing this properly needs a numeric
+`budget_amount`/`budget_currency` pair on `MissionItem` and a matching
+field on `interpret_mission_items`'s tool schema, parsed the same
+defensive way `ReasoningService._parse_shopping_state` already parses the
+single-item budget - not attempted here to avoid rushing a second
+bounded-interpreter schema change without its own verification pass.
+Tracked as a Known Issue below, not silently left broken.
+
+**Verification performed:** `invariant-guard` SAFE (scoped review of
+`missions.py` + the state/db changes: no Decision Engine/Risk Gate/
+ExecutionService import, no `ActionType`/`ProposedAction` construction,
+model's claimed item reference always re-validated against the real
+current list before any mutation, `mission_items` persistence correctly
+scoped per `(session_id, connection_id)`, migration touches only the one
+new column on `shopping_states`, `engine/api/chat.py`/`engine/decision/`/
+`engine/risk/`/`engine/execution/service.py`/`adapters/` absent from the
+diff). `auditroutes.py` clean after the engine was restarted to pick up
+the schema migration. `fuzz.py` clean (seed 749958950, 20 sequences, 1200
+assertions, every invariant held) on the same restarted engine.
+`test_phase7_missions.py` (18 checks,
+model-free resolution logic + live retrieval + the refinement-bug
+regression) passes. **Not done this slice:** browser/Playwright coverage
+of missions through `ShopperV2Panel.tsx` (the panel was not extended to
+show per-item mission state distinctly - a shopper can drive this by
+typing the right sentences, but nothing in the UI names it as a mission
+yet), Kettle-side verification (Northfield only), and the numeric
+per-item budget gap named above.
+
+### Shopper V2 — continuation: multi-item basket proposals
+
+New files: `engine/shopper_v2/basket_proposal.py`,
+`tests/shopper_v2/test_phase8_basket_proposal.py`. Modified:
+`engine/db/models.py` (`CartProposal.mission_item_id`, nullable),
+`engine/db/session.py` (idempotent `ALTER TABLE cart_proposals ADD COLUMN
+mission_item_id` migration), `engine/db/cart_proposals.py` (`create()`
+gained the same optional kwarg, threaded into `_as_dict()`),
+`engine/execution/service.py` (the `PROPOSE_CART_CHANGE` dispatch reads
+one additional optional, opaque string param and stores it - V1 never
+sets it, so this is a no-op for every V1-originated proposal),
+`engine/shopper_v2/cart_proposal.py` (`run_cart_change_proposal_turn`
+gained optional `mission_item_id`/`reason` passthrough kwargs, still only
+ever building the same `PROPOSE_CART_CHANGE` candidate it already built),
+`engine/reasoning/prompts.py`/`service.py` (the existing
+`interpret_mission_items` tool gained one more boolean field,
+`propose_basket` - true only on an explicit "add these to my cart now"
+request), `engine/shopper_v2/missions.py` (`apply_mission_message` surfaces
+`propose_basket`; `run_mission_turn` gained optional decision/gate/
+execution/connection_id/session_id/cart_id kwargs and delegates to
+`basket_proposal.py` when triggered), `engine/shopper_v2/orchestrator.py`
+(threads the same decision/gate/execution/connection_id/session_id/cart_id
+it already passes to `cart_proposal.py`/`checkout.py`/`payment_recovery.py`
+into `run_mission_turn` too - no new source of authority).
+
+**Outcome (roadmap item 4b):** "add these to my cart" against a tracked
+multi-item mission proposes one real `PROPOSE_CART_CHANGE` per eligible
+item, independently - never a single fabricated "bundle" object, never
+more than one product per item, and never a guess when an item has zero
+or more than one verified candidate. A "basket" is not a new stored
+concept: it is N ordinary `CartProposal` rows tagged with the mission item
+they fulfill, and every one of them shows up through the EXISTING,
+completely unmodified `GET /api/chat/proposals` route - no new API surface
+for "what's in my proposed basket."
+
+Live-verified end to end over real HTTP against Northfield, in one
+continuous session: "I need running shoes and socks" tracked two items
+with real verified candidates (`P1001`, `P3002`); a real cart was created
+via the existing `/api/shop/{connection_id}/cart` route; "add these to my
+cart" produced two real, independently-tagged `CartProposal` rows,
+correctly named by item (`reason: "part of your running shoes item"` /
+`"part of your socks item"`), the cart genuinely still empty afterward,
+and each mission item's `selected_product_id`/`status` updated to reflect
+the tentative pick (`deciding`) - all visible via the plain `GET
+/api/chat/proposals` call, no V2-aware client needed. Accepting the
+running-shoes proposal via the existing, unmodified `POST
+/api/chat/proposals/{id}/accept` correctly triggered V1's own pre-existing
+`NEEDS_CHOICE` size-variant flow (untouched by this work - proof the real
+revalidation logic runs identically for a V2-created proposal); accepting
+the socks proposal produced a real cart mutation (`cart_changed: true`,
+the real line landing in the real cart at the real price). A second live
+session ("I need shoes and a jacket," where "shoes" alone returned no
+verified candidate but "jacket" did) confirmed the honest mixed reply -
+"I've proposed adding: jacket... I haven't found anything for: shoes
+yet." - never silently dropping the unfound item, never fabricating a
+proposal for it.
+
+**Verification performed:** `invariant-guard` SAFE (scoped review
+including `engine/execution/service.py`, the most sensitive shared file
+touched so far - confirmed the new param is a genuine no-op for every
+V1-originated proposal, nothing in `engine/api/chat.py`'s accept/reject/
+expiry handling reads or branches on the new column, no financial action
+type touched, an item is never proposed for unless it has exactly one
+verified candidate, no adapter write-method call anywhere in
+`basket_proposal.py`, `engine/api/chat.py`/`engine/decision/`/
+`engine/risk/`/`adapters/` absent from the diff, idempotency ledger
+unaffected). `auditroutes.py` clean on the engine restarted to pick up the
+new migration. `fuzz.py` clean (seed 134652528, 20 sequences, 1200
+assertions, every invariant held) against the same restarted engine. All
+24 checks in
+`test_phase8_basket_proposal.py` pass (proposed/no_candidates/ambiguous/
+already-done outcomes, correct per-item tagging, cart non-mutation,
+existing pending-proposals visibility, state persistence, the
+`run_mission_turn` integration path, and the honest degrade when decision/
+gate/execution aren't wired in) on the first run - no bug found this time,
+unlike the mission-tracking slice. The full existing V2 regression suite
+(all `test_phase1`-`test_phase7` files) re-run clean alongside it.
+
+**Not done this slice:** browser/Playwright coverage of the basket-propose
+flow through `ShopperV2Panel.tsx` (the panel still doesn't distinctly
+render a "proposed basket" state - a shopper can drive and inspect this
+via the existing chat + proposals routes, but nothing in the UI names it
+yet), Kettle-side verification (Northfield only), and the numeric
+per-item budget gap (unchanged from the missions slice, still open).
+**A real ambiguous-candidate (2+ verified matches for one item) case was
+not exercised live** - the Northfield catalog didn't happen to produce
+one for the phrasings tried; that path is covered by
+`test_phase8_basket_proposal.py`'s synthetic multi-candidate item instead,
+confirmed to report "ambiguous," never auto-pick.
+
+### Shopper V2 — continuation: trade-off reasoning and re-ranking
+
+New files: `engine/shopper_v2/tradeoff.py`,
+`tests/shopper_v2/test_phase9_tradeoff.py`. Modified:
+`engine/shopper_v2/orchestrator.py` (new step 4c - a purely deterministic
+trigger on `delta.priorities_add`, no new bounded LLM call),
+`engine/shopper_v2/missions.py` (`apply_mission_message`'s return extended
+to a 5-tuple adding `item_reasons`, surfaced by `run_mission_turn` in its
+reply text for a mission-item refinement that was genuinely a trade-off
+statement).
+
+**Introduces no new ranking logic, per the explicit instruction to reuse
+the existing architecture wherever it genuinely can.** The re-ranking and
+every "why" explanation come from calling the EXISTING, unmodified
+`engine.execution.mission_ranking.rank_and_filter` a second time with the
+shopper's now-updated `priorities` - the same function `evidence.py`
+already calls for every discovery turn, and the same real, grounded
+`fit_reasons` shape V1's own honest-synthesis discipline already trusts.
+The trigger itself needed no new model call either: `priorities_add`
+already arrives on every turn's `StateDelta` via the existing
+`understand()` call, unmodified.
+
+**Outcome (roadmap item 8):** "comfort matters more than price," then
+later "actually durability matters more," re-orders what is currently
+shown and explains the new top pick using the merchant's own real product
+text - never an invented reason, never silently re-ordering without
+saying why. A product that fails the trade-off's own hard filter
+(exclusion/budget/stock) is dropped from what's shown entirely, not kept
+and mislabeled as still fitting. For a multi-item mission, the identical
+mechanism applies per item: refining one tracked item's priorities
+re-ranks and re-explains ONLY that item, using the real evidence already
+computed by the existing per-item retrieval pass (previously computed and
+silently discarded - now surfaced).
+
+Model-free verification (`test_phase9_tradeoff.py`, 12 checks) uses the
+REAL Northfield catalog text (`sample_merchant/seed/catalog.py`'s own
+product descriptions, not invented copy) against a stub adapter, and the
+real, unmodified `mission_ranking.rank_and_filter`: a "lightweight"
+priority correctly promotes the Trailblazer Running Shoe (whose real
+description says "Lightweight daily trainer..."); a later "race day"
+priority correctly promotes the Marathon Pro Racing Shoe instead (real
+description: "Carbon plate, built for race day.") without silently
+dropping the previous pick from what's shown; an exclusion correctly
+removes a product from the re-ranked set entirely; a partial
+`adapter.get_product` failure degrades to what could be fetched, never
+raising or fabricating the missing product; and an empty `active_products`
+gets an honest decline.
+
+Live-verified against the real, running engine and the real Northfield
+backend (`test_phase9_tradeoff.py`'s own live section plus a manual HTTP
+walkthrough over `/api/v2/chat` with real cookies/auth): the trade-off
+capability genuinely triggers (`trace.capability == "trade_off"`), a real
+re-rank runs against the real catalog, and the result persists honestly to
+the real `shopping_states` row.
+
+**A real, live-discovered gap found during this verification, not fixed
+in this slice (out of scope for trade-off reasoning specifically, but too
+relevant to not record):** `engine/shopper_v2/respond.py`'s discovery
+synthesis pass has an anti-fabrication guard against a fictional CART
+claim (`_claims_a_cart_action`, closed earlier this session) but has NO
+equivalent guard against a fabricated PERSONALIZATION claim - the same
+class of defect V1's own `_honest_synthesis`/`mission_ranking.
+has_stated_priority`/`stated_terms` guard exists specifically to prevent,
+which V2 never inherited. Reproduced live, once, exactly: a turn with
+`ShoppingStateV2.priorities == []` (the model did not extract a priority
+that turn) nonetheless returned "This option perfectly aligns with your
+priority for lightweight footwear" - a priority attribution with nothing
+in state to back it, on the DISCOVER path, not the trade-off path (this
+slice's own step 4c correctly did not fire, since `delta.priorities_add`
+was genuinely empty that turn - the gap is in `respond.py`'s synthesis
+call, unrelated to `tradeoff.py`). Exact repro: session
+`sess_live_tradeoff_seeded`, message "lightweight is what matters",
+`conn_demo`. **Smallest safe fix, not attempted here to avoid scope creep
+beyond this slice:** port `mission_ranking.has_stated_priority`/
+`stated_terms` into `respond.py`'s own synthesis-acceptance check
+(`if synthesis.text and not _claims_a_cart_action(synthesis.text)`),
+discarding or rewriting a personalization-attributing sentence when
+`state.priorities`/`must_have`/`constraints` don't actually back it -
+mirroring the existing cart-claim guard's own shape exactly, not a new
+mechanism. Added to Known Issues below and to Next Steps.
+
+**Verification performed:** `invariant-guard` SAFE (confirmed this slice
+touches no shared/sensitive file at all - unlike the prior basket-proposal
+slice, `engine/execution/service.py` is untouched this time; no Decision
+Engine/Risk Gate/ExecutionService import anywhere in `tradeoff.py`; only
+`adapter.get_product`, a read, is called; `engine/api/chat.py`/
+`engine/decision/`/`engine/risk/`/`engine/execution/`/`adapters/` all
+absent from the diff; idempotency ledger unaffected). `auditroutes.py`
+clean. `fuzz.py` clean (seed 185249049, 20 sequences, 1200 assertions,
+every invariant held) against the same engine. All 15 checks in
+`test_phase9_tradeoff.py` pass. The
+full existing V2 regression suite (phases 1-8) re-run clean alongside it.
+
+**Not done this slice:** the `respond.py` personalization-claim gap named
+above (tracked, not fixed), browser/Playwright coverage of trade-off
+turns, Kettle-side verification (Northfield only), and the pre-existing,
+separately-documented model-extraction-completeness characteristic
+(`priorities_add` sometimes capturing a whole sentence rather than an
+isolated keyword, which the coarse keyword matcher in
+`mission_ranking._matches` then cannot credit - observed live multiple
+times this slice, not a defect in the re-ranking mechanism itself, which
+is model-free-verified to correctly credit whatever phrase it IS given).
+
+### Shopper V2 — continuation: honesty fix, event measurement, decision-workspace UI, and a live-discovered basket-proposal bug
+
+**1. `respond.py` personalization-claim fix (closes the gap the trade-off
+slice found and documented).** New functions `_deterministic_personalized_reply`/
+`_honest_discovery_reply` in `engine/shopper_v2/respond.py`, mirroring
+`engine/api/chat.py::_honest_synthesis`'s own final, 17-times-hardened
+structural end-state exactly (duplicated locally per this package's
+established precedent - V2 never imports `engine.api.chat`): a
+personalization claim reaches the shopper only when the model's
+`cited_reason` names a real term in `mission_ranking.stated_terms`,
+producing an engine-written clause from that real term - never the
+model's own free text. Live-reproduced original bug re-verified fixed
+against the restarted engine: the exact repro (`priorities == []`,
+"lightweight is what matters") now returns the plain, honest "I found 1
+match(es)" instead of a fabricated priority claim; a genuinely-stated
+priority still produces a grounded, attributed reply. New tests
+(`test_phase10_honest_personalization.py`, 10 checks) cover the uncited
+case, an uncorroborated `cited_reason`, a validated citation, and a
+plain non-personalizing reply - all pass. `invariant-guard` SAFE (pure
+text-selection change; confirmed `engine/api/chat.py` and
+`engine/execution/mission_ranking.py` both genuinely untouched - only
+imported from).
+
+**2. Outcome/interaction measurement, connected to the EXISTING
+infrastructure.** `engine/execution/events.py` gained five new,
+purely-additive `EventType` constants (`TRADE_OFF_APPLIED`,
+`PAYMENT_RECOVERY_OFFERED`, `ORDER_STATUS_CHECKED`,
+`MISSION_ITEM_TRACKED`, `BASKET_PROPOSED`) - `event_type` is a plain
+string column, no migration needed. `orchestrator.py` now writes a real
+event at the end of every capability branch (discovery→
+`PRODUCT_IMPRESSION`, compare→`COMPARISON_STARTED`, compatibility/
+complementary→`PRODUCT_IMPRESSION`, cart-action→`PROPOSAL_CREATED`,
+checkout→`CHECKOUT_STARTED`, payment-recovery→`PAYMENT_RECOVERY_OFFERED`,
+order-status→`ORDER_STATUS_CHECKED`, mission→`MISSION_ITEM_TRACKED`/
+`BASKET_PROPOSED`, trade-off→`TRADE_OFF_APPLIED`), through the SAME
+`record`/`record_many` functions and `ShopperEvent` table V1's
+`engine/api/chat.py` already writes to - no second measurement system.
+Every call is wrapped in the identical best-effort try/except discipline
+chat.py's own call sites already use (`_record_event`/
+`_record_impressions` helpers) - a recording failure can never fail or
+alter the shopper-facing turn. `shopper_id` is threaded from
+`chat_v2.py`'s existing `who.shopper_id_for(...)` call (the same method
+V1 already calls at 6+ of its own sites) through `run_turn` into every
+event. Live-verified (`test_phase11_measurement.py`, 5 checks): a real
+discovery turn writes a real `PRODUCT_IMPRESSION` row scoped to the exact
+session/shopper, tenant isolation confirmed (no leakage across
+`connection_id`), and a real cart-intent turn writes a `PROPOSAL_CREATED`
+row naming the real product id. `invariant-guard` SAFE.
+
+**3. Dedicated Shopper decision-workspace UI, extended (not rebuilt).**
+`storefront/src/ShopperV2Panel.tsx` gained a mission sidebar (goal/
+budget/constraints/priorities for a single-item mission; independent
+tracked-item cards with status/constraints/candidate-count for a
+multi-item mission - real data from `ShoppingStateV2`/`MissionItemV2`,
+a new TypeScript type added to `api.ts` since the backend already
+returned `mission_items` but the frontend type never declared it), a
+capability badge per assistant turn (naming which real backend stage
+answered - discovery/comparison/compatibility/complementary/trade-off/
+mission/cart-action/checkout/payment-recovery/order-status), real
+grounded "why" bullets per product card (from `TurnEvidence.evidence_fields`,
+already computed server-side and previously discarded by the frontend),
+an explicit "PROPOSED - not yet in your cart" badge distinct from a
+"✓ In your real cart now" confirmation that only ever appears after a
+real `acceptProposal` response, and an explicit note on a checkout turn
+that a prepared total is not a completed payment. `npm run build`
+(the real typecheck guard) passes clean. **Not done:** a full redesign
+covering every listed workspace section as a distinct visual stage
+(comparison/compatibility/complementary results currently render as
+plain product cards with capability badges, not their own dedicated
+layouts) - this extends the existing minimal panel with real, working
+sections for what previously had none, not a ground-up rebuild.
+
+**4. A real bug found via Playwright, not by unit tests, and fixed.**
+The new multi-item-mission browser test failed: after "add these to my
+cart" against a tracked mission, the UI correctly reported "I've proposed
+adding: running shoes, socks" and the mission sidebar correctly showed
+"1 option(s) found - proposed" for both items - real proposals had
+genuinely been created server-side - but no PROPOSED badge or Approve/
+Reject control ever appeared, because `run_mission_turn`'s return value
+never carried the created proposal ids anywhere the frontend could read
+them (`ChatReplyV2.trace` only ever carried `cart_proposal_id` from the
+single-item `CART_ACTION` path). A shopper hitting this in the real
+product would have had a real, valid, persisted proposal with **no way
+to ever act on it**. Fixed by extending `run_mission_turn`'s return to a
+5-tuple (`..., proposal_ids`) built from the already-returned
+`BasketItemResult.proposal` dicts (no new proposal-creation code path),
+surfaced via `trace.mission_proposal_ids`, and rendering one Approve/
+Reject control per id in `ShopperV2Panel.tsx`. Regression coverage added
+at both levels: `test_phase8_basket_proposal.py` gained an assertion that
+`run_mission_turn`'s returned ids match the real persisted proposal
+row's id (confirmed to fail before the fix, pass after), and the
+Playwright multi-item-mission test (which originally caught this)
+now passes. `invariant-guard` SAFE (pure data-surfacing; no new
+proposal-creation path, accept/reject still per-proposal-id through the
+unmodified V1 route with its own unmodified revalidation).
+
+**5. Playwright coverage extended.** `storefront/tests/shopper-v2.spec.ts`
+gained two new tests: a full multi-item mission journey (independent
+per-item tracking through a real basket proposal, `PROPOSED` badge
+confirmed) and a trade-off statement journey (capability badge confirmed
+present regardless of which real capability answered - honest about the
+model-extraction-completeness variance already documented, never
+asserting a specific winner). One pre-existing lint error in this file
+(`let` that should be `const`) fixed as found. **A real, timing-only
+flakiness confirmed live and NOT a product defect:** every one of the 5
+V2 Playwright tests passes cleanly when run standalone; running all 5
+back-to-back can exhaust the free Groq tier's ~4-turns/minute throttle
+(CLAUDE.md's own documented "the constraint") and cause the
+already-retried cart-intent test to exceed even its extended timeout -
+confirmed by re-running it alone immediately after and seeing an 8.9s
+pass. `test.setTimeout()` overrides were added to the two turn-heavy
+tests to close the pure-timeout version of this failure; the
+underlying model-throttle-driven variance is pre-existing, already
+documented, and not something this session's own testing standard
+requires eliminating (per this spec file's own docstring, this class of
+variance is accepted and retried, not phrase-patched away).
+
+**Verification performed, cumulative for this continuation:** `invariant-guard`
+SAFE on the respond.py fix, the event-measurement wiring, and the
+basket-proposal-id fix (three separate scoped passes). `auditroutes.py`
+clean after each engine restart. `fuzz.py` clean after the respond.py/
+measurement changes (seed 725601332, 20 sequences, 1200 assertions,
+every invariant held) and clean again after the basket-proposal-id fix
+(seed 749522229, 20 sequences, 1200 assertions, every invariant held). A
+final full re-run of all 16 Python V2 test files caught one more real
+regression before it could ship: `test_phase7_missions.py` still called
+`run_mission_turn` with the OLD 4-value unpacking after this slice's own
+5-tuple change (`ValueError: too many values to unpack`) - a test-suite
+bug this slice introduced and fixed in the same pass, not a product bug;
+all 16 files pass clean after the fix. `npm run build` clean.
+`npm run lint` clean of everything this session touched (8 pre-existing
+errors in unrelated files remain, unchanged from before this session).
+All 16 Python V2 test files pass. 5/5 Playwright V2 tests pass
+individually; full-suite-in-one-run throttle sensitivity is a known,
+accepted, pre-existing characteristic, not a new defect. A final live
+cross-merchant sanity check against Kettle & Bloom Coffee (the GraphQL
+merchant) confirmed the full V2 pipeline still works correctly there
+with every change from this continuation applied ("show me a fruity
+coffee" correctly returned the real Ethiopia Guji Natural via the
+DISCOVER path).
+
+**Not done in this continuation, explicitly still open:** items 3/4
+(purchase outcome/post-purchase) and 2 (cart operations) named in this
+session's own instructions were already complete from earlier work this
+session - re-verified intact (`test_phase6_cart_change_operations.py`,
+`test_phase6_order_status.py` both still pass clean) rather than rebuilt.
+Genuinely still open: full Playwright coverage of purchase-outcome/
+post-purchase and payment-recovery-capability-difference flows through
+the browser specifically (both are thoroughly covered at the live
+Python/HTTP level - `test_phase5_payment_recovery.py`,
+`test_phase6_order_status.py` - but not yet driven through
+`ShopperV2Panel.tsx` in a Chromium browser); Kettle-side Playwright
+coverage (Northfield only, browser-side); a merchant-facing surface
+reading the new V2 events; the remaining decision-workspace UI polish
+named in item 3 above; and moving ANY of this session's work into
+`Completed.md` - deliberately not done, since that requires a
+`value-auditor` pass against the value bar first, which has not been run
+this session. Nothing above should be read as "Shopper V2 is complete" -
+see the feature matrix for the authoritative per-capability status.
+
+### Shopper V2 — value-auditor pass, all three gaps closed, batch moved to Completed.md #54
+
+A prior session ran `invariant-guard` and `value-auditor` against the full
+uncommitted diff accumulated across the missions/basket-proposal/trade-off/
+honesty-fix/event-measurement/decision-workspace continuations, and held the
+batch back from Completed.md for three reasons: (1) the missions budget-fix
+regression test, (2) event measurement having no consumer, (3) real-client
+conditions being assumed rather than exercised for missions/basket/
+trade-off specifically. A later session closed all three and re-verified
+the whole batch; it is now recorded in `Completed.md` (#54). Summary of what
+closed each gap, in full detail in that entry:
+
+1. **The missions budget-fix regression test was found to be vacuous, not
+   just closed.** The original fix worked, but its own test passed for the
+   wrong reason - the refinement query literally contained the text "under
+   5000", which zeroed out keyword search results before the numeric hard
+   filter ever ran. Fixed for real in `engine/shopper_v2/missions.py` (a
+   new `query_constraints` list strips budget-phrase text from the search
+   query while still passing full constraints to the hard filter), and a
+   new deterministic, stub-adapter-based check was added to
+   `tests/shopper_v2/test_phase7_missions.py` that directly proves the
+   numeric filter engages - confirmed with a real revert/fail, restore/pass
+   cycle, not just written and trusted.
+2. **Event measurement now has a real consumer** - `GET
+   /api/v2-activity/{connection_id}` (new `shopper_v2_activity` in
+   `engine/db/repository.py`, wired through `engine/api/routes.py` and
+   rendered as `ShopperV2ActivityPanel` in `storefront/src/AICommerce.tsx`),
+   live-verified with real tenant-isolated counts for both `conn_demo` and
+   `conn_kettle`. **Merchant-console-scoped only - there is still no
+   ops-console consumer of these events**, and that remains open (see Next
+   Steps).
+3. **Real-client conditions for missions/basket-proposal/trade-off were
+   exercised live**, not assumed: zero-data PASS, Kettle (GraphQL, differs
+   from Northfield) PASS including a NEEDS_CHOICE variant path and a
+   correctly-refused double-accept, platform-down PASS (Kettle killed
+   mid-session, degraded honestly, restarted cleanly). Real volume was
+   **not** empirically exercised - no 40k-SKU catalogue was seeded. What was
+   done is a structural code-path check confirming `missions.py`'s
+   retrieval is bounded (`limit=20`) and that no `_catalog_alerts`-style
+   unbounded pattern exists anywhere in `engine/shopper_v2/*.py`. This is a
+   code inspection, not a live volume test - stated precisely so it isn't
+   later read as one.
+
+Final re-verification after all three fixes: `invariant-guard` SAFE again on
+the complete diff, `fuzz.py` clean (20/20 sequences, 1200 assertions), all
+16 `tests/shopper_v2/test_phase*.py` files pass, all 5 Playwright tests in
+`storefront/tests/shopper-v2.spec.ts` pass, `npm run build` clean.
+`auditroutes.py` held on every existing probe but was not extended with a
+named check for the new `/api/v2-activity/{connection_id}` route this
+session - a minor, explicitly open coverage gap, not a failure.
+
+Genuinely still open after this pass (see Next Steps): no ops-console
+consumer of the V2 event types; Playwright coverage of purchase-outcome and
+payment-recovery specifically through the browser; any Kettle-side
+Playwright coverage (`shopper-v2.spec.ts` runs against Northfield only);
+decision-workspace UI polish for comparison/compatibility layouts;
+`auditroutes.py` not extended for the new route; real-volume condition
+remains a structural check, not an empirical one.
+
+---
+
 ## Next Steps
 
 ### Existing Engineering Work
@@ -2570,6 +4108,27 @@ should extend the Playwright suite to them rather than reach for
    This hardening pass is uncommitted on `main` at the time of writing, on
    top of the also-uncommitted Phase 1 (`ee21d53`) and Phase 2 (`962c946`)
    commits it builds on.
+
+0a. **Shopper V2 uncommitted batch - moved to Completed.md #54 this
+   session; what's left is genuinely open, not deferred verification.**
+   All three gaps a prior `value-auditor` pass held the batch back for
+   (vacuous missions budget test, no event-measurement consumer,
+   unexercised real-client conditions) are closed - see "Shopper V2 -
+   value-auditor pass, all three gaps closed" above and `Completed.md`
+   #54 for the evidence. Still open, and not part of that entry's claim:
+   (1) the new event-measurement consumer is merchant-console-scoped only
+   - there is no ops-console consumer of `TRADE_OFF_APPLIED`/
+   `PAYMENT_RECOVERY_OFFERED`/`ORDER_STATUS_CHECKED`/
+   `MISSION_ITEM_TRACKED`/`BASKET_PROPOSED`; (2) the real-volume
+   real-client condition was checked structurally (bounded retrieval,
+   no unbounded-search pattern) rather than against an actual 40k-SKU
+   catalogue; (3) Playwright coverage of purchase-outcome and
+   payment-recovery specifically through the browser, and any Kettle-side
+   Playwright coverage, do not exist yet (`shopper-v2.spec.ts` runs
+   against Northfield only); (4) decision-workspace UI polish for
+   comparison/compatibility layouts is unaddressed; (5) `auditroutes.py`
+   was not extended with a named check for the new
+   `/api/v2-activity/{connection_id}` route.
 
 1. **Guest handover / session behaviour:** still open. Guests no longer pay,
    but can still chat and get escalated, and the shop now prompts for an email

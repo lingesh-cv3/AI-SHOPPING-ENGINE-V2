@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from engine.decision import operation_for
@@ -43,11 +43,17 @@ from .prompts import (
     PROPOSABLE,
     SYSTEM_PROMPT,
     _BEST_MATCH_SYSTEM_PROMPT,
+    _CART_REFERENCE_SYSTEM_PROMPT,
+    _MISSION_REFERENCE_SYSTEM_PROMPT,
     _RELEVANCE_SYSTEM_PROMPT,
     _SYNTHESIS_SYSTEM_PROMPT,
     _synthesis_prompt,
     best_match_prompt,
     best_match_tool,
+    cart_reference_prompt,
+    cart_reference_tool,
+    mission_reference_prompt,
+    mission_reference_tool,
     propose_tool,
     relevance_judgment_prompt,
     relevance_tool,
@@ -176,6 +182,66 @@ class Synthesis:
     #: the way an unset optional field previously was (see `synthesis_tool()`'s
     #: docstring for the bypass this closes).
     personalizes: bool | None = None
+
+
+@dataclass
+class CartReferenceIntent:
+    """The result of `ReasoningService.interpret_cart_reference` - a
+    STRUCTURED reference, never an executable action. `position` and
+    `named_hint` are only ever resolved against the real, already-shown
+    product list by the caller
+    (`engine/shopper_v2/intent_resolution.py::resolve_cart_target`), which
+    independently validates the reference before anything is proposed -
+    this dataclass itself carries no product id, no variant, no price, and
+    nothing the Risk Gate would need to see."""
+
+    is_cart_intent: bool
+    operation: str = "add"  # "add" | "remove" | "set_quantity" | "clear" | "none"
+    reference_type: str = "none"  # "ordinal" | "pronoun" | "name" | "none"
+    position: int | None = None
+    named_hint: str | None = None
+    quantity: int | None = None
+
+
+@dataclass
+class MissionItemIntent:
+    """The result of `ReasoningService.interpret_mission_items` - a
+    STRUCTURED description of how one turn affects a multi-item shopping
+    mission, never an executable action and never a product id. `label`
+    text for `new_item_labels` and `named_hint` are free text the model
+    proposed; `position`/`reference_type` are only ever resolved against
+    the REAL current mission-item list by the caller
+    (`engine/shopper_v2/missions.py::apply_mission_message`), which
+    independently validates the reference before anything is written to
+    state - this dataclass carries no mission-item id of its own, because
+    the model is never shown real ids to echo back (see
+    `mission_reference_tool()`'s own docstring)."""
+
+    #: New, independent requirements this turn introduces (e.g. "I need
+    #: running shoes, socks and a hydration bottle" -> three labels). Empty
+    #: when the turn refines an existing item rather than adding one.
+    new_item_labels: list[str]
+    #: Whether/how this turn refers to an EXISTING item ("make the shoes
+    #: lightweight", "for the socks, black", "I've decided on that one").
+    reference_type: str = "none"  # "ordinal" | "pronoun" | "name" | "none"
+    position: int | None = None
+    named_hint: str | None = None
+    constraints_add: list[str] = field(default_factory=list)
+    must_have_add: list[str] = field(default_factory=list)
+    nice_to_have_add: list[str] = field(default_factory=list)
+    exclusions_add: list[str] = field(default_factory=list)
+    priorities_add: list[str] = field(default_factory=list)
+    #: True when the shopper indicated the referenced item is settled
+    #: ("I've decided on that one", "the shoes are sorted").
+    item_completed: bool = False
+    #: True when the shopper's message asks to add the tracked mission
+    #: items to their cart NOW ("add these to my cart", "I'll take all of
+    #: these", "let's get the shoes and socks") - never inferred from
+    #: silence, only from an explicit request. See
+    #: `engine/shopper_v2/basket_proposal.py`, which is the only thing this
+    #: flag ever triggers - it still never itself proposes anything; it is
+    #: only ever a routing signal the caller deterministically acts on.
+    propose_basket: bool = False
 
 
 class ReasoningService:
@@ -525,6 +591,154 @@ class ReasoningService:
             )
             return None
         return product_id
+
+    async def interpret_cart_reference(
+        self,
+        *,
+        message: str,
+        active_products: list[dict],
+        history: list[str] | None = None,
+        cart_lines: list[dict] | None = None,
+    ) -> CartReferenceIntent | None:
+        """Shopper V2 Phase 4/continuation - the general cart-reference
+        interpreter. Given the shopper's message, the REAL already-shown
+        product list, and the REAL current cart lines, decides whether the
+        message asks to add/remove/change-quantity/clear, and structurally
+        which item (position/pronoun/name) - never a product id it invents,
+        never an ActionType, never a variant or price. See
+        `cart_reference_tool()`'s own docstring for the full narrow-
+        capability guarantee, identical in shape to
+        `judge_relevance`/`judge_best_match` above.
+
+        Returns `None` (not a guess) when the model is unavailable,
+        throttled, or fails to call the tool - the caller
+        (`engine/shopper_v2/intent_resolution.py`) must treat `None` the
+        same as "could not confirm cart intent," the same degrade-honestly
+        discipline every other bounded judgment call in this file already
+        uses.
+        """
+        if self._client is None:
+            return None
+        prompt = cart_reference_prompt(message, active_products, history, cart_lines)
+        try:
+            result = await self._client.complete(
+                system=_CART_REFERENCE_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[cart_reference_tool()],
+                force_tool=True,
+            )
+        except LLMUnavailable as exc:
+            logger.info("cart-reference interpretation unavailable, degrading: %s", exc)
+            return None
+        call = next(
+            (c for c in result.tool_calls if c["name"] == "interpret_cart_reference"),
+            None,
+        )
+        if call is None:
+            return None
+        args = call["arguments"] if isinstance(call.get("arguments"), dict) else {}
+        is_cart_intent = args.get("is_cart_intent")
+        if not isinstance(is_cart_intent, bool):
+            return None
+        operation = args.get("operation")
+        if operation not in ("add", "remove", "set_quantity", "clear", "none"):
+            operation = "add" if is_cart_intent else "none"
+        reference_type = args.get("reference_type")
+        if reference_type not in ("ordinal", "pronoun", "name", "none"):
+            reference_type = "none"
+        position = args.get("position")
+        position = position if isinstance(position, int) else None
+        named_hint = args.get("named_hint")
+        named_hint = named_hint if isinstance(named_hint, str) and named_hint.strip() else None
+        quantity = args.get("quantity")
+        quantity = quantity if isinstance(quantity, int) and quantity > 0 else None
+        return CartReferenceIntent(
+            is_cart_intent=is_cart_intent,
+            operation=operation,
+            reference_type=reference_type,
+            position=position,
+            named_hint=named_hint,
+            quantity=quantity,
+        )
+
+    async def interpret_mission_items(
+        self,
+        *,
+        message: str,
+        current_items: list[dict],
+        history: list[str] | None = None,
+    ) -> MissionItemIntent | None:
+        """Multi-item shopping missions - the general (non-phrase-specific)
+        interpreter for "I need running shoes, socks and a hydration
+        bottle" (new items) and later refinements like "make the shoes
+        lightweight" or "I've decided on the socks" (an existing item,
+        referenced the same ordinal/pronoun/name way
+        `interpret_cart_reference` already does for cart references - same
+        pattern, different target). See `mission_reference_tool()`'s own
+        docstring for the full narrow-capability guarantee.
+
+        Returns `None` (not a guess) when the model is unavailable,
+        throttled, or fails to call the tool - the caller
+        (`engine/shopper_v2/missions.py`) must treat `None` as "this turn
+        carried no mission-item information," falling through to whatever
+        single-item handling already exists, never inventing an item or a
+        reference.
+        """
+        if self._client is None:
+            return None
+        prompt = mission_reference_prompt(message, current_items, history)
+        try:
+            result = await self._client.complete(
+                system=_MISSION_REFERENCE_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[mission_reference_tool()],
+                force_tool=True,
+            )
+        except LLMUnavailable as exc:
+            logger.info("mission-item interpretation unavailable, degrading: %s", exc)
+            return None
+        call = next(
+            (c for c in result.tool_calls if c["name"] == "interpret_mission_items"),
+            None,
+        )
+        if call is None:
+            return None
+        args = call["arguments"] if isinstance(call.get("arguments"), dict) else {}
+
+        def _str_list(key: str) -> list[str]:
+            values = args.get(key)
+            if not isinstance(values, list):
+                return []
+            return [str(v).strip()[:200] for v in values if str(v).strip()]
+
+        new_item_labels = [
+            label.strip()[:120] for label in _str_list("new_item_labels") if label.strip()
+        ]
+        reference_type = args.get("reference_type")
+        if reference_type not in ("ordinal", "pronoun", "name", "none"):
+            reference_type = "none"
+        position = args.get("position")
+        position = position if isinstance(position, int) else None
+        named_hint = args.get("named_hint")
+        named_hint = named_hint if isinstance(named_hint, str) and named_hint.strip() else None
+        item_completed = args.get("item_completed")
+        item_completed = item_completed if isinstance(item_completed, bool) else False
+        propose_basket = args.get("propose_basket")
+        propose_basket = propose_basket if isinstance(propose_basket, bool) else False
+
+        return MissionItemIntent(
+            new_item_labels=new_item_labels,
+            reference_type=reference_type,
+            position=position,
+            named_hint=named_hint,
+            constraints_add=_str_list("constraints_add"),
+            must_have_add=_str_list("must_have_add"),
+            nice_to_have_add=_str_list("nice_to_have_add"),
+            exclusions_add=_str_list("exclusions_add"),
+            priorities_add=_str_list("priorities_add"),
+            item_completed=item_completed,
+            propose_basket=propose_basket,
+        )
 
     # -- parsing -----------------------------------------------------------
 

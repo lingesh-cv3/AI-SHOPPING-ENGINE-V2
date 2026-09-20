@@ -84,6 +84,7 @@ async def get(session_id: str, connection_id: str) -> dict[str, Any] | None:
             "priorities": list(row.priorities or []),
             "active_products": list(row.active_products or []),
             "mission_status": row.mission_status,
+            "mission_items": list(row.mission_items or []),
         }
 
 
@@ -105,6 +106,7 @@ async def merge(
     priorities_add: list[str] | None = None,
     active_products: list[str] | None = None,
     mission_status: str | None = None,
+    mission_items: list[dict] | None = None,
     clear_fields: list[str] | None = None,
 ) -> None:
     """Fold one turn's structured output into the stored mission.
@@ -201,6 +203,8 @@ async def merge(
                 row.priorities = _dedup_append(row.priorities or [], priorities_add)
             if active_products is not None:
                 row.active_products = list(active_products)
+            if mission_items is not None:
+                row.mission_items = list(mission_items)
             if mission_status is not None and (
                 mission_status != before["mission_status"]
                 or "mission_status" not in cleared_now

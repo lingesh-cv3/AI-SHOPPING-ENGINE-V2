@@ -1051,3 +1051,271 @@ def best_match_tool() -> dict[str, Any]:
             },
         },
     }
+
+
+#: Shopper V2 Phase 4 continuation - the general, non-phrase-specific cart-
+#: intent interpretation layer. Added here (engine/reasoning/), not inside
+#: engine/shopper_v2/, for the same reason judge_relevance/judge_best_match
+#: live here: this is a new bounded LLM capability, and this module is
+#: where every existing bounded LLM capability's prompt/tool pair already
+#: lives - putting a new one here reuses the established pattern rather
+#: than inventing a parallel one inside shopper_v2/. V1 does not call this;
+#: purely additive.
+#:
+#: The general problem this solves: the existing `propose_actions` tool
+#: (used by both V1's `reason()` and V2's `understand()`) is a general-
+#: purpose action proposer, and reliably classifying "add that", "add the
+#: first one", "I'll take this", "put two of those in my cart", "get me
+#: the Trailblazer", or a bare "add it" as ADD_TO_CART/PROPOSE_CART_CHANGE
+#: is a narrower, different task than that tool's own job - exactly the
+#: same reasoning that already justified giving relevance judgment and
+#: best-match selection their own narrow tools instead of overloading
+#: `propose_actions` further. This tool is deliberately as narrow as those:
+#: it interprets a REFERENCE, never an action. It has no field for an
+#: ActionType, a variant, a price, or anything the risk gate would need to
+#: see - only whether the message plausibly refers to one of the REAL,
+#: already-shown candidates it is given, and which one, structurally
+#: (position/pronoun/name), never a product id it invents itself.
+_CART_REFERENCE_SYSTEM_PROMPT = (
+    "You interpret whether a shopper's message refers to changing their "
+    "cart using one of two REAL lists you are given: products currently "
+    "SHOWN to them (for adding something new) and lines currently IN their "
+    "cart (for removing or changing the quantity of something already "
+    "there, or clearing the whole cart). You may only ever refer to one of "
+    "THESE by its position in the relevant list or by name matching one of "
+    "its titles; you can never name, invent, or imply a product not in "
+    "these exact lists. Determine the OPERATION first: 'add' (add a shown "
+    "product - 'add that to my cart', 'I'll take this', 'get me the "
+    "Trailblazer', 'put two of those in my cart'), 'remove' (take a cart "
+    "line out - 'remove that', 'remove the shoes', 'take off the first "
+    "item'), 'set_quantity' (change how many of a cart line - 'make that "
+    "quantity two', 'change the socks to three'), or 'clear' (empty the "
+    "whole cart - 'clear my cart', 'empty my basket'). A plain question, a "
+    "search for something new, a comparison request, or any message that "
+    "does not ask to change the cart is NOT cart intent - answer false "
+    "rather than guess. For 'remove'/'set_quantity', resolve the reference "
+    "against the CART lines list, not the shown-products list. When the "
+    "message clearly expresses cart intent but you cannot tell WHICH item "
+    "it means, still answer true for intent but leave the reference fields "
+    "unset rather than picking one arbitrarily - a human will ask which "
+    "one, not you. 'clear' needs no reference at all."
+)
+
+
+def cart_reference_prompt(
+    message: str,
+    active_products: list[dict],
+    history: list[str] | None,
+    cart_lines: list[dict] | None = None,
+) -> str:
+    """Prompt for the cart-reference interpreter (`cart_reference_tool()`
+    below). `active_products` is always the real, already-shown/verified
+    product list from the current `ShoppingStateV2`; `cart_lines` is the
+    real, current contents of the shopper's actual cart (fetched fresh by
+    the caller) - neither is ever invented here. `history` (a few recent
+    turns, the same bound the rest of this codebase's Context Builder
+    already uses) is included only so a bare 'add it'/'remove it' can be
+    read against what was just discussed, never as a place new products
+    could be introduced from."""
+    shown = "\n".join(
+        f"  {i + 1}. id={p['product_id']}: {p['title']}"
+        for i, p in enumerate(active_products[:10])
+    )
+    cart_list = "\n".join(
+        f"  {i + 1}. id={l['product_id']}: {l['title']} (qty {l.get('quantity', 1)})"
+        for i, l in enumerate((cart_lines or [])[:20])
+    )
+    recent = "\n".join(f"  - {h}" for h in (history or [])[-4:])
+    parts = [f"Shopper's message: {message!r}"]
+    if recent:
+        parts.append(f"Recent conversation:\n{recent}")
+    parts.append(f"Products currently SHOWN to the shopper (for 'add'):\n{shown or '  (none)'}")
+    parts.append(f"Lines currently IN the shopper's cart (for 'remove'/'set_quantity'/'clear'):\n{cart_list or '  (empty)'}")
+    parts.append(
+        "What operation does this message ask for - add/remove/set_quantity/"
+        "clear/none? If add/remove/set_quantity and you can tell which item, "
+        "give its 1-based position in the RELEVANT list above "
+        "(reference_type='ordinal' with position), or its name "
+        "(reference_type='name' with named_hint set to the exact title text "
+        "you matched against), or 'pronoun' if it's a bare reference like "
+        "'it'/'that one' with nothing else to go on. If a quantity is "
+        "stated, give it; otherwise leave it unset. Call "
+        "interpret_cart_reference."
+    )
+    return "\n\n".join(parts)
+
+
+def cart_reference_tool() -> dict[str, Any]:
+    """Tool schema for the cart-reference interpreter. Deliberately has no
+    field for an ActionType, a product id it could invent, a variant, or a
+    price - `position`/`named_hint` are only ever resolved against the
+    REAL `active_products`/`cart_lines` lists by the caller
+    (`engine/shopper_v2/intent_resolution.py`), which independently
+    verifies the reference before anything is proposed; this tool cannot
+    itself cause an id to reach the Decision Engine or Risk Gate. No
+    action-type, variant, or risk field - the same narrow-capability
+    guarantee `relevance_tool()`/`best_match_tool()` already carry.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "interpret_cart_reference",
+            "description": "State whether the shopper's message asks to change their cart, how (add/remove/set_quantity/clear), and which item if identifiable.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "is_cart_intent": {
+                        "type": "boolean",
+                        "description": "True if the message asks to change the cart in some way.",
+                    },
+                    "operation": {
+                        "type": "string",
+                        "enum": ["add", "remove", "set_quantity", "clear", "none"],
+                        "description": "Which cart operation the message asks for. 'none' if is_cart_intent is false.",
+                    },
+                    "reference_type": {
+                        "type": "string",
+                        "enum": ["ordinal", "pronoun", "name", "none"],
+                        "description": "How the target item was referred to, if applicable. 'none' if is_cart_intent is false, operation is 'clear', or the reference could not be resolved.",
+                    },
+                    "position": {
+                        "type": "integer",
+                        "description": "1-based position in the relevant list (shown products for 'add', cart lines otherwise), when reference_type is 'ordinal'.",
+                    },
+                    "named_hint": {
+                        "type": "string",
+                        "description": "The exact title text (or a clear substring of it) the shopper's words matched, when reference_type is 'name'.",
+                    },
+                    "quantity": {
+                        "type": "integer",
+                        "description": "The quantity requested, only if the shopper stated one explicitly.",
+                    },
+                },
+                "required": ["is_cart_intent", "operation", "reference_type"],
+            },
+        },
+    }
+
+
+_MISSION_REFERENCE_SYSTEM_PROMPT = (
+    "You interpret one shopper message against a multi-item shopping "
+    "mission - a trip with several independent things to buy (e.g. "
+    "'running shoes', 'socks', 'a hydration bottle'). You are given the "
+    "REAL list of items already tracked this conversation, each shown only "
+    "by its 1-based position and a short label - you never see or invent a "
+    "real product or an internal id. Decide two independent things. "
+    "First: does this message introduce any BRAND NEW item(s) not already "
+    "in the list ('I need running shoes, socks and a hydration bottle' "
+    "with an empty list -> three new labels; 'I also need a water bottle' "
+    "with shoes already tracked -> one new label)? Give each as a short "
+    "noun-phrase label, not a full sentence. Second: does this message "
+    "REFINE or REFER TO an item already in the list ('make the shoes "
+    "lightweight', 'for the socks, I want black', 'under 5000 for the "
+    "shoes', 'I've decided on that one')? If so, resolve which one the "
+    "same way you would resolve a cart reference - by its 1-based position "
+    "(reference_type='ordinal'), by a name/label match "
+    "(reference_type='name' with named_hint set to the matching label "
+    "text), or as a bare pronoun with nothing else to go on "
+    "(reference_type='pronoun') - and state what changed: any new "
+    "constraint, must-have, nice-to-have, exclusion, or trade-off priority "
+    "for THAT item only. Set item_completed true only when the shopper "
+    "clearly indicated that item is settled/decided. Separately, decide "
+    "propose_basket: true ONLY when the shopper explicitly asks to add the "
+    "tracked items to their cart now ('add these to my cart', 'I'll take "
+    "all of these', 'let's get the shoes and socks', 'add them all') - "
+    "never inferred from silence or from merely mentioning an item. A "
+    "message that is purely about the mission as a whole, or names "
+    "nothing new and refers to nothing existing (e.g. a general browsing "
+    "question), should return empty new_item_labels and "
+    "reference_type='none' - never guess which item was meant."
+)
+
+
+def mission_reference_prompt(
+    message: str,
+    current_items: list[dict],
+    history: list[str] | None,
+) -> str:
+    """Prompt for the mission-item interpreter (`mission_reference_tool()`
+    below). `current_items` is always the real, already-tracked mission
+    item list (`{"item_id": ..., "label": ...}` per item) from the current
+    `ShoppingStateV2.mission_items` - the model is shown only positions and
+    labels, never the real `item_id` (see `mission_reference_tool()`'s own
+    docstring for why), so it can never echo back an id that was not
+    independently resolved by the caller. `history` is the same bounded
+    recent-turns window the rest of this codebase's Context Builder already
+    uses."""
+    items_list = "\n".join(
+        f"  {i + 1}. {item['label']}" for i, item in enumerate(current_items[:10])
+    )
+    recent = "\n".join(f"  - {h}" for h in (history or [])[-4:])
+    parts = [f"Shopper's message: {message!r}"]
+    if recent:
+        parts.append(f"Recent conversation:\n{recent}")
+    parts.append(f"Mission items already tracked this conversation:\n{items_list or '  (none yet)'}")
+    parts.append(
+        "Does this message introduce any brand-new item(s) not in that "
+        "list? List each as a short label, or leave empty. Does it refine "
+        "or refer to an item already in the list? If so, give its "
+        "reference (ordinal position / name / pronoun) and what changed "
+        "for it (constraints/must_have/nice_to_have/exclusions/priorities "
+        "additions, or item_completed). Does it ask to add the tracked "
+        "items to the cart now (propose_basket)? Call "
+        "interpret_mission_items."
+    )
+    return "\n\n".join(parts)
+
+
+def mission_reference_tool() -> dict[str, Any]:
+    """Tool schema for the mission-item interpreter. Deliberately shown no
+    real mission-item id (only position/label) and has no field for one -
+    `reference_type`/`position`/`named_hint` are only ever resolved against
+    the REAL current item list by the caller
+    (`engine/shopper_v2/missions.py`), which independently validates the
+    reference before writing anything to state. No product id, no
+    ActionType, no risk field - the same narrow-capability guarantee every
+    other bounded judgment tool in this module carries."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "interpret_mission_items",
+            "description": "State any brand-new mission items this message introduces, and how it refines or refers to an item already being tracked.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "new_item_labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Short noun-phrase labels for brand-new items this message introduces. Empty if none.",
+                    },
+                    "reference_type": {
+                        "type": "string",
+                        "enum": ["ordinal", "pronoun", "name", "none"],
+                        "description": "How this message refers to an EXISTING tracked item, if at all. 'none' if it introduces only new items or refers to nothing existing.",
+                    },
+                    "position": {
+                        "type": "integer",
+                        "description": "1-based position in the tracked-items list, when reference_type is 'ordinal'.",
+                    },
+                    "named_hint": {
+                        "type": "string",
+                        "description": "The label text (or a clear substring of it) the shopper's words matched, when reference_type is 'name'.",
+                    },
+                    "constraints_add": {"type": "array", "items": {"type": "string"}},
+                    "must_have_add": {"type": "array", "items": {"type": "string"}},
+                    "nice_to_have_add": {"type": "array", "items": {"type": "string"}},
+                    "exclusions_add": {"type": "array", "items": {"type": "string"}},
+                    "priorities_add": {"type": "array", "items": {"type": "string"}},
+                    "item_completed": {
+                        "type": "boolean",
+                        "description": "True only if the shopper clearly indicated the referenced item is now settled/decided.",
+                    },
+                    "propose_basket": {
+                        "type": "boolean",
+                        "description": "True only if the shopper explicitly asks to add the tracked mission items to their cart now.",
+                    },
+                },
+                "required": ["new_item_labels", "reference_type"],
+            },
+        },
+    }

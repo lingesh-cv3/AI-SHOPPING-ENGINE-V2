@@ -1866,6 +1866,76 @@ async def cart_proposal_activity(connection_id: str, *, days: int = 30) -> dict:
     }
 
 
+_V2_EVENT_TYPES = [
+    "trade_off_applied",
+    "payment_recovery_offered",
+    "order_status_checked",
+    "mission_item_tracked",
+    "basket_proposed",
+]
+
+
+async def shopper_v2_activity(connection_id: str, *, days: int = 30) -> dict:
+    """What Shopper V2's own capabilities (missions, basket proposals,
+    trade-off re-ranking, payment recovery, order status) actually did for
+    real shoppers on this connection - from the real `ShopperEvent` rows
+    `engine/shopper_v2/orchestrator.py` writes for each
+    (`engine/execution/events.py::EventType`'s "Shopper V2 only" block) -
+    never a claim about business value, mirroring `cart_proposal_activity`'s
+    own scope discipline exactly: a count of what was observed to happen,
+    not an inferred outcome.
+
+    `has_history` is False rather than a confusing all-zero panel when V2
+    has never been used on this connection at all - the same "zero data
+    reads as zero data" rule `cart_proposal_activity`/`checkout_conversion`
+    already follow, so a merchant connected this morning with no V2 traffic
+    sees an honest empty state, not a broken-looking dashboard.
+
+    Aggregated with a SQL `GROUP BY` rather than pulling every row into
+    Python - the same real-volume discipline CLAUDE.md's `_catalog_alerts`
+    worked example calls out; a busy connection's event count grows with
+    traffic, not with catalogue size, but there is no reason to load raw
+    rows here when the database can count them.
+    """
+    # Clamped rather than trusted from the caller - same reasoning as
+    # `cart_proposal_activity`.
+    days = max(1, min(days, 365))
+    since = datetime.now(UTC) - timedelta(days=days)
+    async with session_scope() as db:
+        rows = await db.execute(
+            select(ShopperEvent.event_type, func.count())
+            .where(
+                ShopperEvent.connection_id == connection_id,
+                ShopperEvent.event_type.in_(_V2_EVENT_TYPES),
+                ShopperEvent.created_at >= since,
+            )
+            .group_by(ShopperEvent.event_type)
+        )
+        counts = {event_type: n for event_type, n in rows.all()}
+
+        # All-time, across all five V2 event kinds - the same
+        # any-kind-ever-seen discipline `cart_proposal_activity`'s own
+        # `earliest` check uses, for the same reason: a merchant should see
+        # real V2 usage history even if the specific kind that happened
+        # first isn't the one with the most rows in the current window.
+        earliest = await db.scalar(
+            select(func.min(ShopperEvent.created_at)).where(
+                ShopperEvent.connection_id == connection_id,
+                ShopperEvent.event_type.in_(_V2_EVENT_TYPES),
+            )
+        )
+
+    return {
+        "days": days,
+        "has_history": earliest is not None,
+        "missions_refined": counts.get("mission_item_tracked", 0),
+        "baskets_proposed": counts.get("basket_proposed", 0),
+        "trade_offs_applied": counts.get("trade_off_applied", 0),
+        "payment_recovery_offers": counts.get("payment_recovery_offered", 0),
+        "order_status_checks": counts.get("order_status_checked", 0),
+    }
+
+
 #: A run of 10+ consecutive digits inside a search term is, in practice, a
 #: millisecond/second Unix epoch stamp glued onto a placeholder word by test
 #: infrastructure that wants a fresh, always-unique "not in the catalog"

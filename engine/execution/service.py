@@ -1774,6 +1774,17 @@ class ExecutionService:
                         }
                         if len(matching_variants) == 1:
                             variant_id = next(iter(matching_variants))
+                # `mission_item_id` is opaque, V2-only metadata (see
+                # engine/shopper_v2/basket_proposal.py) - a bare string this
+                # dispatch never interprets or validates, only stores. V1
+                # never sets this parameter, so it is always None on every
+                # proposal V1 creates, and nothing below (or in
+                # engine/api/chat.py's accept/reject/expiry handling)
+                # branches on it - it rides along for a caller that wants
+                # to know which mission item a proposal fulfills, purely
+                # additive.
+                mission_item_id = params.get("mission_item_id")
+                mission_item_id = mission_item_id if isinstance(mission_item_id, str) else None
                 proposal = await db.cart_proposals.create(
                     connection_id=case.connection_id,
                     session_id=case.session_id or "",
@@ -1787,6 +1798,7 @@ class ExecutionService:
                     reason=str(params.get("proposal_reason") or "suggested based on your cart"),
                     evidence=evidence,
                     snapshot_price=str(product.price.amount) if product.price else None,
+                    mission_item_id=mission_item_id,
                 )
                 return Executed(
                     succeeded=True,

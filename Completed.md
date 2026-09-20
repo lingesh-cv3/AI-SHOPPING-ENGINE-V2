@@ -3578,3 +3578,102 @@ below; `npm run build` now exits 0.)
     into retrieval's own query/category parameters, only into
     mission_ranking's later filtering step, which was already the case
     before this session.
+
+54. **Shopper V2 continuation batch (multi-item missions, basket proposals,
+    trade-off re-ranking, checkout, payment recovery, order status, cart-
+    proposal generalization, the personalization-honesty fix, and event
+    measurement) - the whole uncommitted batch cleared the value bar this
+    session, after a prior `value-auditor` pass held it back for three
+    named reasons.** See PROGRESS.md's now-superseded "Shopper V2 -
+    value-auditor pass over the whole uncommitted batch" writeup and Next
+    Steps item 0a for the earlier finding; both are closed by this entry.
+
+    **Gap 1 - the missions budget-fix regression test was vacuous, found
+    and fixed for real.** The prior session's fix and its accompanying test
+    (`tests/shopper_v2/test_phase7_missions.py`) both passed, but for the
+    wrong reason: the refinement's search query literally contained the
+    text "under 5000", which zeroed out keyword search results before the
+    numeric hard budget filter in `engine/shopper_v2/missions.py` ever got
+    a chance to run - the exact "test written from a guess at the bug's
+    output" pattern CLAUDE.md already warns about. Fixed for real this
+    session: `missions.py` now strips budget-phrase text (matched by
+    `_BUDGET_PATTERN`) out of the query sent to the adapter via a new
+    `query_constraints` list, while still passing the full constraint list
+    to `_extract_budget`/the hard filter, so the numeric filter is what
+    actually does the work rather than an accidental empty-search-result
+    side effect. `test_phase7_missions.py` gained a new deterministic,
+    model-free check using a stub adapter that returns one over-budget and
+    one under-budget candidate, directly proving the hard filter engages.
+    Confirmed sound with a real red/green cycle: reverted the fix, watched
+    this exact new check fail, restored the fix, watched it pass again -
+    not just "a test was written."
+
+    **Gap 2 - real-client conditions for missions/basket-proposal/trade-off
+    specifically, previously assumed, now exercised live:**
+    - Zero-data: PASS - a fresh session's first-ever multi-item mission
+      message returned real candidates for reachable items, an honest
+      no-match for one unreachable item, and no crash.
+    - Kettle & Bloom (GraphQL, the "platform that differs" condition):
+      PASS - a multi-item mission followed by basket-proposal and accept
+      correctly hit the NEEDS_CHOICE variant-selection path; a second
+      accept on an already-transitioned proposal correctly refused with
+      409; discovery kept working after a restart.
+    - Platform down: PASS - the Kettle process was killed mid-session; the
+      mission turn against it degraded honestly (no raw exception or stack
+      trace reached the shopper, the engine process itself stayed up);
+      Kettle was restarted and confirmed serving real requests again
+      afterward.
+    - Real volume: **not empirically exercised - no 40,000-SKU catalogue
+      was seeded or tested against.** What was actually done is a
+      structural code-path check only: confirmed `missions.py` calls
+      `retrieve(..., limit=20)` and that `evidence.build_evidence`'s
+      `rank_and_filter` only ever operates on that already-bounded ≤20-item
+      set, and grepped all of `engine/shopper_v2/*.py` for
+      `_catalog_alerts`-style unbounded patterns (`limit=100`, `limit=1000`,
+      an empty-string `search_products("")`) - none found. This is a
+      code-path inspection, not a live volume test, and should not be
+      described as one.
+
+    **Gap 3 - event measurement now has a real consumer, merchant-console
+    only.** New `engine/db/repository.py::shopper_v2_activity` aggregates
+    the five V2-specific `EventType`s (`MISSION_ITEM_TRACKED`,
+    `BASKET_PROPOSED`, `TRADE_OFF_APPLIED`, `PAYMENT_RECOVERY_OFFERED`,
+    `ORDER_STATUS_CHECKED`) via a bounded SQL `GROUP BY`, with the days
+    window clamped to 1-365 and an honest `has_history: False` for a
+    zero-data connection rather than a confident 0%. Exported from
+    `engine/db/__init__.py` (a genuine missing-export bug was found and
+    fixed here - the new route 500'd until this was added). Wired to a new
+    `GET /api/v2-activity/{connection_id}` route in `engine/api/routes.py`
+    using the same `merchant_scoped()` dependency every sibling report
+    route uses, and surfaced in `storefront/src/AICommerce.tsx` as
+    `ShopperV2ActivityPanel` (both the zero-case and populated render
+    branches), with a matching type and fetch call added to
+    `storefront/src/api.ts`. Live-verified over real HTTP: real,
+    tenant-isolated counts returned for both `conn_demo` and `conn_kettle`
+    after real V2 turns wrote the underlying events. **This is a
+    merchant-console-scoped consumer only - there is no ops-console
+    consumer of these events**; do not describe this as ops coverage.
+
+    **Final verification re-run after all three fixes, against the
+    complete final diff:** `invariant-guard` SAFE again (no invariant or
+    idempotency-key violation across missions/basket-proposal/trade-off/
+    checkout/payment-recovery/order-status/cart-proposal/
+    personalization-honesty/event-measurement/decision-workspace-UI, plus
+    the new `shopper_v2_activity` reporting addition). `fuzz.py`: 20/20
+    sequences, 1200 assertions, every invariant held. `auditroutes.py`:
+    every route's lock and shopper-scoping held, including the new
+    `/api/v2-activity/{connection_id}` route (covered implicitly by the
+    same `merchant_scoped` pattern as its siblings, but `auditroutes.py`'s
+    own test file was not specifically extended with a named check for
+    this route this session - a minor coverage gap, not a failure). All 16
+    `tests/shopper_v2/test_phase*.py` files pass. All 5 Playwright tests in
+    `storefront/tests/shopper-v2.spec.ts` pass. `npm run build` clean.
+
+    **Explicitly not done this pass, left open (see PROGRESS.md):**
+    Playwright coverage of purchase-outcome and payment-recovery specifically
+    through the browser; any Kettle-side Playwright coverage (the
+    `shopper-v2.spec.ts` suite that passed runs against Northfield only);
+    decision-workspace UI polish for comparison/compatibility layouts; the
+    real-volume condition remains a structural check rather than an
+    empirical one, as stated above; `auditroutes.py` was not extended with
+    a named check for the new route.

@@ -1,0 +1,1103 @@
+{
+  "generated_at": "2026-09-18T14:17:10.991829+00:00",
+  "corpus_size_cases": 20,
+  "corpus_size_turns": 24,
+  "overall_metrics": {
+    "n_turns": 24,
+    "n_turns_with_ground_truth": 12,
+    "recall_at_4": 0.6666666666666666,
+    "precision_at_4": 0.6666666666666666,
+    "mrr": 0.9166666666666666,
+    "ndcg_at_4": 0.9166666666666666,
+    "hard_constraint_violation_rate": 0.0,
+    "false_substitution_rate": 0.08333333333333333,
+    "false_decline_rate": 1.0,
+    "no_match_correctness": 1.0,
+    "multi_turn_constraint_retention": 1.0,
+    "per_category": {
+      "discovery": 3,
+      "attributes": 2,
+      "constraints": 2,
+      "multi_turn": 5,
+      "language_variation": 3,
+      "no_match": 3,
+      "false_substitution_regression": 1,
+      "false_decline_regression": 1,
+      "multi_item": 2,
+      "platform_condition": 2
+    }
+  },
+  "by_merchant_metrics": {
+    "zero_data": {
+      "n_turns": 1,
+      "n_turns_with_ground_truth": 0,
+      "recall_at_4": null,
+      "precision_at_4": null,
+      "mrr": null,
+      "ndcg_at_4": null,
+      "hard_constraint_violation_rate": 0.0,
+      "false_substitution_rate": null,
+      "false_decline_rate": null,
+      "no_match_correctness": 1.0,
+      "multi_turn_constraint_retention": null,
+      "per_category": {
+        "platform_condition": 1
+      }
+    },
+    "northfield": {
+      "n_turns": 16,
+      "n_turns_with_ground_truth": 9,
+      "recall_at_4": 0.6666666666666666,
+      "precision_at_4": 0.6666666666666666,
+      "mrr": 0.8888888888888888,
+      "ndcg_at_4": 0.8888888888888888,
+      "hard_constraint_violation_rate": 0.0,
+      "false_substitution_rate": 0.0,
+      "false_decline_rate": null,
+      "no_match_correctness": 1.0,
+      "multi_turn_constraint_retention": 1.0,
+      "per_category": {
+        "discovery": 2,
+        "attributes": 2,
+        "constraints": 2,
+        "multi_turn": 3,
+        "language_variation": 2,
+        "no_match": 2,
+        "false_substitution_regression": 1,
+        "multi_item": 2
+      }
+    },
+    "kettle": {
+      "n_turns": 6,
+      "n_turns_with_ground_truth": 3,
+      "recall_at_4": 0.6666666666666666,
+      "precision_at_4": 0.6666666666666666,
+      "mrr": 1.0,
+      "ndcg_at_4": 1.0,
+      "hard_constraint_violation_rate": 0.0,
+      "false_substitution_rate": 0.3333333333333333,
+      "false_decline_rate": 1.0,
+      "no_match_correctness": 1.0,
+      "multi_turn_constraint_retention": 1.0,
+      "per_category": {
+        "discovery": 1,
+        "multi_turn": 2,
+        "language_variation": 1,
+        "no_match": 1,
+        "false_decline_regression": 1
+      }
+    },
+    "platform_down": {
+      "n_turns": 1,
+      "n_turns_with_ground_truth": 0,
+      "recall_at_4": null,
+      "precision_at_4": null,
+      "mrr": null,
+      "ndcg_at_4": null,
+      "hard_constraint_violation_rate": 0.0,
+      "false_substitution_rate": null,
+      "false_decline_rate": null,
+      "no_match_correctness": 1.0,
+      "multi_turn_constraint_retention": null,
+      "per_category": {
+        "platform_condition": 1
+      }
+    }
+  },
+  "unavailable_metrics": {
+    "intent_extraction_accuracy": "Stage 2A's baseline runner builds SearchIntent directly from each corpus case's own stated ground-truth fields, bypassing the LLM `understand()` step entirely (see runner.py's docstring) - this keeps the retrieval-pipeline baseline reproducible and free of model-call variance/cost, but means there is no LLM-produced intent to score against ground truth in this run. Measuring this honestly requires a SEPARATE, smaller, LLM-driven pass, not yet built, and would consume real budget against the documented ~4-turns/minute Groq throttle.",
+    "token_usage_cost": "The retrieval/evidence pipeline this baseline measures (retrieval.py + evidence.py) makes zero LLM calls - confirmed by reading evidence.py's imports, which call only engine.execution.relevance/mission_ranking, never ReasoningService.judge_relevance/judge_best_match. There is no token usage to report because no model call happens in the measured path.",
+    "reranking_latency": "No reranking step exists anywhere in the current pipeline (Stage 2A does not add one, per its own scope) - there is nothing to time. `ranking_s` in each TurnResult's timings IS measured and reported; it is the existing deterministic lexical scoring step, not a reranker."
+  },
+  "performance": {
+    "n_measured": 24,
+    "mean_total_s": 0.003997999999910462,
+    "max_total_s": 0.012305000000196742,
+    "min_total_s": 6.7299999500392e-05
+  },
+  "turns": [
+    {
+      "case_id": "nf-disc-01",
+      "merchant": "northfield",
+      "category": "discovery",
+      "turn_index": 0,
+      "message": "I need running shoes",
+      "expected_relevant_ids": [
+        "P1001"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "P1001",
+        "P1002",
+        "P1004",
+        "P1005",
+        "P1008",
+        "P3005"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P1001",
+        "P1002",
+        "P1005",
+        "P1008",
+        "P3005"
+      ],
+      "rejected": [
+        {
+          "product_id": "P1004",
+          "reason": "out_of_stock"
+        }
+      ],
+      "ranked_ids": [
+        "P1001",
+        "P1002",
+        "P1005",
+        "P1008",
+        "P3005"
+      ],
+      "ranking_confident": true,
+      "verified_relevant_ids": [
+        "P1001"
+      ],
+      "no_match_reason": null,
+      "shop_carries_category": null,
+      "timings_s": {
+        "retrieval": 0.01181429999996908,
+        "hard_filter": 8.329999945999589e-05,
+        "ranking": 0.0001944999994520913,
+        "evidence": 0.00017449999995733378,
+        "total": 0.012305000000196742
+      },
+      "wall_time_s": 0.012319100000240724
+    },
+    {
+      "case_id": "nf-disc-02",
+      "merchant": "northfield",
+      "category": "discovery",
+      "turn_index": 0,
+      "message": "show me trail shoes",
+      "expected_relevant_ids": [
+        "P1001",
+        "P1005"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "P1001",
+        "P1005",
+        "P1002",
+        "P1004",
+        "P1008"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P1001",
+        "P1005",
+        "P1002",
+        "P1008"
+      ],
+      "rejected": [
+        {
+          "product_id": "P1004",
+          "reason": "out_of_stock"
+        }
+      ],
+      "ranked_ids": [
+        "P1001",
+        "P1005",
+        "P1002",
+        "P1008"
+      ],
+      "ranking_confident": true,
+      "verified_relevant_ids": [
+        "P1001",
+        "P1005"
+      ],
+      "no_match_reason": null,
+      "shop_carries_category": null,
+      "timings_s": {
+        "retrieval": 0.008045300000048883,
+        "hard_filter": 6.42000004518195e-05,
+        "ranking": 0.00011350000022503082,
+        "evidence": 0.00012969999988854397,
+        "total": 0.009409299999788345
+      },
+      "wall_time_s": 0.009424200000466953
+    },
+    {
+      "case_id": "kb-disc-01",
+      "merchant": "kettle",
+      "category": "discovery",
+      "turn_index": 0,
+      "message": "single origin coffee",
+      "expected_relevant_ids": [
+        "KB-ETH-01",
+        "KB-COL-02",
+        "KB-BRA-04"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "KB-ETH-01",
+        "KB-COL-02",
+        "KB-KEN-03",
+        "KB-BRA-04"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "KB-ETH-01",
+        "KB-COL-02",
+        "KB-BRA-04"
+      ],
+      "rejected": [
+        {
+          "product_id": "KB-KEN-03",
+          "reason": "out_of_stock"
+        }
+      ],
+      "ranked_ids": [
+        "KB-ETH-01",
+        "KB-COL-02",
+        "KB-BRA-04"
+      ],
+      "ranking_confident": true,
+      "verified_relevant_ids": [
+        "KB-ETH-01",
+        "KB-COL-02",
+        "KB-BRA-04"
+      ],
+      "no_match_reason": null,
+      "shop_carries_category": null,
+      "timings_s": {
+        "retrieval": 0.0049411999998483225,
+        "hard_filter": 5.3200000365905e-05,
+        "ranking": 8.199999956559623e-05,
+        "evidence": 9.799999952520011e-05,
+        "total": 0.00519830000030197
+      },
+      "wall_time_s": 0.005208399999901303
+    },
+    {
+      "case_id": "nf-attr-01",
+      "merchant": "northfield",
+      "category": "attributes",
+      "turn_index": 0,
+      "message": "lightweight running shoe",
+      "expected_relevant_ids": [
+        "P1001"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "P1001",
+        "P1002",
+        "P1004",
+        "P1005",
+        "P1008",
+        "P3005"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P1001",
+        "P1002",
+        "P1005",
+        "P1008",
+        "P3005"
+      ],
+      "rejected": [
+        {
+          "product_id": "P1004",
+          "reason": "out_of_stock"
+        }
+      ],
+      "ranked_ids": [
+        "P1001",
+        "P1002",
+        "P1005",
+        "P1008",
+        "P3005"
+      ],
+      "ranking_confident": true,
+      "verified_relevant_ids": [
+        "P1001"
+      ],
+      "no_match_reason": null,
+      "shop_carries_category": null,
+      "timings_s": {
+        "retrieval": 0.0035412999995969585,
+        "hard_filter": 5.869999949936755e-05,
+        "ranking": 0.00010010000005422626,
+        "evidence": 0.00012280000009923242,
+        "total": 0.0038531000000148197
+      },
+      "wall_time_s": 0.003862200000185112
+    },
+    {
+      "case_id": "nf-attr-02",
+      "merchant": "northfield",
+      "category": "attributes",
+      "turn_index": 0,
+      "message": "waterproof jacket",
+      "expected_relevant_ids": [
+        "P2002"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "P2002"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P2002"
+      ],
+      "rejected": [],
+      "ranked_ids": [
+        "P2002"
+      ],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_relevant_match",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.003291400000307476,
+        "hard_filter": 2.880000010918593e-05,
+        "ranking": 4.42000000475673e-05,
+        "evidence": 4.740000076708384e-05,
+        "total": 0.0034236999999848194
+      },
+      "wall_time_s": 0.003431799999816576
+    },
+    {
+      "case_id": "nf-constr-01",
+      "merchant": "northfield",
+      "category": "constraints",
+      "turn_index": 0,
+      "message": "running shoes",
+      "expected_relevant_ids": [
+        "P1001"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "P1001",
+        "P1002",
+        "P1004",
+        "P1005",
+        "P1008",
+        "P3005"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P1001",
+        "P3005"
+      ],
+      "rejected": [
+        {
+          "product_id": "P1002",
+          "reason": "over_budget"
+        },
+        {
+          "product_id": "P1004",
+          "reason": "out_of_stock"
+        },
+        {
+          "product_id": "P1005",
+          "reason": "over_budget"
+        },
+        {
+          "product_id": "P1008",
+          "reason": "over_budget"
+        }
+      ],
+      "ranked_ids": [
+        "P1001",
+        "P3005"
+      ],
+      "ranking_confident": true,
+      "verified_relevant_ids": [
+        "P1001"
+      ],
+      "no_match_reason": null,
+      "shop_carries_category": null,
+      "timings_s": {
+        "retrieval": 0.003893999999490916,
+        "hard_filter": 7.969999933266081e-05,
+        "ranking": 5.890000011277152e-05,
+        "evidence": 0.00010459999975864775,
+        "total": 0.004217300000163959
+      },
+      "wall_time_s": 0.004228499999953783
+    },
+    {
+      "case_id": "nf-constr-02",
+      "merchant": "northfield",
+      "category": "constraints",
+      "turn_index": 0,
+      "message": "road shoe",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": "no_relevant_match",
+      "retrieved_candidate_ids": [
+        "P1008",
+        "P1001",
+        "P1002",
+        "P1004",
+        "P1005"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P1001",
+        "P1002",
+        "P1005"
+      ],
+      "rejected": [
+        {
+          "product_id": "P1008",
+          "reason": "excluded_by_shopper"
+        },
+        {
+          "product_id": "P1004",
+          "reason": "out_of_stock"
+        }
+      ],
+      "ranked_ids": [
+        "P1001",
+        "P1002",
+        "P1005"
+      ],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_relevant_match",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.0027159999999639695,
+        "hard_filter": 7.950000053824624e-05,
+        "ranking": 7.069999992381781e-05,
+        "evidence": 0.00010819999988598283,
+        "total": 0.0030067000006965827
+      },
+      "wall_time_s": 0.0030169999999998254
+    },
+    {
+      "case_id": "nf-multi-01",
+      "merchant": "northfield",
+      "category": "multi_turn",
+      "turn_index": 0,
+      "message": "I need sneakers",
+      "expected_relevant_ids": [
+        "P1003"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "P1003"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P1003"
+      ],
+      "rejected": [],
+      "ranked_ids": [
+        "P1003"
+      ],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_relevant_match",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.0028398000004017376,
+        "hard_filter": 2.7800000680144876e-05,
+        "ranking": 4.6999999540275894e-05,
+        "evidence": 5.539999983739108e-05,
+        "total": 0.00298079999993206
+      },
+      "wall_time_s": 0.0029883999995945487
+    },
+    {
+      "case_id": "nf-multi-01",
+      "merchant": "northfield",
+      "category": "multi_turn",
+      "turn_index": 1,
+      "message": "under 2000",
+      "expected_relevant_ids": [
+        "P1003"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [],
+      "rejected": [],
+      "ranked_ids": [],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_candidates",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.0036939999999958673,
+        "hard_filter": 1.52000002344721e-05,
+        "ranking": 1.9299999621580355e-05,
+        "evidence": 1.0000000656873453e-05,
+        "total": 0.0037400999999590567
+      },
+      "wall_time_s": 0.003746299999875191
+    },
+    {
+      "case_id": "nf-multi-01",
+      "merchant": "northfield",
+      "category": "multi_turn",
+      "turn_index": 2,
+      "message": "actually make that under 1000",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": "no_candidates",
+      "retrieved_candidate_ids": [],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [],
+      "rejected": [],
+      "ranked_ids": [],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_candidates",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.0046142999999574386,
+        "hard_filter": 1.559999964229064e-05,
+        "ranking": 2.500000027794158e-05,
+        "evidence": 9.999999747378752e-06,
+        "total": 0.004666799999540672
+      },
+      "wall_time_s": 0.004673300000831659
+    },
+    {
+      "case_id": "kb-multi-01",
+      "merchant": "kettle",
+      "category": "multi_turn",
+      "turn_index": 0,
+      "message": "gift box",
+      "expected_relevant_ids": [
+        "KB-GFT-15"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "KB-GFT-15",
+        "KB-GFT-16"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "KB-GFT-15",
+        "KB-GFT-16"
+      ],
+      "rejected": [],
+      "ranked_ids": [
+        "KB-GFT-15",
+        "KB-GFT-16"
+      ],
+      "ranking_confident": true,
+      "verified_relevant_ids": [
+        "KB-GFT-15"
+      ],
+      "no_match_reason": null,
+      "shop_carries_category": null,
+      "timings_s": {
+        "retrieval": 0.003004799999871466,
+        "hard_filter": 4.260000059730373e-05,
+        "ranking": 5.650000002788147e-05,
+        "evidence": 6.310000026132911e-05,
+        "total": 0.003182599999490776
+      },
+      "wall_time_s": 0.003191599999809114
+    },
+    {
+      "case_id": "kb-multi-01",
+      "merchant": "kettle",
+      "category": "multi_turn",
+      "turn_index": 1,
+      "message": "under 3000",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": "no_candidates",
+      "retrieved_candidate_ids": [],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [],
+      "rejected": [],
+      "ranked_ids": [],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_candidates",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.0026486999995540828,
+        "hard_filter": 1.7299999854003545e-05,
+        "ranking": 2.2199999875738285e-05,
+        "evidence": 1.0400000064691994e-05,
+        "total": 0.0027002999995602295
+      },
+      "wall_time_s": 0.0027079999999841675
+    },
+    {
+      "case_id": "nf-lang-01",
+      "merchant": "northfield",
+      "category": "language_variation",
+      "turn_index": 0,
+      "message": "runing shoes",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": "no_relevant_match",
+      "retrieved_candidate_ids": [
+        "P1001",
+        "P1002",
+        "P1004",
+        "P1005",
+        "P1008"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P1001",
+        "P1002",
+        "P1005",
+        "P1008"
+      ],
+      "rejected": [
+        {
+          "product_id": "P1004",
+          "reason": "out_of_stock"
+        }
+      ],
+      "ranked_ids": [
+        "P1001",
+        "P1002",
+        "P1005",
+        "P1008"
+      ],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_relevant_match",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.0029082999999445747,
+        "hard_filter": 5.5499999689345714e-05,
+        "ranking": 9.490000047662761e-05,
+        "evidence": 0.00011100000028818613,
+        "total": 0.003202199999577715
+      },
+      "wall_time_s": 0.0032107999995787395
+    },
+    {
+      "case_id": "nf-lang-02",
+      "merchant": "northfield",
+      "category": "language_variation",
+      "turn_index": 0,
+      "message": "a shoe",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "P1001",
+        "P1002",
+        "P1004",
+        "P1005",
+        "P1008"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P1001",
+        "P1002",
+        "P1005",
+        "P1008"
+      ],
+      "rejected": [
+        {
+          "product_id": "P1004",
+          "reason": "out_of_stock"
+        }
+      ],
+      "ranked_ids": [
+        "P1001",
+        "P1002",
+        "P1005",
+        "P1008"
+      ],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_relevant_match",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.002628000000186148,
+        "hard_filter": 5.700000019714935e-05,
+        "ranking": 8.640000032755779e-05,
+        "evidence": 0.00010509999992791563,
+        "total": 0.002907699999923352
+      },
+      "wall_time_s": 0.0029170999996495084
+    },
+    {
+      "case_id": "kb-lang-01",
+      "merchant": "kettle",
+      "category": "language_variation",
+      "turn_index": 0,
+      "message": "espresso blends",
+      "expected_relevant_ids": [
+        "KB-BLD-05"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "KB-BLD-05",
+        "KB-BLD-06",
+        "KB-BLD-07",
+        "KB-DEC-08",
+        "KB-SUB-14"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "KB-BLD-05",
+        "KB-BLD-06",
+        "KB-BLD-07",
+        "KB-DEC-08",
+        "KB-SUB-14"
+      ],
+      "rejected": [],
+      "ranked_ids": [
+        "KB-BLD-05",
+        "KB-SUB-14",
+        "KB-BLD-06",
+        "KB-BLD-07",
+        "KB-DEC-08"
+      ],
+      "ranking_confident": true,
+      "verified_relevant_ids": [
+        "KB-SUB-14"
+      ],
+      "no_match_reason": null,
+      "shop_carries_category": null,
+      "timings_s": {
+        "retrieval": 0.0036024999999426655,
+        "hard_filter": 0.00018369999997958075,
+        "ranking": 0.00010910000037256395,
+        "evidence": 0.00011460000041552121,
+        "total": 0.004039800000100513
+      },
+      "wall_time_s": 0.004048299999340088
+    },
+    {
+      "case_id": "nf-nomatch-01",
+      "merchant": "northfield",
+      "category": "no_match",
+      "turn_index": 0,
+      "message": "do you sell kayaks?",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": "no_candidates",
+      "retrieved_candidate_ids": [],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [],
+      "rejected": [],
+      "ranked_ids": [],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_candidates",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.003675699999803328,
+        "hard_filter": 1.2100000276404899e-05,
+        "ranking": 2.2700000045006163e-05,
+        "evidence": 8.69999985297909e-06,
+        "total": 0.0037210999998933403
+      },
+      "wall_time_s": 0.003732999999556341
+    },
+    {
+      "case_id": "nf-nomatch-02",
+      "merchant": "northfield",
+      "category": "no_match",
+      "turn_index": 0,
+      "message": "lightweight",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [],
+      "rejected": [],
+      "ranked_ids": [],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_candidates",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.0029728999998042127,
+        "hard_filter": 1.2299999980314169e-05,
+        "ranking": 1.7700000171316788e-05,
+        "evidence": 7.999999979801942e-06,
+        "total": 0.003012699999999313
+      },
+      "wall_time_s": 0.003019300000232761
+    },
+    {
+      "case_id": "kb-nomatch-01",
+      "merchant": "kettle",
+      "category": "no_match",
+      "turn_index": 0,
+      "message": "do you have any tea?",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": "no_candidates",
+      "retrieved_candidate_ids": [],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [],
+      "rejected": [],
+      "ranked_ids": [],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_candidates",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.0029149000001780223,
+        "hard_filter": 1.539999993838137e-05,
+        "ranking": 2.609999955893727e-05,
+        "evidence": 1.0199999451288022e-05,
+        "total": 0.002968499999951746
+      },
+      "wall_time_s": 0.002976299999318144
+    },
+    {
+      "case_id": "nf-falsesub-01",
+      "merchant": "northfield",
+      "category": "false_substitution_regression",
+      "turn_index": 0,
+      "message": "I need a kayak for the lake this weekend",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": "no_relevant_match",
+      "retrieved_candidate_ids": [
+        "P2007",
+        "P3002"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P3002"
+      ],
+      "rejected": [
+        {
+          "product_id": "P2007",
+          "reason": "out_of_stock"
+        }
+      ],
+      "ranked_ids": [
+        "P3002"
+      ],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_relevant_match",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.003725999999915075,
+        "hard_filter": 5.289999990054639e-05,
+        "ranking": 7.989999994606478e-05,
+        "evidence": 0.00010320000001229346,
+        "total": 0.003984199999649718
+      },
+      "wall_time_s": 0.003995300000497082
+    },
+    {
+      "case_id": "kb-falsedecline-01",
+      "merchant": "kettle",
+      "category": "false_decline_regression",
+      "turn_index": 0,
+      "message": "a fruity coffee",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": "no_candidates",
+      "retrieved_candidate_ids": [],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [],
+      "rejected": [],
+      "ranked_ids": [],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_candidates",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 0.0031216999996104278,
+        "hard_filter": 1.7899999875226058e-05,
+        "ranking": 3.0100000003585592e-05,
+        "evidence": 1.1999999514955562e-05,
+        "total": 0.0031843999995544436
+      },
+      "wall_time_s": 0.0031945000000632717
+    },
+    {
+      "case_id": "nf-multiitem-01",
+      "merchant": "northfield",
+      "category": "multi_item",
+      "turn_index": 0,
+      "message": "running shoes",
+      "expected_relevant_ids": [
+        "P1001"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "P1001",
+        "P1002",
+        "P1004",
+        "P1005",
+        "P1008",
+        "P3005"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P1001",
+        "P1002",
+        "P1005",
+        "P1008",
+        "P3005"
+      ],
+      "rejected": [
+        {
+          "product_id": "P1004",
+          "reason": "out_of_stock"
+        }
+      ],
+      "ranked_ids": [
+        "P1001",
+        "P1002",
+        "P1005",
+        "P1008",
+        "P3005"
+      ],
+      "ranking_confident": true,
+      "verified_relevant_ids": [
+        "P1001"
+      ],
+      "no_match_reason": null,
+      "shop_carries_category": null,
+      "timings_s": {
+        "retrieval": 0.003988100000242412,
+        "hard_filter": 9.28999997995561e-05,
+        "ranking": 0.00012960000003658934,
+        "evidence": 0.00018319999981031287,
+        "total": 0.004445599999598926
+      },
+      "wall_time_s": 0.004458800000065821
+    },
+    {
+      "case_id": "nf-multiitem-01",
+      "merchant": "northfield",
+      "category": "multi_item",
+      "turn_index": 1,
+      "message": "energy gels",
+      "expected_relevant_ids": [
+        "P4001"
+      ],
+      "expect_no_confident_match": false,
+      "expected_no_match_reason": null,
+      "retrieved_candidate_ids": [
+        "P4001"
+      ],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [
+        "P4001"
+      ],
+      "rejected": [],
+      "ranked_ids": [
+        "P4001"
+      ],
+      "ranking_confident": true,
+      "verified_relevant_ids": [
+        "P4001"
+      ],
+      "no_match_reason": null,
+      "shop_carries_category": null,
+      "timings_s": {
+        "retrieval": 0.004085999999915657,
+        "hard_filter": 4.509999962465372e-05,
+        "ranking": 6.880000000819564e-05,
+        "evidence": 7.110000024113106e-05,
+        "total": 0.004285900000468246
+      },
+      "wall_time_s": 0.004297200000110024
+    },
+    {
+      "case_id": "zero-data-01",
+      "merchant": "zero_data",
+      "category": "platform_condition",
+      "turn_index": 0,
+      "message": "I need running shoes",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": "no_candidates",
+      "retrieved_candidate_ids": [],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": false,
+      "eligible_ids": [],
+      "rejected": [],
+      "ranked_ids": [],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "no_candidates",
+      "shop_carries_category": true,
+      "timings_s": {
+        "retrieval": 1.539999993838137e-05,
+        "hard_filter": 1.2199999218864832e-05,
+        "ranking": 2.719999974942766e-05,
+        "evidence": 1.049999991664663e-05,
+        "total": 6.7299999500392e-05
+      },
+      "wall_time_s": 7.899999945948366e-05
+    },
+    {
+      "case_id": "platform-down-01",
+      "merchant": "platform_down",
+      "category": "platform_condition",
+      "turn_index": 0,
+      "message": "I need running shoes",
+      "expected_relevant_ids": [],
+      "expect_no_confident_match": true,
+      "expected_no_match_reason": "platform_unavailable",
+      "retrieved_candidate_ids": [],
+      "candidate_set_truncated": false,
+      "candidate_set_unavailable": true,
+      "eligible_ids": [],
+      "rejected": [],
+      "ranked_ids": [],
+      "ranking_confident": false,
+      "verified_relevant_ids": [],
+      "no_match_reason": "platform_unavailable",
+      "shop_carries_category": null,
+      "timings_s": {
+        "retrieval": 0.0014473999999609077,
+        "hard_filter": null,
+        "ranking": null,
+        "evidence": null,
+        "total": 0.0014486000000033528
+      },
+      "wall_time_s": 0.00146740000036516
+    }
+  ]
+}

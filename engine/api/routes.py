@@ -723,6 +723,21 @@ async def cart_proposal_activity_route(
     return await db.cart_proposal_activity(connection_id, days=days)
 
 
+@app.get(f"{API}/v2-activity/{{connection_id}}")
+async def shopper_v2_activity_route(
+    connection_id: str,
+    days: int = 30,
+    _=Depends(merchant_scoped()),
+) -> dict:
+    """What Shopper V2's own capabilities (missions, basket proposals,
+    trade-off re-ranking, payment recovery, order status) actually did for
+    this merchant's shoppers - from the real ShopperEvent rows those V2
+    turns write. See `db.shopper_v2_activity`'s own docstring for scope.
+    """
+    _adapter(connection_id)
+    return await db.shopper_v2_activity(connection_id, days=days)
+
+
 @app.get(f"{API}/diagnosis/{{connection_id}}")
 async def business_diagnosis_route(
     connection_id: str,

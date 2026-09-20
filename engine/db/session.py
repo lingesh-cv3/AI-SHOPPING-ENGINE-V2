@@ -149,6 +149,28 @@ async def create_schema() -> None:
                     )
                 )
 
+            # mission_items (Shopper V2's multi-item mission tracking, see
+            # engine/shopper_v2/missions.py) arrived after the first
+            # shopping_states rows existed, same idempotent-migration
+            # pattern as everything else in this function.
+            state_rows = await conn.execute(text("PRAGMA table_info(shopping_states)"))
+            state_columns = {row[1] for row in state_rows}
+            if "mission_items" not in state_columns:
+                await conn.execute(
+                    text("ALTER TABLE shopping_states ADD COLUMN mission_items TEXT")
+                )
+
+            # mission_item_id (Shopper V2's basket-proposal tagging, see
+            # engine/shopper_v2/basket_proposal.py) arrived after the first
+            # cart_proposals rows existed, same idempotent-migration
+            # pattern as everything else in this function.
+            proposal_rows = await conn.execute(text("PRAGMA table_info(cart_proposals)"))
+            proposal_columns = {row[1] for row in proposal_rows}
+            if "mission_item_id" not in proposal_columns:
+                await conn.execute(
+                    text("ALTER TABLE cart_proposals ADD COLUMN mission_item_id VARCHAR(24)")
+                )
+
     logger.info("database ready at %s", database_url().split("://")[0])
 
 

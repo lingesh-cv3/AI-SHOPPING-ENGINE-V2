@@ -42,6 +42,37 @@ if TYPE_CHECKING:
 MissionStatus = Literal["exploring", "comparing", "deciding", "done"]
 
 
+class MissionItem(BaseModel):
+    """One independent requirement in a multi-item shopping mission ("I need
+    running shoes, socks and a hydration bottle" - three of these, each
+    tracked and refined independently). See `engine/shopper_v2/missions.py`
+    for the extraction/resolution logic that creates and updates these -
+    this class is pure data, no behaviour.
+
+    `candidates`/`selected_product_id` hold real, adapter-verified product
+    ids only - never a product this item merely mentions. `status` mirrors
+    `MissionStatus` at the item level rather than the whole-mission level a
+    single-item conversation uses."""
+
+    item_id: str
+    label: str
+    status: MissionStatus = "exploring"
+    constraints: list[str] = Field(default_factory=list)
+    must_have: list[str] = Field(default_factory=list)
+    nice_to_have: list[str] = Field(default_factory=list)
+    exclusions: list[str] = Field(default_factory=list)
+    priorities: list[str] = Field(default_factory=list)
+    #: The search query last used for this item - never the whole mission's
+    #: query, so "make the shoes lightweight" only changes what THIS item's
+    #: next retrieval looks for.
+    search_query: str | None = None
+    #: Real, adapter-verified product ids returned for this item's most
+    #: recent retrieval - never invented, never carried over from a
+    #: different item.
+    candidates: list[str] = Field(default_factory=list)
+    selected_product_id: str | None = None
+
+
 class ShoppingStateV2(BaseModel):
     """A typed mirror of one `shopping_states` row, plus a domain-only
     `version` counter. Field names and semantics match
@@ -63,6 +94,13 @@ class ShoppingStateV2(BaseModel):
     priorities: list[str] = Field(default_factory=list)
     active_products: list[str] = Field(default_factory=list)
     mission_status: MissionStatus | None = None
+
+    #: Multi-item shopping mission tracking - see `MissionItem`'s own
+    #: docstring and `engine/shopper_v2/missions.py`. Empty for an ordinary
+    #: single-item conversation; the single-item fields above (goal/
+    #: constraints/etc.) remain exactly as they were for that case - this is
+    #: additive, not a replacement for single-item state.
+    mission_items: list[MissionItem] = Field(default_factory=list)
 
     #: Domain-only, in-memory. See module docstring - NOT a DB column, NOT a
     #: durable optimistic-concurrency token.

@@ -401,6 +401,74 @@ export interface ChatReply {
 
 
 
+/** Shopper V2 (engine/shopper_v2/) - a smaller, typed reply shape than
+ *  V1's `ChatReply`, deliberately: every field here is either a real,
+ *  adapter-verified product or a structured trace, never free text the
+ *  model wrote about something not actually fetched. */
+export interface MissionItemV2 {
+  item_id: string;
+  label: string;
+  status: string;
+  constraints: string[];
+  must_have: string[];
+  nice_to_have: string[];
+  exclusions: string[];
+  priorities: string[];
+  search_query: string | null;
+  candidates: string[];
+  selected_product_id: string | null;
+}
+
+export interface ShoppingStateV2 {
+  session_id: string;
+  connection_id: string;
+  goal: string | null;
+  budget_amount: string | null;
+  budget_currency: string | null;
+  constraints: string[];
+  must_have: string[];
+  nice_to_have: string[];
+  exclusions: string[];
+  priorities: string[];
+  active_products: string[];
+  mission_status: string | null;
+  mission_items: MissionItemV2[];
+  version: number;
+  updated_at: string;
+}
+
+export interface ProductSummaryV2 {
+  product_id: string;
+  title: string;
+  description: string | null;
+  price: string | null;
+  image_url: string | null;
+}
+
+export interface ProductEvidenceV2 {
+  product_id: string;
+  exists: boolean;
+  relevance_verified: boolean;
+  weak_match: boolean;
+  evidence_fields: string[];
+}
+
+export interface TurnEvidenceV2 {
+  query: string | null;
+  shop_carries_category: boolean | null;
+  products: ProductEvidenceV2[];
+  no_match_reason: string | null;
+}
+
+export interface ChatReplyV2 {
+  reply: string;
+  shopping_state: ShoppingStateV2;
+  evidence: TurnEvidenceV2;
+  used_model: boolean;
+  trace: Record<string, unknown>;
+  products: ProductSummaryV2[];
+}
+
 export interface Order {
   order_id: string;
   status: string;
@@ -784,6 +852,25 @@ export const api = {
         known: opts.known ?? {},
       }),
     }),
+
+  /** Shopper V2 - the new conversational architecture
+   *  (engine/shopper_v2/). Additive: `/api/chat` above is completely
+   *  unaffected by this call existing. `cart_id` is optional - only
+   *  needed once a turn proposes a cart change or checks out; a plain
+   *  discovery/compare/compatibility turn needs none. A returned cart
+   *  proposal is approved/rejected through the EXISTING
+   *  `acceptProposal`/`rejectProposal` calls above - there is no
+   *  separate V2 approval endpoint. */
+  chatV2: (sessionId: string, message: string, cartId?: string) =>
+    call<ChatReplyV2>("/api/v2/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        connection_id: getConnection(),
+        session_id: sessionId,
+        message,
+        cart_id: cartId ?? null,
+      }),
+    }),
 };
   /** Ask the engine what it would do about a detected friction. */
  
@@ -997,6 +1084,14 @@ export const console_api = {
       `/api/cart-proposals/${getConnection()}?days=${days}`,
     ),
 
+  /** What Shopper V2's own capabilities actually did - real counts from
+   *  real events. See ShopperV2Activity's own fields for what "honest
+   *  zero" looks like here. */
+  shopperV2Activity: (days = 30) =>
+    merchantCall<ShopperV2Activity>(
+      `/api/v2-activity/${getConnection()}?days=${days}`,
+    ),
+
   /** Evidence-backed diagnosis of what changed and why - a deterministic
    *  comparison of real figures already shown elsewhere in this console,
    *  never a model-invented cause. See BusinessDiagnosis's own fields for
@@ -1201,6 +1296,20 @@ export interface CartProposalActivity {
   executed: number;
   acceptance_rate: number | null;
   most_suggested_products: { product_id: string; times_suggested: number }[];
+}
+
+/** Real counts from Shopper V2's own ShopperEvent rows (missions, basket
+ *  proposals, trade-off re-ranking, payment recovery, order status) -
+ *  observed usage, never a business-value claim. `has_history` false means
+ *  V2 has never been used on this connection. */
+export interface ShopperV2Activity {
+  days: number;
+  has_history: boolean;
+  missions_refined: number;
+  baskets_proposed: number;
+  trade_offs_applied: number;
+  payment_recovery_offers: number;
+  order_status_checks: number;
 }
 
 /** A single real, already-computed factor whose change moved alongside the

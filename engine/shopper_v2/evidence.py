@@ -33,6 +33,11 @@ class ProductEvidence(BaseModel):
     relevance_verified: bool
     relevance_score: int
     weak_match: bool
+    #: True when `weak_match` was the ONLY reason relevance was withheld,
+    #: and this product was the single hard-filter survivor with no other
+    #: candidate to be ambiguous against (Stage 2A Finding 3's fix) - see
+    #: `build_evidence`'s own comment on `_single_survivor_override`.
+    weak_match_overridden: bool = False
     evidence_fields: list[str] = Field(default_factory=list)
 
 
@@ -81,9 +86,29 @@ def build_evidence(
     # RECOMMEND_PRODUCTS. `rank_and_filter` takes plain dicts; Product ->
     # dict via each product's own known fields, matching what that module
     # already expects from adapter results elsewhere in this codebase.
+    #
+    # Stage 2A Finding 2 fix: `rank_and_filter`'s own default `limit`
+    # (mission_ranking.DEFAULT_LIMIT = 4) conflates its hard-filter pass
+    # (exclusions/budget/stock - a real "continue, drop it" decision) with
+    # its own separate soft top-N display cut. Measured live: a candidate
+    # set of >4 products with no priority/must-have/budget signal in play
+    # scores every survivor at 0 except a rating tiebreaker, and the
+    # default limit then silently drops a genuinely relevant product for
+    # no reason but candidate-set size (see SHOPPER_V2_BASELINE_REPORT.md,
+    # `kb-lang-01`). Passing `limit=len(product_dicts)` here recovers the
+    # hard-filter-ONLY view - every product that actually survives
+    # exclusions/budget/stock, uncapped - so `hard_passed` below reflects
+    # real hard-filter survival rather than an arbitrary display-size cut.
+    # `mission_ranking.py` itself is untouched: this is the same call
+    # `engine/shopper_v2/eval/adapt.py::hard_filter` already makes for
+    # measurement; this is that same fix now applied to the live pipeline,
+    # not just the offline evaluation harness.
     product_dicts = [_as_dict(p) for p in products]
     shortlist, fit_reasons = mission_ranking.rank_and_filter(
-        product_dicts, shopping_state, memory_facts=memory_facts
+        product_dicts,
+        shopping_state,
+        memory_facts=memory_facts,
+        limit=max(len(product_dicts), 1),
     )
     shortlisted_ids = {p["product_id"] for p in shortlist}
 
@@ -96,6 +121,21 @@ def build_evidence(
     if query:
         diverges = query_diverges_from_said(query, raw_said, candidates=products)
     weak = weak_single_word_match(query, top_score) if query else False
+
+    # Stage 2A Finding 3 fix: `weak_single_word_match`'s `top_score == 1`
+    # rule cannot, by itself, distinguish "the one and only correct
+    # product, named in a single word" (nf-multi-01's "sneakers" ->
+    # Everyday Canvas Sneaker; nf-attr-02's "waterproof jacket" -> Packable
+    # Rain Jacket) from "a coincidental one-word overlap with an unrelated
+    # product" - both produce identical evidence. `mission_ranking.py` and
+    # `relevance.py` are untouched (this stays a V2-only interpretation
+    # layered on top of their existing, unmodified signal): when exactly
+    # ONE candidate survives hard filtering at all, there is no second
+    # candidate for a one-word match to be ambiguous AGAINST - ambiguity
+    # requires a rival. A divergent query (the model naming something the
+    # shopper never said) is a different, unrelated risk and is NOT
+    # overridden by this rule.
+    single_hard_survivor = len(shortlisted_ids) == 1
 
     evidence_products: list[ProductEvidence] = []
     for p in products:
@@ -111,12 +151,21 @@ def build_evidence(
         # a product sharing exactly one word (weak) or reached via a
         # query the shopper never actually said (diverges) is not a
         # confirmed match, whichever single reason applies.
-        relevant = p.product_id in best_ids and not (diverges or weak)
+        overridden = (
+            hard_passed
+            and single_hard_survivor
+            and p.product_id in best_ids
+            and weak
+            and not diverges
+        )
+        relevant = p.product_id in best_ids and not diverges and (not weak or overridden)
         fields: list[str] = []
         if p.product_id in fit_reasons:
             fields.extend(fit_reasons[p.product_id])
         if p.product_id in best_ids:
             fields.append("title_or_description_overlap")
+        if overridden:
+            fields.append("sole_hard_filter_survivor_weak_match_overridden")
 
         evidence_products.append(
             ProductEvidence(
@@ -128,6 +177,7 @@ def build_evidence(
                 relevance_verified=hard_passed and relevant,
                 relevance_score=top_score,
                 weak_match=weak,
+                weak_match_overridden=overridden,
                 evidence_fields=fields,
             )
         )

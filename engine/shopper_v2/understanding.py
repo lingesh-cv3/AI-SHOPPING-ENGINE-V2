@@ -16,11 +16,24 @@ matter most:
    point for a caller to accidentally use.
 
 2. The model's own `actions` field (`Reasoning.actions`, a list of
-   `ProposedAction`) is read and immediately discarded here too. Stage 1
-   never proposes, decides, or executes an action - see this package's
-   `__init__.py` docstring. Discarding it here, at the single narrowest
-   point where it enters this package, is deliberate: nothing further
-   downstream in `engine/shopper_v2/` needs to also remember not to use it.
+   `ProposedAction`) is read and discarded here too, with TWO narrow
+   exceptions:
+
+   - Phase 1: the first proposed action's own `action_type` (a label like
+     `"COMPARE_PRODUCTS"`) is kept, as `UnderstandingResult.hinted_action_type`,
+     purely for `capability.py::route`'s read-only classification.
+   - Phase 4: when that first action's type is `ADD_TO_CART` or
+     `PROPOSE_CART_CHANGE`, its `product_id`/`chosen_product` parameter
+     (a bare string, nothing else) is ALSO kept, as
+     `UnderstandingResult.hinted_product_id`. This is still not a
+     proposal and still cannot execute anything by itself: it is handed
+     to `cart_proposal.py`, which can only ever build a
+     `PROPOSE_CART_CHANGE` candidate from it - never a direct mutation -
+     and that candidate's own dispatch (`engine/execution/service.py`,
+     unmodified) independently re-verifies the id against the real
+     adapter before using it. No other parameter (`variant_id`,
+     `quantity`, `rationale`, `confidence`) ever leaves this function, and
+     `ProposedAction` itself never leaves this function.
 """
 
 from __future__ import annotations
@@ -71,6 +84,26 @@ class UnderstandingResult(BaseModel):
     #: caller distinguish "no delta because nothing changed" from "no delta
     #: because the model was unavailable", without exposing any model text.
     model_name: str | None = None
+    #: The first proposed action's `action_type` string, if the model
+    #: proposed one - a routing LABEL only, see this module's own
+    #: docstring, invariant 2. `None` when the model proposed nothing or is
+    #: unavailable; `capability.py::route` treats `None` as DISCOVER.
+    hinted_action_type: str | None = None
+    #: A bare product-id STRING, only ever present when
+    #: `hinted_action_type` is `ADD_TO_CART`/`PROPOSE_CART_CHANGE` - see
+    #: this module's own docstring, invariant 2. Never trusted directly;
+    #: `cart_proposal.py` only ever uses it to build a proposal, which the
+    #: existing execution pipeline independently re-verifies.
+    hinted_product_id: str | None = None
+    #: A bare order-id STRING, only ever present when `hinted_action_type`
+    #: is `CHECK_ORDER_STATUS`. Never trusted as proof of ownership -
+    #: `order_status.py` still requires the real `db.owners` check before
+    #: disclosing line items, exactly as V1 already does.
+    hinted_order_id: str | None = None
+    #: A bare quantity INT, only ever present when `hinted_action_type` is
+    #: `UPDATE_CART_QUANTITY`. Never trusted directly - re-validated by the
+    #: same existing execution dispatch that already parses/validates it.
+    hinted_quantity: int | None = None
 
 
 async def understand(
@@ -105,14 +138,42 @@ async def understand(
     # and never stored in anything this function returns.
     _ = result.reply  # explicitly discarded - see module docstring
 
-    # Invariant 2: result.actions is read here, for logging count only, and
-    # never stored in anything this function returns. It is deliberately
-    # not touched again below.
+    # Invariant 2: only `action_type` (a label) is kept, from the FIRST
+    # proposed action only - everything else about every proposed action,
+    # including all of its own parameters, is discarded here and never
+    # touched again below.
+    hinted_action_type: str | None = None
+    hinted_product_id: str | None = None
+    hinted_order_id: str | None = None
+    hinted_quantity: int | None = None
     if result.actions:
+        first = result.actions[0]
+        hinted_action_type = str(getattr(first, "action_type", "") or "") or None
+        params = getattr(first, "parameters", None) or {}
+        if hinted_action_type in (
+            "ADD_TO_CART",
+            "PROPOSE_CART_CHANGE",
+            "REMOVE_CART_LINE",
+            "UPDATE_CART_QUANTITY",
+        ):
+            raw_id = params.get("chosen_product") or params.get("product_id")
+            if isinstance(raw_id, str) and raw_id.strip():
+                hinted_product_id = raw_id.strip()
+        if hinted_action_type == "UPDATE_CART_QUANTITY":
+            raw_qty = params.get("quantity")
+            if isinstance(raw_qty, int) and raw_qty >= 0:
+                hinted_quantity = raw_qty
+            elif isinstance(raw_qty, str) and raw_qty.isdigit():
+                hinted_quantity = int(raw_qty)
+        if hinted_action_type == "CHECK_ORDER_STATUS":
+            raw_order = params.get("order_id")
+            if isinstance(raw_order, str) and raw_order.strip():
+                hinted_order_id = raw_order.strip()
         logger.debug(
             "shopper_v2 understanding: discarding %d proposed action(s); "
-            "Stage 1 does not propose, decide, or execute actions",
+            "keeping only action_type=%r (+hints) as routing labels",
             len(result.actions),
+            hinted_action_type,
         )
 
     raw_state = result.shopping_state or {}
@@ -152,5 +213,11 @@ async def understand(
         search_query=None,
     )
     return UnderstandingResult(
-        delta=delta, used_model=result.used_model, model_name=result.model_name
+        delta=delta,
+        used_model=result.used_model,
+        model_name=result.model_name,
+        hinted_action_type=hinted_action_type,
+        hinted_product_id=hinted_product_id,
+        hinted_order_id=hinted_order_id,
+        hinted_quantity=hinted_quantity,
     )

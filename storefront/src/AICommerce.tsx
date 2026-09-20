@@ -4,6 +4,7 @@ import {
   type CartProposalActivity,
   type CaseRow,
   type MerchantReport as Report,
+  type ShopperV2Activity,
 } from "./api";
 import { MerchantCopilot } from "./MerchantCopilotWidget";
 
@@ -79,6 +80,59 @@ function CartSuggestionsPanel({ proposals }: { proposals: CartProposalActivity }
   );
 }
 
+/** Real counts from Shopper V2's own event stream (missions, basket
+ *  proposals, trade-off re-ranking, payment recovery, order status) - shown
+ *  independent of whether any friction case exists this window, the same
+ *  reasoning CartSuggestionsPanel already applies. */
+function ShopperV2ActivityPanel({ activity }: { activity: ShopperV2Activity }) {
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <span className="eyebrow">Shopper V2 activity</span>
+        <span className="eyebrow">last {activity.days} days · observed, not causal</span>
+      </div>
+      <div className="panel-body">
+        {!activity.has_history ? (
+          <p className="empty">
+            No Shopper V2 activity yet - this fills in once shoppers start
+            using missions, basket proposals, or trade-off comparisons on
+            the V2 assistant.
+          </p>
+        ) : (
+          <>
+            <div className="kpi-row">
+              <div className="kpi-card">
+                <div className="eyebrow">Mission items refined</div>
+                <div className="kpi-value">{activity.missions_refined}</div>
+              </div>
+              <div className="kpi-card">
+                <div className="eyebrow">Baskets proposed</div>
+                <div className="kpi-value">{activity.baskets_proposed}</div>
+              </div>
+              <div className="kpi-card">
+                <div className="eyebrow">Trade-offs applied</div>
+                <div className="kpi-value">{activity.trade_offs_applied}</div>
+              </div>
+              <div className="kpi-card">
+                <div className="eyebrow">Payment recovery offers</div>
+                <div className="kpi-value">{activity.payment_recovery_offers}</div>
+              </div>
+              <div className="kpi-card">
+                <div className="eyebrow">Order status checks</div>
+                <div className="kpi-value">{activity.order_status_checks}</div>
+              </div>
+            </div>
+            <p className="note" style={{ marginTop: 8 }}>
+              What shoppers actually did with Shopper V2's capabilities -
+              not a claim that any of it drove a sale.
+            </p>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
 /**
  * AI Commerce: what the engine actually did for shoppers this window, and
  * the recent activity that produced it. These are observed outcomes, not a
@@ -93,14 +147,21 @@ export function AICommerce({
   const [report, setReport] = useState<Report | null>(null);
   const [cases, setCases] = useState<CaseRow[] | null>(null);
   const [proposals, setProposals] = useState<CartProposalActivity | null>(null);
+  const [v2Activity, setV2Activity] = useState<ShopperV2Activity | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([console_api.report(), console_api.cases(20), console_api.cartProposalActivity()])
-      .then(([r, c, p]) => {
+    Promise.all([
+      console_api.report(),
+      console_api.cases(20),
+      console_api.cartProposalActivity(),
+      console_api.shopperV2Activity(),
+    ])
+      .then(([r, c, p, v2]) => {
         setReport(r);
         setCases(c.cases);
         setProposals(p);
+        setV2Activity(v2);
         setError(null);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Could not load AI commerce data."));
@@ -125,7 +186,7 @@ export function AICommerce({
       </div>
     );
   }
-  if (!report || !cases || !proposals) {
+  if (!report || !cases || !proposals || !v2Activity) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         {header}
@@ -156,6 +217,7 @@ export function AICommerce({
             invisible whenever shoppers_helped was 0 even with real
             proposal activity. */}
         <CartSuggestionsPanel proposals={proposals} />
+        <ShopperV2ActivityPanel activity={v2Activity} />
         <div className="overview-copilot-slot">
           <MerchantCopilot onNavigate={onNavigate} />
         </div>
@@ -189,6 +251,7 @@ export function AICommerce({
       </div>
 
       <CartSuggestionsPanel proposals={proposals} />
+      <ShopperV2ActivityPanel activity={v2Activity} />
 
       <section className="panel">
         <div className="panel-head">

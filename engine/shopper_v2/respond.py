@@ -17,6 +17,7 @@ nothing to pass here even if a future edit tried.
 
 from __future__ import annotations
 
+from engine.execution import mission_ranking
 from engine.reasoning.service import ReasoningService
 from shared.models import Product
 
@@ -60,16 +61,120 @@ async def respond(
         }
         for p in verified
     ]
+    shopping_state_dict = state.as_prompt_dict()
     synthesis = await reasoning.synthesize(
         kind="discovery",
         message=message,
         items=items,
-        shopping_state=state.as_prompt_dict(),
+        shopping_state=shopping_state_dict,
     )
-    if synthesis.text:
-        return (synthesis.text, synthesis.used_model)
+    fallback = _deterministic_summary(verified)
+    if not synthesis.text or _claims_a_cart_action(synthesis.text):
+        return (fallback, False)
 
-    return (_deterministic_summary(verified), False)
+    return _honest_discovery_reply(
+        cited_reason=synthesis.cited_reason,
+        shopping_state=shopping_state_dict,
+        fallback=fallback,
+        used_model=synthesis.used_model,
+    )
+
+
+#: Live-reproduced finding, Phase 4: the discovery synthesis pass
+#: (`ReasoningService.synthesize(kind="discovery", ...)`) is asked only to
+#: describe real, verified products - it is never told the DISCOVER
+#: capability cannot mutate a cart, and nothing before this point checked
+#: whether it invented such a claim anyway. Reproduced live: "Add that one
+#: to my cart" was misrouted to DISCOVER (the model did not propose
+#: ADD_TO_CART/PROPOSE_CART_CHANGE that turn) and the synthesized reply
+#: said "I've added them to your cart as requested" - a fabricated claim
+#: on a turn that never called `cart_proposal.py`, `decision`, `gate`, or
+#: `execution` at all. This is exactly the defect this whole package
+#: exists to prevent ("never let an LLM-generated claim become
+#: authoritative merely because it sounds plausible"), now caught on the
+#: DISCOVER path specifically. A deterministic, closed-class check - not a
+#: prompt change (this synthesis call is shared with V1's own discovery/
+#: recommendation path, and `engine/reasoning/` is left untouched here;
+#: only this V2-owned response layer is hardened).
+_CART_CLAIM_PHRASES = (
+    "added to your cart", "added it to your cart", "added them to your cart",
+    "i've added", "i have added", "added to cart",
+    "removed from your cart", "removed it from your cart",
+    "cleared your cart", "updated your cart",
+    "placed your order", "completed your purchase", "checked out",
+)
+
+
+def _claims_a_cart_action(text: str) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _CART_CLAIM_PHRASES)
+
+
+#: Live-reproduced finding (Shopper V2, trade-off reasoning slice,
+#: 2026-09): `respond()`'s discovery synthesis has no equivalent guard
+#: against a fabricated PERSONALIZATION claim - only the cart-claim guard
+#: above. Reproduced live: a turn with `ShoppingStateV2.priorities == []`
+#: (the model captured no priority that turn) nonetheless returned "This
+#: option perfectly aligns with your priority for lightweight footwear" -
+#: an attribution with nothing in state to back it. V1's own
+#: `engine/api/chat.py::_honest_synthesis` closed the identical defect
+#: after 17 rounds of adversarial hardening (see that function's own
+#: docstring for the full history) - the end state there is structural,
+#: not a phrase blocklist: the model's free text is never trusted to make
+#: a personalization claim at all. Either it names a real stored term
+#: (`cited_reason`, validated against `mission_ranking.stated_terms`) and
+#: this module writes the attribution clause itself from that real term,
+#: or no valid citation exists and the plain, fact-only `fallback` is used
+#: - never the model's own uncited prose. Reused here as its own copy
+#: (this package's own established precedent - see `tradeoff.py::_as_dict`'s
+#: docstring for why a private cross-module import is avoided) rather than
+#: imported from `engine.api.chat`, which V2 never imports (see this
+#: package's own architecture boundary, `orchestrator.py`'s docstring).
+_ATTRIBUTION_TEMPLATES = [
+    "Since {reason} matters to you, ",
+    "Given your focus on {reason}, ",
+    "With {reason} being what you care about here, ",
+]
+_MAX_CITED_REASON_WORDS = 8
+
+
+def _deterministic_personalized_reply(cited_reason: str, fallback: str) -> str:
+    """Build the personalized clause ourselves from a real, already-
+    validated stored term - never the model's own free text. Identical
+    shape to `engine/api/chat.py::_deterministic_personalized_reply`."""
+    if len(cited_reason.split()) > _MAX_CITED_REASON_WORDS:
+        return fallback
+    template = _ATTRIBUTION_TEMPLATES[hash(cited_reason) % len(_ATTRIBUTION_TEMPLATES)]
+    clause = template.format(reason=cited_reason)
+    return clause + fallback[0].lower() + fallback[1:] if fallback else clause.rstrip()
+
+
+def _honest_discovery_reply(
+    *,
+    cited_reason: str | None,
+    shopping_state: dict,
+    fallback: str,
+    used_model: bool,
+) -> tuple[str, bool]:
+    """The structural gate: a personalization claim reaches the shopper
+    only when it names a real, currently-stored term - never the model's
+    own uncited prose, whatever it says. See this module's own comment
+    above for the live reproduction this closes, and
+    `engine/api/chat.py::_honest_synthesis` for the full adversarial
+    history this mirrors."""
+    if cited_reason:
+        terms = mission_ranking.stated_terms(shopping_state)
+        matched_term = mission_ranking.matching_stated_term(cited_reason, terms)
+        if matched_term is not None:
+            return (_deterministic_personalized_reply(matched_term, fallback), used_model)
+    # No valid citation - the model's free text is never trusted to make
+    # (or avoid making) a personalization claim, whatever it says; the
+    # plain, fact-only fallback is used unconditionally. Matches
+    # `_honest_synthesis`'s own final, most-hardened state exactly (see
+    # its SEVENTH-gap note): a real trade-off (fewer natural-sounding
+    # replies) accepted deliberately in exchange for zero remaining path
+    # where an uncited claim reaches a shopper as fact.
+    return (fallback, False)
 
 
 def _pair(evidence: TurnEvidence, products: list[Product]):

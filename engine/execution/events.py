@@ -43,6 +43,34 @@ class EventType:
     #: alternative more often - not measured by this pass itself.
     RETURN_RISK_FLAGGED = "return_risk_flagged"
 
+    #: Shopper V2 only (engine/shopper_v2/) - additive to this same fixed
+    #: set, written through the same `record`/`record_many` functions and
+    #: the same `ShopperEvent` table above, never a second measurement
+    #: system. Each is a real, observed outcome of a V2 turn, never a model
+    #: claim about what it intended.
+    #: A shopper's mission was refined by a stated trade-off/priority
+    #: change and the shown set was actually re-ranked - see
+    #: engine/shopper_v2/tradeoff.py.
+    TRADE_OFF_APPLIED = "trade_off_applied"
+    #: A payment-recovery option was genuinely offered (Kettle) or the
+    #: platform's own lack of the capability was honestly disclosed
+    #: (Northfield) - see engine/shopper_v2/payment_recovery.py. Recorded
+    #: either way, since both are real, distinct outcomes worth being able
+    #: to tell apart later, not just "recovery happened."
+    PAYMENT_RECOVERY_OFFERED = "payment_recovery_offered"
+    #: A shopper asked about an order's status/contents and got a real,
+    #: authoritative answer (or an honest not-found) - see
+    #: engine/shopper_v2/order_status.py.
+    ORDER_STATUS_CHECKED = "order_status_checked"
+    #: A multi-item mission gained or refined a tracked item - see
+    #: engine/shopper_v2/missions.py.
+    MISSION_ITEM_TRACKED = "mission_item_tracked"
+    #: A multi-item basket proposal turn ran (whether or not any individual
+    #: item ended up proposed) - see engine/shopper_v2/basket_proposal.py.
+    #: Per-item PROPOSAL_CREATED events (above) still fire once per real
+    #: proposal; this one event marks the basket-level attempt itself.
+    BASKET_PROPOSED = "basket_proposed"
+
 
 async def record(
     *,

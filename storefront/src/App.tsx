@@ -19,6 +19,7 @@ import { OpsConsole } from "./OpsConsole";
 import { CartPanel } from "./CartPanel";
 import { ProposalsPanel } from "./ProposalsPanel";
 import { ChatWidget } from "./ChatWidget";
+import { ShopperV2Panel } from "./ShopperV2Panel";
 import { Gates } from "./Gates";
 import { MerchantConsole } from "./MerchantConsole";
 import { OrderView } from "./OrderView";
@@ -699,6 +700,10 @@ export default function App() {
           {sidebar}
           </div>
         </>
+      )}
+
+      {shopView && (
+        <ShopperV2Panel cartId={cart?.cart_id} onCartChanged={refreshCart} />
       )}
 
       {shopView && (

@@ -40,6 +40,7 @@ async def create(
     reason: str,
     evidence: list[str],
     snapshot_price: str | None = None,
+    mission_item_id: str | None = None,
 ) -> dict:
     proposal_id = f"prop_{uuid.uuid4().hex[:16]}"
     async with session_scope() as db:
@@ -57,6 +58,7 @@ async def create(
             reason=reason,
             evidence=evidence,
             snapshot_price=snapshot_price,
+            mission_item_id=mission_item_id,
             state="PENDING",
         )
         db.add(row)
@@ -205,6 +207,7 @@ def _as_dict(row: CartProposal | None) -> dict | None:
         "reason": row.reason,
         "evidence": row.evidence or [],
         "snapshot_price": row.snapshot_price,
+        "mission_item_id": row.mission_item_id,
         "state": row.state,
         "execution_result": row.execution_result,
         "created_at": row.created_at.isoformat() if row.created_at else None,

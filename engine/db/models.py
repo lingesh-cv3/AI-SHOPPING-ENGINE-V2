@@ -833,6 +833,18 @@ class ShoppingState(Base):
     #: null until the model states one.
     mission_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
+    #: Shopper V2 only (see engine/shopper_v2/missions.py) - a typed list of
+    #: independent per-item missions for a multi-item shopping trip ("I need
+    #: running shoes, socks and a hydration bottle"), each with its own
+    #: label/constraints/must_have/nice_to_have/exclusions/priorities/
+    #: candidates/selected_product_id/status. Replaced wholesale each time
+    #: it changes, same reasoning as `active_products` above - the whole
+    #: list is the current state of the mission, not something meaningful
+    #: to patch field-by-field at the row level (the per-item patching
+    #: happens one level up, in missions.py, before this column is
+    #: written). V1 never reads or writes this column.
+    mission_items: Mapped[list] = mapped_column(JSON, default=list)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
@@ -1024,6 +1036,15 @@ class CartProposal(Base):
     #: Set only once execution (accept) actually ran - what really happened,
     #: never what the model claimed would happen.
     execution_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    #: Shopper V2 only (see engine/shopper_v2/basket_proposal.py) - the
+    #: `MissionItem.item_id` this proposal fulfills, when it was created as
+    #: part of a multi-item basket proposal. Opaque metadata: nothing in
+    #: `engine/api/chat.py::accept_proposal`'s revalidate-then-execute path
+    #: reads or depends on this, so an accept/reject/expiry behaves
+    #: identically whether or not it is set. Null for every proposal V1
+    #: creates, and for any V2 proposal not created as part of a basket.
+    mission_item_id: Mapped[str | None] = mapped_column(String(24), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
