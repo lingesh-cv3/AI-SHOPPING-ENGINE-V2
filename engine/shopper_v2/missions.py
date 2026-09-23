@@ -43,8 +43,12 @@ from decimal import Decimal, InvalidOperation
 from engine.db import shopping_state as shopping_state_store
 from engine.reasoning.service import MissionItemIntent, ReasoningService
 
+from engine.execution import events as shopper_events
+from engine.execution import mission_ranking
+from engine.execution.relevance import best_matches_with_score
+
 from .basket_proposal import run_basket_proposal_turn
-from .evidence import build_evidence
+from .evidence import build_evidence, product_as_dict
 from .retrieval import retrieve
 from .state import MissionItem, ShoppingStateV2
 
@@ -120,9 +124,81 @@ def _resolve_target(intent: MissionItemIntent, items: list[MissionItem]) -> Miss
         contains = [i for i in items if hint in i.label.lower() or i.label.lower() in hint]
         if len(contains) == 1:
             return contains[0]
+        # Real-candidate match, structural fix for the "Trailblazer" bug:
+        # `named_hint` can also be a REAL product title (or a clear
+        # substring of one) this item's own `candidate_titles` already
+        # carries - a shopper naming a specific product they were just
+        # shown is referring to the item that product belongs to, not
+        # introducing something new. Never matched against a DIFFERENT
+        # item's candidates, and never against anything not already
+        # adapter-verified for this exact item.
+        by_candidate = [
+            i for i in items
+            if any(
+                title and (hint in title.lower() or title.lower() in hint)
+                for title in i.candidate_titles
+            )
+        ]
+        if len(by_candidate) == 1:
+            return by_candidate[0]
         return None
 
     return None
+
+
+def _matched_candidate_id(
+    named_hint: str | None, item: MissionItem | None, raw_message: str
+) -> str | None:
+    """The one real candidate product id `named_hint` names, if exactly
+    one of `item.candidates` (by its parallel `candidate_titles`) matches -
+    same real-data-only discipline as `_resolve_target`'s own candidate
+    branch, just returning the specific product rather than the item.
+
+    Never trusts the model's OWN `named_hint` text as proof there was only
+    one real match, though - live-reproduced: "get me the road one" against
+    candidates "Winter Road Shoe" AND "Starter Road Running Shoe" (both
+    genuinely match "road"), the model picked one specific title as
+    `named_hint` every time, silently resolving an ambiguity the SHOPPER'S
+    OWN WORDS do not resolve - exactly the kind of ungrounded specificity
+    `engine/execution/relevance.py`'s `_is_real_title_citation`/
+    `weak_single_word_match` already exist to catch for cart references,
+    applied here to the same failure mode for mission items. Independently
+    re-scores the RAW message (never the model's paraphrase of it) against
+    every real candidate title using that same word-overlap discipline -
+    only narrows when the raw message's own words AND the model's
+    named_hint agree on the same single product.
+    """
+    if not named_hint or item is None or not item.candidate_titles:
+        return None
+    hint = named_hint.strip().lower()
+    if not hint:
+        return None
+    hint_matches = [
+        pid
+        for pid, title in zip(item.candidates, item.candidate_titles)
+        if title and (hint in title.lower() or title.lower() in hint)
+    ]
+    if len(hint_matches) != 1:
+        return None
+
+    pairs = [
+        (pid, title)
+        for pid, title in zip(item.candidates, item.candidate_titles)
+        if title
+    ]
+    top_score, top_matches = best_matches_with_score(
+        [{"title": title} for _, title in pairs], raw_message
+    )
+    if top_score == 0:
+        # The raw message had no significant words to score against titles
+        # at all (or nothing overlapped) - nothing to independently verify
+        # against, so the model's own single hint match stands.
+        return hint_matches[0]
+    top_titles = {m["title"] for m in top_matches}
+    top_ids = {pid for pid, title in pairs if title in top_titles}
+    if len(top_ids) != 1 or hint_matches[0] not in top_ids:
+        return None
+    return hint_matches[0]
 
 
 async def apply_mission_message(
@@ -132,6 +208,7 @@ async def apply_mission_message(
     message: str,
     history: list[str] | None,
     state: ShoppingStateV2,
+    memory_facts: list[dict] | None = None,
 ) -> tuple[ShoppingStateV2, bool, tuple[str, ...], bool, dict[str, list[str]]]:
     """Interpret one turn against the current mission items, apply
     whatever it genuinely says, run retrieval only for items that need it,
@@ -171,7 +248,21 @@ async def apply_mission_message(
     if reasoning is None or not getattr(reasoning, "enabled", False):
         return state, False, (), False, {}
 
-    current_items = [{"item_id": i.item_id, "label": i.label} for i in state.mission_items]
+    # `candidate_titles` (real, adapter-verified product names already
+    # fetched for this item - see MissionItem's own docstring) rides along
+    # so the model can recognize a shopper naming one of THIS item's real
+    # candidates by brand/product name, not just its bare label - the
+    # structural fix for the "Trailblazer" ghost-item bug, not a per-brand
+    # rule. Bounded the same way the shown-products list everywhere else in
+    # this package is.
+    current_items = [
+        {
+            "item_id": i.item_id,
+            "label": i.label,
+            "candidate_titles": i.candidate_titles[:8],
+        }
+        for i in state.mission_items
+    ]
 
     try:
         intent = await reasoning.interpret_mission_items(
@@ -184,17 +275,45 @@ async def apply_mission_message(
     if intent is None:
         return state, False, (), False, {}
 
+    # Deterministic backstop, defense in depth: even if the model still
+    # names something in BOTH new_item_labels and reference_type='name'
+    # (an inconsistency reproduced live), never let a label that matches an
+    # existing item's own real candidate_titles become a ghost new item -
+    # the same discipline this codebase already applies everywhere else
+    # (never trust the model's word alone when a deterministic check can
+    # verify it against real data).
+    def _matches_existing(label: str) -> bool:
+        lower = label.lower()
+        for i in state.mission_items:
+            if lower == i.label.lower():
+                return True
+            if any(lower in t.lower() or t.lower() in lower for t in i.candidate_titles):
+                return True
+        return False
+
     new_labels = [
         label for label in dict.fromkeys(intent.new_item_labels)
-        if not any(label.lower() == i.label.lower() for i in state.mission_items)
+        if not _matches_existing(label)
     ]
     room = max(_MAX_ITEMS - len(state.mission_items), 0)
     new_labels = new_labels[:room]
 
     target = _resolve_target(intent, state.mission_items)
+    # A shopper naming one of an item's own real candidates by product name
+    # ("add the Trailblazer") is itself a meaningful refinement - narrowing
+    # WHICH real, already-verified candidate this item means - even when
+    # nothing else about the item changed (no new constraint, no
+    # must-have). Resolved deterministically against real candidate_titles
+    # only, never a guess - see `_matched_candidate_id` below.
+    named_candidate_id = (
+        _matched_candidate_id(intent.named_hint, target, message)
+        if target is not None and intent.reference_type == "name"
+        else None
+    )
     has_refinement = bool(
         intent.constraints_add or intent.must_have_add or intent.nice_to_have_add
         or intent.exclusions_add or intent.priorities_add or intent.item_completed
+        or named_candidate_id is not None
     )
     propose_basket = bool(intent.propose_basket and state.mission_items)
 
@@ -217,7 +336,23 @@ async def apply_mission_message(
 
     touched_ids: list[str] = [i.item_id for i in new_items]
 
-    if target is not None and has_refinement:
+    if target is not None and named_candidate_id is not None:
+        # A named-candidate selection is not a new search - the shopper
+        # named one of THIS item's already-verified real candidates, so
+        # narrowing to exactly that one (never re-querying, never
+        # discarding the other real candidates' own titles' alignment) is
+        # the whole fix. Structural counterpart to `basket_proposal.py`'s
+        # own "len(candidates) > 1 -> ambiguous" rule: this is what turns a
+        # named product into something that rule can actually resolve.
+        live_target = items_by_id[target.item_id]
+        idx = live_target.candidates.index(named_candidate_id)
+        live_target.candidates = [named_candidate_id]
+        live_target.candidate_titles = [live_target.candidate_titles[idx]]
+        if live_target.status == "exploring":
+            live_target.status = "comparing"
+        if intent.item_completed:
+            live_target.status = "done"
+    elif target is not None and has_refinement:
         live_target = items_by_id[target.item_id]
         live_target.constraints = _dedup_append(live_target.constraints, intent.constraints_add)
         live_target.must_have = _dedup_append(live_target.must_have, intent.must_have_add)
@@ -244,8 +379,20 @@ async def apply_mission_message(
         query_constraints = [
             c for c in live_target.constraints if not _BUDGET_PATTERN.search(c)
         ]
+        # Conversational-flow review fix: `nice_to_have` (a soft preference
+        # - "I want something lightweight", never hard-filtered, see
+        # mission_ranking.py's own must_have-vs-nice_to_have distinction)
+        # never fed into the search query here, only `constraints`/
+        # `must_have` did - so a preference could silently fail to narrow
+        # the search at all, purely depending on which field the model's
+        # own extraction happened to classify it under that turn, an
+        # inconsistency with no principled reason behind it. A positive
+        # keyword is worth searching on whichever bucket holds it; only
+        # `constraints` needs the budget-pattern exclusion above (a number,
+        # not a keyword) - `must_have`/`nice_to_have` are always real
+        # product-attribute words.
         live_target.search_query = " ".join(
-            [live_target.label, *query_constraints, *live_target.must_have]
+            [live_target.label, *query_constraints, *live_target.must_have, *live_target.nice_to_have]
         ).strip()
         live_target.candidates = []
         touched_ids.append(live_target.item_id)
@@ -269,6 +416,24 @@ async def apply_mission_message(
     for item in needs_retrieval:
         query = item.search_query or item.label
         result = await retrieve(adapter, query, limit=20)
+        # Conversational-flow review fix: `query_diverges_from_said`
+        # (relevance.py) exists to catch the MODEL inventing a proxy word
+        # never grounded in what the shopper said THIS turn - but a mission
+        # item's `search_query` is deliberately built from every real
+        # constraint/must_have/nice_to_have accumulated across the item's
+        # WHOLE life (see the `search_query` rebuild above), not just this
+        # turn's message. Live-reproduced: "For the shoes, I want something
+        # lightweight" then, next turn, "Keep the shoes under 5000" -
+        # search_query correctly stayed "shoes lightweight", but passing
+        # only the CURRENT message as `raw_said` made "lightweight" look
+        # like an invented word (absent from THIS turn's text) and zeroed
+        # every candidate, even though it was real, shopper-stated
+        # constraint text from the immediately preceding turn. `raw_said`
+        # must reflect everything this item's own accumulated fields
+        # already prove the shopper said, not only the latest sentence.
+        raw_said_for_item = " ".join(
+            [message, item.label, *item.constraints, *item.must_have, *item.nice_to_have]
+        )
         item_state_dict = {
             "goal": item.label,
             "budget_amount": _extract_budget(item.constraints),
@@ -281,16 +446,45 @@ async def apply_mission_message(
             "active_products": [],
             "mission_status": item.status,
         }
+        # Batch 4 fix (V2 completion audit): this used to always pass
+        # `None` here, so a signed-in shopper's real, durable preferences
+        # (`prefers_X` facts) were applied to single-item discovery but
+        # never to a mission item's own candidates - an inconsistency with
+        # no reason behind it, since `rank_and_filter`'s own precedence
+        # rule (a THIS-item stated must_have/priority always outranks
+        # memory; memory only ever fills a dimension the item said nothing
+        # about) already makes this safe per item, not just per
+        # conversation. A `prefers_footwear` fact naturally never affects
+        # an "energy gel" item's candidates either - it is scored as
+        # keyword overlap against THAT item's own real product text, so an
+        # irrelevant preference simply never matches anything, the same
+        # safety property personalization already has for single-item
+        # discovery.
         evidence = build_evidence(
             query=query,
-            raw_said=message,
+            raw_said=raw_said_for_item,
             products=result.products,
             shopping_state=item_state_dict,
-            memory_facts=None,
+            memory_facts=memory_facts,
             catalog_sample=None,
             platform_unavailable=result.unavailable,
         )
-        item.candidates = [e.product_id for e in evidence.products if e.relevance_verified]
+        candidates = [e.product_id for e in evidence.products if e.relevance_verified]
+        # Real measurement read-back (see events.rejected_product_ids's own
+        # docstring): a candidate this shopper already rejected or removed
+        # from cart THIS session is deprioritized, never dropped - it can
+        # still be shown, just never as the unprompted top pick again.
+        avoid = await shopper_events.rejected_product_ids(state.connection_id, state.session_id)
+        item.candidates = shopper_events.deprioritize(candidates, avoid)
+        # Real titles, same order, from the SAME adapter fetch above - no
+        # second lookup, nothing invented. See MissionItem.candidate_titles'
+        # own docstring for what this enables.
+        # Same length and order as `item.candidates`, always - an empty
+        # string placeholder for a missing title rather than dropping the
+        # entry, so the two lists stay index-parallel for any caller (see
+        # `_matched_candidate_id`'s `zip` of the two).
+        id_to_title = {p.product_id: p.title for p in result.products if p.title}
+        item.candidate_titles = [id_to_title.get(pid, "") for pid in item.candidates]
         if item.item_id == trade_off_item_id and item.candidates:
             # The real, grounded reason(s) `rank_and_filter` (called inside
             # `build_evidence`) attached to the first verified candidate -
@@ -323,6 +517,7 @@ async def run_mission_turn(
     connection_id: str | None = None,
     session_id: str | None = None,
     cart_id: str | None = None,
+    memory_facts: list[dict] | None = None,
 ):
     """Orchestrator-facing entry point. Returns
     `(reply, products, new_state, handled, proposal_ids)`. `handled=False`
@@ -354,6 +549,7 @@ async def run_mission_turn(
     before_ids = {i.item_id for i in state.mission_items}
     new_state, handled, touched_ids, propose_basket, item_reasons = await apply_mission_message(
         reasoning=reasoning, adapter=adapter, message=message, history=history, state=state,
+        memory_facts=memory_facts,
     )
     if not handled:
         return None, [], state, False, []
@@ -368,6 +564,32 @@ async def run_mission_turn(
                 True,
                 [],
             )
+        # Live-reproduced bug: "add both" after "compare both" (itself
+        # narrowed to exactly the two products just discussed, via
+        # `state.active_products` - see graph.py::node_mission's own
+        # ledger-write comment) still saw an item's FULL, unnarrowed
+        # candidate list here, so "both" resolved one item unambiguously
+        # (it only ever had 1 candidate) and asked "which one?" for the
+        # other - even though the immediately relevant context had
+        # already picked one specific product for it. Narrows an item's
+        # candidates to a single one ONLY when exactly one of its own
+        # real, already-verified candidates also appears in
+        # `active_products` - the same real ledger `compare.py`/
+        # `tradeoff.py` already read, never a guess, never narrowing an
+        # item whose ledger overlap is itself ambiguous (0 or 2+ matches).
+        active_ids = set(state.active_products)
+        if active_ids:
+            for item in new_state.mission_items:
+                if len(item.candidates) <= 1:
+                    continue
+                overlap = [
+                    (pid, title)
+                    for pid, title in zip(item.candidates, item.candidate_titles)
+                    if pid in active_ids
+                ]
+                if len(overlap) == 1:
+                    item.candidates = [overlap[0][0]]
+                    item.candidate_titles = [overlap[0][1]]
         reply, products, basket_state, results = await run_basket_proposal_turn(
             decision=decision,
             gate=gate,
@@ -402,7 +624,32 @@ async def run_mission_turn(
         lines.append(f"Got it - I'm now tracking: {labels}.")
     for item in touched:
         if not item.candidates:
-            lines.append(f"I couldn't find anything matching for {item.label} yet.")
+            # Conversational-flow review fix (Issue #6): a bare "couldn't
+            # find anything" gives the shopper no way to act - re-runs the
+            # SAME real search this item's own state already committed to
+            # (never a new query) purely to name which real hard filter is
+            # actually eliminating everyone and the closest real option
+            # that fails only that one, using `explain_no_match`'s own
+            # grounded-only discipline. Best-effort: a fetch failure here
+            # degrades to the honest generic line, never raises into the
+            # turn.
+            explanation = None
+            try:
+                why_result = await retrieve(adapter, item.search_query or item.label, limit=20)
+                explanation = mission_ranking.explain_no_match(
+                    [product_as_dict(p) for p in why_result.products],
+                    {
+                        "must_have": item.must_have,
+                        "exclusions": item.exclusions,
+                        "budget_amount": _extract_budget(item.constraints),
+                    },
+                )
+            except Exception:  # noqa: BLE001 - degrade honestly, never raise to the shopper
+                logger.warning("missions: explain_no_match failed for %r", item.item_id, exc_info=True)
+            if explanation:
+                lines.append(f"I couldn't find anything for {item.label} that fits everything you've said - {explanation}.")
+            else:
+                lines.append(f"I couldn't find anything matching for {item.label} yet.")
         elif item.status == "done":
             lines.append(f"Noted - {item.label} is settled.")
         elif item.item_id in item_reasons:

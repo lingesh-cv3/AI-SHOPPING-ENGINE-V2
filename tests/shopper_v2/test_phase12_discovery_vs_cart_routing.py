@@ -187,10 +187,23 @@ async def _positive_checks(run_turn, engine, connection_id: str, adapter) -> Non
         gate=engine.gate,
         execution=engine.execution,
     )
+    # Either a real proposal (`cart_action`) or an honest "which one"
+    # clarification (`cart_action_ambiguous`) is correct here - this
+    # function's own docstring always said so. Which of the two actually
+    # happens legitimately depends on how many real candidates "I need
+    # running shoes" turns up: this catalogue's Footwear department was
+    # later expanded (per PROGRESS.md's catalog-diversity pass) from 4 to
+    # 9 real, distinct running shoes, so a bare "I'll take this" is now
+    # genuinely ambiguous rather than resolving to a single survivor - a
+    # correct, improved outcome (a real ambiguity is now honestly
+    # disclosed instead of silently resolved), not a regression. The one
+    # outcome that would still be wrong is falling through to `discover`/
+    # `conversational`/`mission` - i.e. the cart-intent signal being lost
+    # entirely, which is what this check actually guards against.
     check(
-        "an explicit action-intent statement after discovery routes to "
-        f"cart_action (got {action_result.trace.get('capability')!r})",
-        action_result.trace.get("capability") == "cart_action",
+        "an explicit action-intent statement after discovery routes to a "
+        f"cart-action-shaped capability (got {action_result.trace.get('capability')!r})",
+        action_result.trace.get("capability") in ("cart_action", "cart_action_ambiguous"),
     )
     check(
         "the cart is not mutated by the proposal turn itself",

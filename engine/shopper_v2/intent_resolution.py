@@ -43,6 +43,7 @@ that" means something already IN the cart, not something merely shown.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 from engine.execution.relevance import best_matches_with_score
@@ -62,14 +63,34 @@ class CartTargetResult:
         is_cart_intent: bool = False,
         operation: str = "none",
         product_id: str | None = None,
+        #: Set ONLY for a genuine "add" targeting more than one real,
+        #: already-verified product ("add both"/"add these two") - see
+        #: `_resolve_all_reference`. `product_id` stays None whenever this
+        #: is set; a caller checks this list first. Never populated by a
+        #: guess - every id here was independently a real, verified
+        #: `active_products`/ledger entry before this call, the same
+        #: guarantee `product_id` alone already carries.
+        product_ids: list[str] | None = None,
         quantity: int = 1,
         clarifying_question: str | None = None,
     ) -> None:
         self.is_cart_intent = is_cart_intent
         self.operation = operation
         self.product_id = product_id
+        self.product_ids = product_ids
         self.quantity = quantity
         self.clarifying_question = clarifying_question
+
+
+#: Closed-class vocabulary for "both/all of what's in view" - see the
+#: `_looks_like_all_reference` call site's own comment for the live gap
+#: this backstop closes.
+_ALL_REFERENCE_WORDS = ("both", "all of them", "all of those", "each of them", "every one of them")
+
+
+def _looks_like_all_reference(message: str) -> bool:
+    lowered = f" {message.lower()} "
+    return any(f" {w} " in lowered for w in _ALL_REFERENCE_WORDS)
 
 
 async def resolve_cart_target(
@@ -147,12 +168,57 @@ async def resolve_cart_target(
             return CartTargetResult(is_cart_intent=True, operation="clear", product_id=None)
         return CartTargetResult(is_cart_intent=True, operation="clear")
 
+    # Conversational-flow review fix (Issue #1): live-reproduced,
+    # `interpret_cart_reference` classified "add both to the cart" as
+    # `reference_type="none"` 4/4 times, never "all" - a consistent
+    # classification gap for this specific closed-class word, not
+    # sampling variance (unlike this session's other characterized model
+    # noise). Same discipline `capability.py`'s own
+    # `looks_like_comparison_request`/etc already use for a measurably
+    # unreliable primary classification: a small, fixed, non-phrase-
+    # specific word list, gated on the same real-data precondition
+    # `_resolve_all_reference` itself already requires (2+ real
+    # candidates) before ever overriding the model's own field.
+    if (
+        intent.operation == "add"
+        and intent.reference_type not in ("all", "ordinal", "name")
+        and _looks_like_all_reference(message)
+    ):
+        intent = dataclasses.replace(intent, reference_type="all")
+
     if intent.operation == "add":
-        resolved = await _resolve_reference(intent, shown, adapter)
-        if resolved is None:
+        if intent.reference_type == "all":
+            resolved_ids = await _resolve_all_reference(shown, state=state, adapter=adapter)
+            # Deliberately conservative: "all" only ever resolves when there
+            # are at least 2 real, distinct candidates to resolve it TO - a
+            # single-item "all" is not a meaningfully different case from
+            # ordinary pronoun resolution, and falling through here (rather
+            # than returning a 1-item multi-add) keeps that path the one
+            # single source of truth for the single-item case.
+            if resolved_ids and len(resolved_ids) >= 2:
+                return CartTargetResult(
+                    is_cart_intent=True, operation="add",
+                    product_ids=resolved_ids, quantity=quantity,
+                )
+            # Genuinely couldn't ground "all" against anything real - ask,
+            # never guess, using the same ledger-aware clarifying question
+            # the singular ambiguous case already uses.
+            clarifying_question = await _clarify_with_ledger(
+                shown, intent, "add to your cart", state=state, adapter=adapter
+            )
             return CartTargetResult(
                 is_cart_intent=True, operation="add", quantity=quantity,
-                clarifying_question=_clarify(shown, intent, "add to your cart"),
+                clarifying_question=clarifying_question,
+            )
+
+        resolved = await _resolve_reference(intent, shown, adapter)
+        if resolved is None:
+            clarifying_question = await _clarify_with_ledger(
+                shown, intent, "add to your cart", state=state, adapter=adapter
+            )
+            return CartTargetResult(
+                is_cart_intent=True, operation="add", quantity=quantity,
+                clarifying_question=clarifying_question,
             )
         return CartTargetResult(is_cart_intent=True, operation="add", product_id=resolved, quantity=quantity)
 
@@ -218,6 +284,89 @@ async def _resolve_reference(
         return None
 
     return None
+
+
+#: Bounds how many distinct products "add all"/"add both" can ever resolve
+#: to in one turn - a real, deliberate ceiling, not just a display limit.
+#: Each resolved id still goes through its OWN separate proposal below
+#: (`cart_proposal.py`, unchanged), so this bounds how many individual
+#: risk-gated proposals one turn can create, not a bulk-mutation size.
+_MAX_ALL_REFERENCE_ITEMS = 6
+
+
+async def _resolve_all_reference(
+    shown: list[Product], *, state: ShoppingStateV2, adapter
+) -> list[str]:
+    """Resolves "all"/"both" to the real, currently-relevant set of
+    products - THIS turn's own shown set, extended by the ledger's most
+    recent PRIOR group when the current turn's own set is too small to be
+    what "both" plausibly means (exactly the "shoes... slides... add both"
+    shape - `shown` alone would be just the slide). Every id returned was
+    already a real, independently-verified `active_products`/ledger entry
+    - nothing here is invented or guessed at; the only judgment made is
+    WHICH already-real ids to include, never fabricating a new one.
+
+    Deliberately does NOT reach further back than the immediately prior
+    group - "add both" said right after two things were shown is
+    unambiguous; reaching three or more topics back to guess which two the
+    shopper means would be exactly the guess this module exists to refuse
+    to make."""
+    ids = list(dict.fromkeys(p.product_id for p in shown))
+    if len(ids) < _MAX_ALL_REFERENCE_ITEMS:
+        groups = [g for g in state.recent_product_groups if g]
+        if len(groups) >= 2:
+            prior_ids = [pid for pid in groups[-2] if pid not in ids]
+            ids = [*ids, *prior_ids]
+    return ids[:_MAX_ALL_REFERENCE_ITEMS]
+
+
+async def _clarify_with_ledger(
+    shown: list[Product],
+    intent: CartReferenceIntent,
+    verb: str,
+    *,
+    state: ShoppingStateV2,
+    adapter,
+) -> str:
+    """The rolling in-view ledger fix for a real, reported failure: "show
+    shoes under 2000" then "show slides" then "add both" - `shown` here is
+    ONLY the latest turn's `active_products` (the slides), because
+    `active_products` is deliberately overwritten each turn (see its own
+    docstring). Without this, the clarifying question would silently drop
+    every earlier topic and ask "which one?" using only the slide - an
+    honest-sounding question built from an already-incomplete picture.
+
+    This only ever ADDS real, already-verified-earlier products to the
+    question text - never a guess, never an automatic pick of more than
+    one. If `shown` alone already resolves unambiguously, this function is
+    never called (see the caller). If it can't, and the ledger has more
+    than one distinct recent group, the question names items from up to
+    the last two groups so the shopper can actually answer it - one at a
+    time, since this module can still only ever resolve to a single
+    product per call, exactly as `resolve_cart_target`'s own docstring
+    already states."""
+    groups = [g for g in state.recent_product_groups if g]
+    if len(groups) < 2:
+        return _clarify(shown, intent, verb)
+
+    shown_ids = {p.product_id for p in shown}
+    prior_ids = [pid for pid in groups[-2] if pid not in shown_ids][:4]
+    if not prior_ids:
+        return _clarify(shown, intent, verb)
+
+    prior_products: list[Product] = []
+    for pid in prior_ids:
+        try:
+            prior_products.append(await adapter.get_product(pid))
+        except Exception:  # noqa: BLE001 - degrade to what resolved, never raise
+            logger.warning("intent_resolution: ledger get_product failed for %r", pid, exc_info=True)
+
+    if not prior_products:
+        return _clarify(shown, intent, verb)
+
+    combined = [*shown, *prior_products]
+    options = "; ".join(f"{i + 1}. {p.title}" for i, p in enumerate(combined))
+    return f"I can only add one at a time - which one did you mean? {options}"
 
 
 def _clarify(candidates: list[Product], intent: CartReferenceIntent, verb: str) -> str:

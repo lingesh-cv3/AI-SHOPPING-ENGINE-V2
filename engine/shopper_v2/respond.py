@@ -32,6 +32,7 @@ async def respond(
     evidence: TurnEvidence,
     products: list[Product],
     state: ShoppingStateV2,
+    memory_facts: list[dict] | None = None,
 ) -> tuple[str, bool]:
     """Return (reply_text, used_model). Ordering is enforced by the caller
     (`orchestrator.py`) never invoking this before evidence/products exist -
@@ -68,13 +69,14 @@ async def respond(
         items=items,
         shopping_state=shopping_state_dict,
     )
-    fallback = _deterministic_summary(verified)
+    fallback = _deterministic_summary(verified, shopping_state_dict)
     if not synthesis.text or _claims_a_cart_action(synthesis.text):
         return (fallback, False)
 
     return _honest_discovery_reply(
         cited_reason=synthesis.cited_reason,
         shopping_state=shopping_state_dict,
+        memory_facts=memory_facts,
         fallback=fallback,
         used_model=synthesis.used_model,
     )
@@ -126,25 +128,44 @@ def _claims_a_cart_action(text: str) -> bool:
 #: this module writes the attribution clause itself from that real term,
 #: or no valid citation exists and the plain, fact-only `fallback` is used
 #: - never the model's own uncited prose. Reused here as its own copy
-#: (this package's own established precedent - see `tradeoff.py::_as_dict`'s
-#: docstring for why a private cross-module import is avoided) rather than
-#: imported from `engine.api.chat`, which V2 never imports (see this
-#: package's own architecture boundary, `orchestrator.py`'s docstring).
+#: rather than imported from `engine.api.chat`, which V2 never imports (see
+#: this package's own architecture boundary, `orchestrator.py`'s docstring).
+#: `compare.py`/`tradeoff.py`'s OWN near-identical duplication (each
+#: hand-rolling the same `ProductEvidence` shape) was a genuine, unintended
+#: copy rather than a deliberate cross-module boundary, and has since been
+#: consolidated into `evidence.already_verified_evidence`/`product_as_dict` -
+#: this one is intentional, that one was not.
 _ATTRIBUTION_TEMPLATES = [
     "Since {reason} matters to you, ",
     "Given your focus on {reason}, ",
     "With {reason} being what you care about here, ",
 ]
+#: A durable, cross-visit preference gets its own template set - never
+#: silently phrased as if it were said THIS turn (that would itself be a
+#: subtler version of the exact fabrication defect this file exists to
+#: close: implying evidence for a claim - "you said this just now" - that
+#: isn't real). A shopper can tell the difference between "you just told me"
+#: and "you've told us before," and only the second is true here.
+_MEMORY_ATTRIBUTION_TEMPLATES = [
+    "Since you've told us before that {reason} matters to you, ",
+    "Going by what you've said you prefer ({reason}), ",
+    "Remembering that you like {reason}, ",
+]
 _MAX_CITED_REASON_WORDS = 8
 
 
-def _deterministic_personalized_reply(cited_reason: str, fallback: str) -> str:
+def _deterministic_personalized_reply(
+    cited_reason: str, fallback: str, *, from_memory: bool = False
+) -> str:
     """Build the personalized clause ourselves from a real, already-
     validated stored term - never the model's own free text. Identical
-    shape to `engine/api/chat.py::_deterministic_personalized_reply`."""
+    shape to `engine/api/chat.py::_deterministic_personalized_reply`, now
+    also able to honestly attribute to a durable memory term rather than
+    only a current-session one (see `from_memory`)."""
     if len(cited_reason.split()) > _MAX_CITED_REASON_WORDS:
         return fallback
-    template = _ATTRIBUTION_TEMPLATES[hash(cited_reason) % len(_ATTRIBUTION_TEMPLATES)]
+    templates = _MEMORY_ATTRIBUTION_TEMPLATES if from_memory else _ATTRIBUTION_TEMPLATES
+    template = templates[hash(cited_reason) % len(templates)]
     clause = template.format(reason=cited_reason)
     return clause + fallback[0].lower() + fallback[1:] if fallback else clause.rstrip()
 
@@ -153,20 +174,37 @@ def _honest_discovery_reply(
     *,
     cited_reason: str | None,
     shopping_state: dict,
+    memory_facts: list[dict] | None,
     fallback: str,
     used_model: bool,
 ) -> tuple[str, bool]:
     """The structural gate: a personalization claim reaches the shopper
-    only when it names a real, currently-stored term - never the model's
-    own uncited prose, whatever it says. See this module's own comment
-    above for the live reproduction this closes, and
+    only when it names a real, currently-stored OR durably-remembered term -
+    never the model's own uncited prose, whatever it says. See this
+    module's own comment above for the live reproduction this closes, and
     `engine/api/chat.py::_honest_synthesis` for the full adversarial
-    history this mirrors."""
+    history this mirrors.
+
+    Current-session state is checked first and wins on a tie (matches
+    `mission_ranking.rank_and_filter`'s own precedence: current explicit
+    intent always outranks older stored preference) - a durable memory
+    term is only ever the fallback source, never blended with or allowed
+    to outrank a real current-turn citation."""
     if cited_reason:
         terms = mission_ranking.stated_terms(shopping_state)
         matched_term = mission_ranking.matching_stated_term(cited_reason, terms)
         if matched_term is not None:
             return (_deterministic_personalized_reply(matched_term, fallback), used_model)
+
+        memory_terms = mission_ranking.durable_preference_terms(memory_facts)
+        matched_memory_term = mission_ranking.matching_stated_term(cited_reason, memory_terms)
+        if matched_memory_term is not None:
+            return (
+                _deterministic_personalized_reply(
+                    matched_memory_term, fallback, from_memory=True
+                ),
+                used_model,
+            )
     # No valid citation - the model's free text is never trusted to make
     # (or avoid making) a personalization claim, whatever it says; the
     # plain, fact-only fallback is used unconditionally. Matches
@@ -205,6 +243,45 @@ def _honest_no_match(evidence: TurnEvidence, state: ShoppingStateV2) -> str:
     return "I couldn't confirm a good match for that."
 
 
-def _deterministic_summary(verified: list[Product]) -> str:
-    names = ", ".join(p.title for p in verified[:4])
-    return f"I found {len(verified)} match(es): {names}."
+#: Grounded, deterministic phrasing - never model text, so it carries none
+#: of the fabrication risk `_honest_discovery_reply` exists to gate. This
+#: is the string that actually reaches a shopper on the large majority of
+#: turns (the synthesis model's text is discarded whenever it lacks a
+#: valid citation - see that function's own SEVENTH-gap note), so its own
+#: robotic, one-shape-forever phrasing ("I found N match(es): ...") was
+#: itself a real, reported "feels like the old chatbot" complaint - not a
+#: model problem, a template problem. Every variant below states only
+#: facts already computed by `evidence.py`/`mission_ranking.py` (the
+#: count, the titles, whether a stated budget was honored) - nothing new
+#: is asserted, only phrased more like a person than a search result line.
+def _deterministic_summary(verified: list[Product], shopping_state: dict | None = None) -> str:
+    names = [p.title for p in verified[:4]]
+    count = len(verified)
+    budget_honored = bool((shopping_state or {}).get("budget_amount")) and all(
+        p.price is not None for p in verified[:4]
+    )
+    named = _join_naturally(names)
+
+    if count == 1:
+        if budget_honored:
+            return f"{named} - and it's within what you said you'd like to spend."
+        return f"I found one that fits: {named}."
+
+    variants = [
+        f"Here's what I found: {named}.",
+        f"A few options that fit: {named}.",
+        f"I found {count} that could work: {named}.",
+    ]
+    if budget_honored:
+        variants.append(f"{named} - all within your budget.")
+    return variants[hash(named) % len(variants)]
+
+
+def _join_naturally(names: list[str]) -> str:
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return ", ".join(names[:-1]) + f", and {names[-1]}"

@@ -104,6 +104,28 @@ class UnderstandingResult(BaseModel):
     #: `UPDATE_CART_QUANTITY`. Never trusted directly - re-validated by the
     #: same existing execution dispatch that already parses/validates it.
     hinted_quantity: int | None = None
+    #: "shopping" or "conversational" - the model's own genuine judgment,
+    #: from the SAME call, of what this message needs (see
+    #: `engine/reasoning/service.py::Reasoning.message_intent`'s own
+    #: docstring for the live-reproduced bug this closes). `None` when the
+    #: model was unavailable or didn't classify - `capability.py::route`
+    #: treats that the same as "shopping" only when there's already other
+    #: evidence of shopping intent, and otherwise degrades to a
+    #: conversational reply rather than guessing, matching this package's
+    #: existing "ask/respond naturally, never guess" discipline.
+    message_intent: str | None = None
+    #: The model's OWN reply text, kept ONLY when `message_intent ==
+    #: "conversational"` - the ONE case where invariant 1's "never use the
+    #: pre-fetch reply" rule does not apply, because a purely
+    #: conversational turn describes no fetched commerce data at all
+    #: (there is nothing for a pre-fetch reply to be wrong about). Still
+    #: never trusted blindly: `conversational.py::run_conversational_turn`
+    #: runs the SAME `_claims_a_cart_action` check `respond.py` already
+    #: uses before ever showing it to a shopper, and falls back to a
+    #: deterministic reply if it fails that check. For every other
+    #: `message_intent`, this stays `None` and the pre-fetch reply is
+    #: discarded exactly as invariant 1 always required.
+    conversational_reply: str | None = None
 
 
 async def understand(
@@ -133,10 +155,6 @@ async def understand(
         shopping_state=shopping_state,
         memory_facts=memory_facts,
     )
-
-    # Invariant 1: the model's reply is read here, for logging shape only,
-    # and never stored in anything this function returns.
-    _ = result.reply  # explicitly discarded - see module docstring
 
     # Invariant 2: only `action_type` (a label) is kept, from the FIRST
     # proposed action only - everything else about every proposed action,
@@ -212,6 +230,47 @@ async def understand(
         # need its own narrow field for it - not part of Stage 1.
         search_query=None,
     )
+
+    # Structural backstop, live-reproduced: "I need shoes" - about as
+    # unambiguous a shopping statement as exists - was classified
+    # `message_intent="conversational"` by the model roughly 1 in 5 times
+    # across repeated identical calls (5 runs, same message, same empty
+    # history), each time producing a real, non-empty `delta.goal` in the
+    # SAME structured call ("shoes") alongside it - an internally
+    # inconsistent result the earlier `actions`-vs-`message_intent`
+    # consistency check does not catch, because `actions` was correctly
+    # empty both times; the inconsistency here is between `message_intent`
+    # and this OTHER field of the same tool call. A message that
+    # genuinely has nothing to act on also states no new goal/budget/
+    # constraint - so a real, freshly-stated one is itself independent,
+    # deterministic evidence the turn is NOT purely conversational,
+    # whatever the model's own label says. Never a guess: every field
+    # checked here is something the model itself extracted this exact
+    # turn, not inferred from the message text by this module.
+    message_intent = result.message_intent
+    if message_intent == "conversational" and (
+        delta.goal
+        or delta.budget_amount
+        or delta.must_have_add
+        or delta.constraints_add
+        or delta.nice_to_have_add
+        or delta.exclusions_add
+        or delta.priorities_add
+    ):
+        message_intent = None
+
+    # Invariant 1: the model's reply is read here, for logging shape only,
+    # and never stored in anything this function returns - EXCEPT for the
+    # one case `UnderstandingResult.conversational_reply`'s own docstring
+    # explains: a message classified "conversational" describes no fetched
+    # commerce data, so there is no pre-fetch-reply-before-data risk to
+    # guard against for it specifically. Gated on the (possibly
+    # overridden) `message_intent` above, not the model's raw one - a turn
+    # the backstop just reclassified as real shopping intent DOES describe
+    # data about to be fetched, so invariant 1's discard applies to it too.
+    conversational_reply = result.reply if message_intent == "conversational" else None
+    _ = result.reply  # explicitly discarded for every other case - see module docstring
+
     return UnderstandingResult(
         delta=delta,
         used_model=result.used_model,
@@ -220,4 +279,6 @@ async def understand(
         hinted_product_id=hinted_product_id,
         hinted_order_id=hinted_order_id,
         hinted_quantity=hinted_quantity,
+        message_intent=message_intent,
+        conversational_reply=conversational_reply,
     )

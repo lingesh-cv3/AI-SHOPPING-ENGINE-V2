@@ -44,8 +44,23 @@ class TurnTrace:
     ranking_confident: bool | None = None
     llm_judge_used: bool = False
     llm_judge_result: bool | None = None
+    #: None when the judge never picked a candidate this turn; True/False
+    #: when it did, recording whether that pick also passed the shopper's
+    #: own hard constraints (budget/exclusions/stock) before being trusted
+    #: - see `pipeline.py::_judge_pick_passes_hard_filter`.
+    llm_judge_pick_passed_hard_filter: bool | None = None
     verified_count: int | None = None
     no_match_reason: str | None = None
+
+    #: Batch 4 (V2 completion audit): whether the TF-IDF semantic-retrieval
+    #: widener (engine/execution/semantic_retrieval.py) ran this turn - only
+    #: ever True when the adapter's own keyword search already came back
+    #: weak/empty - how many products it surfaced above its similarity
+    #: floor, and how many of those actually passed hard-filter/relevance
+    #: verification afterward (never trusted on its own say-so).
+    semantic_retrieval_tried: bool = False
+    semantic_retrieval_candidates: int | None = None
+    semantic_retrieval_verified: int | None = None
 
     #: Phase 4 continuation - whether the general cart-intent interpreter
     #: (`intent_resolution.py`) ran this turn, and what it found. Absent
@@ -89,8 +104,12 @@ class TurnTrace:
             "ranking_confident": self.ranking_confident,
             "llm_judge_used": self.llm_judge_used,
             "llm_judge_result": self.llm_judge_result,
+            "llm_judge_pick_passed_hard_filter": self.llm_judge_pick_passed_hard_filter,
             "verified_count": self.verified_count,
             "no_match_reason": self.no_match_reason,
+            "semantic_retrieval_tried": self.semantic_retrieval_tried,
+            "semantic_retrieval_candidates": self.semantic_retrieval_candidates,
+            "semantic_retrieval_verified": self.semantic_retrieval_verified,
             "cart_intent_checked": self.cart_intent_checked,
             "cart_intent_detected": self.cart_intent_detected,
             "response_used_model": self.response_used_model,

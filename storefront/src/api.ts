@@ -325,7 +325,7 @@ export interface WhyBlock {
 export interface CartProposal {
   proposal_id: string;
   cart_id: string;
-  change_type: "ADD" | "REMOVE" | "REPLACE" | "CHANGE_QUANTITY";
+  change_type: "ADD" | "REMOVE" | "REPLACE" | "CHANGE_QUANTITY" | "CLEAR";
   product_id: string;
   variant_id: string | null;
   quantity: number | null;
@@ -443,6 +443,7 @@ export interface ProductSummaryV2 {
   description: string | null;
   price: string | null;
   image_url: string | null;
+  availability: string | null;
 }
 
 export interface ProductEvidenceV2 {
@@ -467,6 +468,7 @@ export interface ChatReplyV2 {
   used_model: boolean;
   trace: Record<string, unknown>;
   products: ProductSummaryV2[];
+  why: WhyBlock | null;
 }
 
 export interface Order {
@@ -861,7 +863,7 @@ export const api = {
    *  proposal is approved/rejected through the EXISTING
    *  `acceptProposal`/`rejectProposal` calls above - there is no
    *  separate V2 approval endpoint. */
-  chatV2: (sessionId: string, message: string, cartId?: string) =>
+  chatV2: (sessionId: string, message: string, cartId?: string, friction?: string) =>
     call<ChatReplyV2>("/api/v2/chat", {
       method: "POST",
       body: JSON.stringify({
@@ -869,6 +871,7 @@ export const api = {
         session_id: sessionId,
         message,
         cart_id: cartId ?? null,
+        friction: friction ?? null,
       }),
     }),
 };

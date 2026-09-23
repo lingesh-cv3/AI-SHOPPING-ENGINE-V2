@@ -845,6 +845,21 @@ class ShoppingState(Base):
     #: written). V1 never reads or writes this column.
     mission_items: Mapped[list] = mapped_column(JSON, default=list)
 
+    #: Shopper V2 only - a bounded history of recent turns' verified
+    #: product groups (most recent first), e.g. [["P1005"], ["P1001",
+    #: "P1002", ...]] after "show me slides" then "show me shoes". Additive
+    #: to `active_products` above, not a replacement for it:
+    #: `active_products` keeps its existing "what am I looking at right
+    #: now" single-focus meaning for compare-style latching; this field
+    #: exists so a later plural reference ("add both") spanning a topic
+    #: switch can still be answered honestly - by naming what was actually
+    #: shown across recent turns - even though `active_products` itself
+    #: was already overwritten by the newer turn. Never a new source of
+    #: truth: every id here was already a real, verified `active_products`
+    #: entry at the time its turn ran. V1 never reads or writes this
+    #: column.
+    recent_product_groups: Mapped[list] = mapped_column(JSON, default=list)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )

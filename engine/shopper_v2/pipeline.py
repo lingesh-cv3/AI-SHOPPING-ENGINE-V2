@@ -28,12 +28,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from engine.execution import mission_ranking, semantic_retrieval
 from engine.reasoning.service import ReasoningService
 from shared.models import Product
 
 from . import search_context
 from .contracts import Candidate, CandidateSet, RetrievalMethod, SearchIntent
-from .evidence import TurnEvidence, build_evidence
+from .evidence import TurnEvidence, build_evidence, product_as_dict
 from .retrieval import retrieve
 from .tracing import TurnTrace
 
@@ -41,6 +42,20 @@ logger = logging.getLogger(__name__)
 
 _JUDGE_TIMEOUT_S = 12.0
 _CATALOG_SAMPLE_LIMIT = 40
+#: Batch 4: semantic retrieval's own wider sample - deliberately larger
+#: than `_CATALOG_SAMPLE_LIMIT` (the LLM judge's sample), since TF-IDF
+#: scoring is a cheap, deterministic, no-model-call operation and can
+#: afford to look at more of the catalog per turn than a paid model call
+#: would. Still an explicit, disclosed bound (the same honesty
+#: `engine/execution/service.py::_MAX_CATALOG_SCAN` already applies), not
+#: the whole catalog - a real 40k-SKU client is not fully covered by this
+#: either, and this module makes no claim that it is.
+_SEMANTIC_SAMPLE_LIMIT = 500
+#: Cost-bounded retry cap for `_try_semantic_judge`'s pick-then-verify loop
+#: - each attempt is one more `judge_best_match` model call, so this bounds
+#: the worst case to 3 extra calls on top of the 1 `judge_relevance` call,
+#: never unbounded.
+_MAX_JUDGE_PICK_ATTEMPTS = 3
 
 
 _RETRIEVAL_LIMIT = 20
@@ -92,6 +107,7 @@ async def run_discovery_turn(
     connection_id: str,
     message: str,
     delta_query: str | None,
+    constraint_only_turn: bool = False,
     shopping_state: dict | None,
     memory_facts: list[dict] | None,
     trace: TurnTrace,
@@ -99,15 +115,42 @@ async def run_discovery_turn(
     """The full retrieval -> evidence step for one V2 discovery turn.
     Returns (evidence, all fetched products, the SearchIntent actually
     used) - `respond.py` is unchanged and still takes exactly this shape.
+
+    `constraint_only_turn` (from `orchestrator.py`'s own real `StateDelta` -
+    never a guess at word content) makes `SearchIntent` genuinely drive
+    WHICH query is searched first, not just feed the semantic-judge
+    rescue: a turn that stated a new budget with no new goal of its own
+    ("under 2000" alone) searches the carried-forward topic directly,
+    skipping the guaranteed-empty search Finding 4's reactive fallback
+    below would otherwise have to wait for.
     """
     primary_query = (delta_query or message or "").strip() or message
+    proactive_carry_forward_used = False
+    if constraint_only_turn:
+        last_query = await search_context.get_last_effective_query(
+            session_id, connection_id
+        )
+        if last_query:
+            primary_query = last_query
+            proactive_carry_forward_used = True
+
     intent = SearchIntent.from_shopping_state(
         raw_message=message, query=primary_query, shopping_state=shopping_state
     )
     trace.search_intent_query = intent.query
+    trace.search_intent_fallback_used = proactive_carry_forward_used
 
     candidate_set = await _do_retrieve(adapter, intent.query)
-    raw_said_for_evidence = message
+    # A carried-forward query is, by construction, words the shopper said
+    # on an EARLIER turn, not this one - `query_diverges_from_said` (called
+    # inside `build_evidence` below) checks the query's words against what
+    # the shopper said THIS turn, so without this the proactive path would
+    # wrongly look like a diverging, ungrounded query on every turn it
+    # fires for. Same reasoning Finding 4's reactive fallback already
+    # applies for the identical shape - see its own comment below.
+    raw_said_for_evidence = (
+        f"{primary_query} {message}" if proactive_carry_forward_used else message
+    )
 
     if candidate_set.unavailable:
         trace.candidate_count = 0
@@ -181,6 +224,55 @@ async def run_discovery_turn(
     trace.no_match_reason = evidence.no_match_reason
     trace.verified_count = sum(1 for e in evidence.products if e.relevance_verified)
 
+    # --- Batch 4: TF-IDF semantic retrieval widener ----------------------
+    #
+    # Tried BEFORE the LLM judge below, deliberately: this is a free,
+    # deterministic, no-model-call re-score - cheaper and faster than a
+    # model call, so it is worth trying first whenever the adapter's own
+    # narrow (title-only, in this codebase's demo adapters) keyword search
+    # already came back weak/empty. Never replaces authoritative catalog
+    # data: every candidate it can possibly surface is a real `Product`
+    # already fetched this same turn from the adapter's own wide sample,
+    # and every one still goes through the EXACT SAME `build_evidence`
+    # hard-filter/verification pass below as any keyword-found candidate -
+    # this step only WIDENS the candidate set `build_evidence` sees, never
+    # marks anything verified itself.
+    if evidence.no_match_reason in ("no_candidates", "no_relevant_match"):
+        try:
+            wide_result = await retrieve(adapter, "", limit=_SEMANTIC_SAMPLE_LIMIT)
+        except Exception:  # noqa: BLE001 - degrade to the existing verdict, never raise further
+            wide_result = None
+        if wide_result is not None and not wide_result.unavailable and wide_result.products:
+            already_ids = {p.product_id for p in products}
+            wide_by_id = {p.product_id: p for p in wide_result.products}
+            wide_dicts = [product_as_dict(p) for p in wide_result.products]
+            matches = semantic_retrieval.semantic_matches(
+                intent.query or message, wide_dicts, exclude_ids=already_ids
+            )
+            trace.semantic_retrieval_tried = True
+            trace.semantic_retrieval_candidates = len(matches)
+            if matches:
+                added = [
+                    wide_by_id[m.product_id] for m in matches if m.product_id in wide_by_id
+                ]
+                products = [*products, *added]
+                evidence = build_evidence(
+                    query=intent.query,
+                    raw_said=raw_said_for_evidence,
+                    products=products,
+                    shopping_state=shopping_state,
+                    memory_facts=memory_facts,
+                    catalog_sample=None,
+                    platform_unavailable=False,
+                )
+                trace.no_match_reason = evidence.no_match_reason
+                trace.verified_count = sum(1 for e in evidence.products if e.relevance_verified)
+                trace.semantic_retrieval_verified = sum(
+                    1
+                    for e in evidence.products
+                    if e.relevance_verified and e.product_id in {m.product_id for m in matches}
+                )
+
     # --- Stage 2A Finding 5: restore the LLM semantic-judge fallback -----
     #
     # `evidence.py` never calls `judge_relevance`/`judge_best_match` -
@@ -203,6 +295,7 @@ async def run_discovery_turn(
             message=message,
             evidence=evidence,
             already_fetched=products,
+            shopping_state=shopping_state,
             trace=trace,
         )
         if judged_product is not None and judged_product.product_id not in {
@@ -222,6 +315,27 @@ async def run_discovery_turn(
     return evidence, products, intent
 
 
+def _judge_pick_passes_hard_filter(product: Product, shopping_state: dict | None) -> bool:
+    """The semantic judge only ever proposes a product it found plausible
+    by category/description - it has no concept of the shopper's stated
+    budget or exclusions, because it is never given `shopping_state` to
+    reason over. Structural fix for a live-reproduced bug: a query like
+    "lightweight running shoes under 2000" found no literal keyword match,
+    the judge picked a real running shoe on category grounds alone (the
+    Trailblazer, INR 4299), and the caller marked it `relevance_verified`
+    with no budget check at all - a genuine hard-constraint violation
+    reaching the shopper. Reuses the SAME deterministic hard-filter
+    (`mission_ranking.rank_and_filter`) every other candidate in this turn
+    was already checked against, on a singleton list - not a new
+    heuristic, not a second budget-parsing implementation."""
+    from .evidence import product_as_dict
+
+    shortlist, _ = mission_ranking.rank_and_filter(
+        [product_as_dict(product)], shopping_state, limit=1
+    )
+    return bool(shortlist)
+
+
 async def _try_semantic_judge(
     *,
     reasoning: ReasoningService,
@@ -229,6 +343,7 @@ async def _try_semantic_judge(
     message: str,
     evidence: TurnEvidence,
     already_fetched: list[Product],
+    shopping_state: dict | None,
     trace: TurnTrace,
 ) -> tuple[TurnEvidence, Product | None]:
     """Fetches a bounded catalog sample (read-only browse, same shape as
@@ -243,13 +358,30 @@ async def _try_semantic_judge(
     judge picked - or `None` if nothing changed). The caller merges the
     returned `Product` into its own fetched-products list, since a product
     the judge picks from the wider sample may not have been part of the
-    turn's original narrow-search candidates."""
-    try:
-        sample_result = await retrieve(adapter, "", limit=_CATALOG_SAMPLE_LIMIT)
-    except Exception:  # noqa: BLE001 - degrade to the existing verdict, never raise further
-        logger.warning("shopper_v2 pipeline: catalog sample fetch failed", exc_info=True)
-        return evidence, None
-    sample = list(sample_result.products or [])
+    turn's original narrow-search candidates.
+
+    The judge's pick is advisory only, exactly like every other candidate
+    this turn: it is never marked `relevance_verified` unless it ALSO
+    passes the same deterministic hard filter (budget/exclusions/stock)
+    every other product was checked against - see
+    `_judge_pick_passes_hard_filter`. A pick that fails is treated as no
+    match, not silently downgraded to unverified-but-shown."""
+    # Structural fix: `already_fetched` (this turn's REAL search candidates)
+    # was accepted as a parameter but never actually read here - the judge
+    # was always shown a generic, query-blind catalog browse instead of
+    # what this turn's own search already surfaced. Prefer the real,
+    # already-fetched candidates when there are any; only fall back to a
+    # blind browse when this turn's search itself found nothing at all
+    # (`no_candidates`), so the judge still has something to reason over.
+    if already_fetched:
+        sample = list(already_fetched)
+    else:
+        try:
+            sample_result = await retrieve(adapter, "", limit=_CATALOG_SAMPLE_LIMIT)
+        except Exception:  # noqa: BLE001 - degrade to the existing verdict, never raise further
+            logger.warning("shopper_v2 pipeline: catalog sample fetch failed", exc_info=True)
+            return evidence, None
+        sample = list(sample_result.products or [])
     if not sample:
         return evidence, None
 
@@ -280,27 +412,63 @@ async def _try_semantic_judge(
         return evidence, None
 
     candidates_by_id = {p.product_id: p for p in sample}
-    payload = [
-        {"product_id": p.product_id, "title": p.title, "description": p.description}
-        for p in sample[:12]
-    ]
-    trace.model_calls += 1
-    try:
-        picked_id = await asyncio.wait_for(
-            reasoning.judge_best_match(need=message, candidates=payload),
-            timeout=_JUDGE_TIMEOUT_S,
-        )
-    except TimeoutError:
-        logger.info("shopper_v2 pipeline: best-match judgment timed out")
-        picked_id = None
-    except Exception:  # noqa: BLE001
-        logger.exception("shopper_v2 pipeline: best-match judgment failed")
-        picked_id = None
 
-    if picked_id is None or picked_id not in candidates_by_id:
+    # Bounded retry: if the judge's pick fails the shopper's own hard
+    # constraints (budget/exclusions/stock), it does not mean nothing in
+    # the sample qualifies - only that this particular pick doesn't. Retry
+    # with that pick excluded, so a genuinely in-budget candidate sitting
+    # in the SAME sample (e.g. a 699 INR product the judge overlooked in
+    # favour of a 4299 INR one) gets a real second look, rather than the
+    # whole rescue giving up after one wrong guess. Capped at
+    # `_MAX_JUDGE_PICK_ATTEMPTS` - this is a cost-bounded retry, not a loop
+    # that could run away on a stubborn model (see the Groq-throttle
+    # constraint this package's own docs call "the single most concrete
+    # constraint Stage 2 must design against").
+    excluded_ids: set[str] = set()
+    picked_id: str | None = None
+    picked_product: Product | None = None
+    for _attempt in range(_MAX_JUDGE_PICK_ATTEMPTS):
+        remaining = [p for p in sample if p.product_id not in excluded_ids][:12]
+        if not remaining:
+            break
+        payload = [
+            {"product_id": p.product_id, "title": p.title, "description": p.description}
+            for p in remaining
+        ]
+        trace.model_calls += 1
+        try:
+            candidate_id = await asyncio.wait_for(
+                reasoning.judge_best_match(need=message, candidates=payload),
+                timeout=_JUDGE_TIMEOUT_S,
+            )
+        except TimeoutError:
+            logger.info("shopper_v2 pipeline: best-match judgment timed out")
+            candidate_id = None
+        except Exception:  # noqa: BLE001
+            logger.exception("shopper_v2 pipeline: best-match judgment failed")
+            candidate_id = None
+
+        if candidate_id is None or candidate_id not in candidates_by_id:
+            break
+
+        candidate_product = candidates_by_id[candidate_id]
+        if _judge_pick_passes_hard_filter(candidate_product, shopping_state):
+            picked_id, picked_product = candidate_id, candidate_product
+            trace.llm_judge_pick_passed_hard_filter = True
+            break
+
+        logger.info(
+            "shopper_v2 pipeline: semantic judge picked %s but it fails the "
+            "shopper's own hard constraints (budget/exclusion/stock) - "
+            "excluding it and giving the judge another look",
+            candidate_id,
+        )
+        trace.llm_judge_pick_passed_hard_filter = False
+        excluded_ids.add(candidate_id)
+
+    if picked_id is None or picked_product is None:
         return evidence, None
 
-    picked_product = candidates_by_id[picked_id]
     existing_ids = {e.product_id for e in evidence.products}
     if picked_id not in existing_ids:
         from .evidence import ProductEvidence
@@ -325,10 +493,15 @@ async def _try_semantic_judge(
 
     # Already among this turn's fetched candidates but the deterministic
     # layer withheld confidence - upgrade that one entry rather than
-    # duplicate it.
+    # duplicate it. `hard_constraints_passed` is already re-verified above
+    # via `_judge_pick_passes_hard_filter` (the same deterministic filter,
+    # not this entry's possibly-stale flag), so it is safe to also set it
+    # True here rather than leave a verified-but-marked-failed contradiction.
     updated = [
         e.model_copy(
             update={
+                "hard_constraints_passed": True,
+                "failed_constraints": [],
                 "relevance_verified": True,
                 "evidence_fields": [*e.evidence_fields, "semantic_judge_match"],
             }

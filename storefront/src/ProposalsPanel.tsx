@@ -64,6 +64,8 @@ export function ProposalsPanel({
         return `Replace ${p.replaces_product_id} with ${p.product_id}`;
       case "CHANGE_QUANTITY":
         return `Set ${p.product_id} to ${p.quantity ?? "a new"} quantity`;
+      case "CLEAR":
+        return "Clear your whole cart";
       default:
         return p.reason;
     }

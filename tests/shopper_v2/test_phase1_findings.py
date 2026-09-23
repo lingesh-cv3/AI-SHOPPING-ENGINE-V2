@@ -128,10 +128,17 @@ def finding_3_does_not_override_a_diverging_query() -> None:
     )
 
 
-def finding_3_does_not_override_with_a_real_rival_present() -> None:
-    """The override only applies when there is exactly one hard-filter
-    survivor - a genuine ambiguous one-word match with a real rival must
-    still be withheld."""
+def finding_3_generalizes_to_several_genuine_tied_survivors() -> None:
+    """Superseded assertion, corrected live (2026-09-20): a category browse
+    with several real, equally-matching products used to be treated the
+    same as a genuinely ambiguous single rival, and withheld ALL of them -
+    this was the exact "show me shoes only shows 1 product" bug a real
+    shopper hit. Two real shoes both scoring top on "shoe", with no
+    lower-scoring outlier riding along, are not a rival pair to be
+    withheld from each other - they are the whole answer, and both must be
+    verified. See `evidence.py`'s `all_survivors_are_top_matches` (the
+    generalization of the old `single_hard_survivor` rule this test used
+    to name)."""
     candidates = [
         _p("P1", "Marathon Pro Racing Shoe", "Carbon plate.", "12499.00 INR", 4.0),
         _p("P2", "Court Classic Tennis Shoe", "Flat sole.", "3499.00 INR", 4.0),
@@ -146,7 +153,38 @@ def finding_3_does_not_override_with_a_real_rival_present() -> None:
         platform_unavailable=False,
     )
     check(
-        "Finding 3 override does not apply with more than one hard-filter survivor",
+        "Finding 3 override now applies to every tied genuine survivor, not just a lone one",
+        all(p.relevance_verified for p in ev.products),
+    )
+
+
+def finding_3_still_withholds_a_real_mixed_bag() -> None:
+    """The generalization above is a strict superset, not a loosening: a
+    survivor that does NOT share the top keyword score (a real rival that
+    is still just riding along on the hard filter, not on the query) must
+    still keep the whole set withheld - the exact case Finding 3 always
+    existed to guard."""
+    candidates = [
+        _p("P1", "Marathon Pro Racing Shoe", "Carbon plate build for shoe fans.", "12499.00 INR", 4.0),
+        _p(
+            "P2",
+            "Trail Running Cap",
+            "A breathable cap for trail runners.",
+            "1299.00 INR",
+            4.0,
+        ),
+    ]
+    ev = build_evidence(
+        query="shoe",
+        raw_said="a shoe",
+        products=candidates,
+        shopping_state=None,
+        memory_facts=None,
+        catalog_sample=candidates,
+        platform_unavailable=False,
+    )
+    check(
+        "Finding 3 override does not apply when a lower-scoring outlier is mixed in",
         not any(p.relevance_verified for p in ev.products),
     )
 
@@ -183,7 +221,8 @@ def main() -> int:
     finding_2_five_candidates_no_priority_signal_keeps_the_real_match()
     finding_3_single_hard_survivor_weak_match_is_confirmed()
     finding_3_does_not_override_a_diverging_query()
-    finding_3_does_not_override_with_a_real_rival_present()
+    finding_3_generalizes_to_several_genuine_tied_survivors()
+    finding_3_still_withholds_a_real_mixed_bag()
     asyncio.run(finding_4_search_context_round_trip())
 
     print()

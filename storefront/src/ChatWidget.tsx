@@ -3,10 +3,96 @@ import {
   api,
   shopperMessage,
   type ChatReply,
+  type ChatReplyV2,
   type ChatTurn,
   type ReturnRiskFinding,
 } from "./api";
 import { type Account } from "./account";
+
+/** Maps a real `ChatReplyV2` (`/api/v2/chat`, `engine/shopper_v2/`) onto
+ *  this widget's existing `ChatTurn` shape - the same shape V1's `/api/chat`
+ *  already filled, so every piece of UI below (product cards, the
+ *  comparison table, the payment picker, "why this") renders unchanged,
+ *  from real V2 data, never a value invented here.
+ *
+ *  - `products`: real, adapter-fetched products this turn showed, with
+ *    `fit` filled from `evidence.products[].evidence_fields` (V2's own
+ *    grounded reasons) when present - never left absent when a real reason
+ *    exists.
+ *  - `comparison`: only when the turn's capability was an actual
+ *    comparison and exactly two products came back - the same "exactly two,
+ *    fetched fresh" shape V1's own comparison table requires.
+ *  - `payment`: only on a real checkout turn, built from
+ *    `trace.checkout_payload` - the unmodified `PREPARE_CHECKOUT` dispatch's
+ *    own payload (cart id, lines, grand total, the real demo card list) -
+ *    never invented, and this widget's existing `payNow()` (the real
+ *    `/api/chat/pay` route, unrelated to which engine drove the
+ *    conversation) is what actually spends anything, unchanged.
+ *  - `awaitingPerson`: true for a payment-recovery turn - that capability
+ *    is always financial, so the Risk Gate always classifies it HUMAN;
+ *    the real case is already in the ops queue either way.
+ *  - A cart proposal this turn created is never rendered inline here - the
+ *    existing `ProposalsPanel` (unchanged, already generic over who created
+ *    a proposal) is what a shopper approves/rejects it through, exactly as
+ *    it already does for any other proposal.
+ */
+export function mapV2Reply(r: ChatReplyV2): {
+  products?: ChatTurn["products"];
+  comparison?: ChatTurn["comparison"];
+  payment?: ChatTurn["payment"];
+  awaitingPerson?: boolean;
+  why?: ChatTurn["why"];
+} {
+  const capability = r.trace?.capability as string | undefined;
+  const evidenceById = new Map(
+    (r.evidence?.products ?? []).map((e) => [e.product_id, e.evidence_fields]),
+  );
+  const isComparison = capability === "compare" && r.products.length === 2;
+
+  const products = !isComparison && r.products.length > 0
+    ? r.products.map((p) => ({
+        product_id: p.product_id,
+        title: p.title,
+        description: p.description,
+        price: p.price,
+        categories: [],
+        fit: evidenceById.get(p.product_id)?.length
+          ? evidenceById.get(p.product_id)
+          : undefined,
+      }))
+    : undefined;
+
+  const comparison = isComparison
+    ? r.products.map((p) => ({
+        product_id: p.product_id,
+        title: p.title,
+        description: p.description,
+        price: p.price,
+        availability: p.availability ?? "IN_STOCK",
+      }))
+    : undefined;
+
+  const checkoutPayload = capability === "checkout"
+    ? (r.trace?.checkout_payload as ChatTurn["payment"] | null | undefined)
+    : undefined;
+
+  // Conversational-flow review fix (Issue #7): `r.why` is now built
+  // server-side (`engine/shopper_v2/evidence.py::build_why_v2`) from this
+  // SAME turn's real evidence/shopping-state, the same grounded-only
+  // discipline V1's own `engine/api/why.py::explain` already applies -
+  // never reconstructed here from raw `evidence_fields` (which used to
+  // leak internal-only tags like "title_or_description_overlap" straight
+  // into the panel, and never distinguished "found" from "declined").
+  const why = r.why ?? undefined;
+
+  return {
+    products,
+    comparison,
+    payment: checkoutPayload ?? undefined,
+    awaitingPerson: capability === "payment_recovery" ? true : undefined,
+    why,
+  };
+}
 
 /**
  * The always-on assistant.
@@ -24,7 +110,6 @@ import { type Account } from "./account";
 export function ChatWidget({
   sessionId,
   cartId,
-  orderId,
   open,
   turns,
   onOpen,
@@ -36,9 +121,17 @@ export function ChatWidget({
   unread,
   merchantName,
   onUnread,
+  depts,
 }: {
   sessionId: string;
   cartId?: string;
+  /** Accepted for interface compatibility with existing callers - no longer
+   *  read internally. V1's `act()` forwarded this to `/api/chat` as order
+   *  context; V2's order-status capability instead resolves "the order
+   *  from this visit" itself, from the same session-turn history this
+   *  widget already restores/polls (`engine/session/store.py`,
+   *  unmodified), so a shopper can still just ask "what did I order?"
+   *  without this prop. */
   orderId?: string;
   open: boolean;
   turns: ChatTurn[];
@@ -55,6 +148,10 @@ export function ChatWidget({
   unread?: number;
   merchantName?: string;
   onUnread?: (count: number) => void;
+  /** Real, merchant-declared departments (already fetched by the storefront
+   *  for its own nav) - shown as tappable buttons alongside the opening
+   *  greeting, on a session with no turns yet. Never invented here. */
+  depts?: string[];
 }) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -65,9 +162,6 @@ export function ChatWidget({
   // why is checking one thing, and leaving several expanded turns the
   // conversation into a log.
   const [openWhy, setOpenWhy] = useState<number | null>(null);
-  const [memory, setMemory] = useState<{ turns: number; friction: number } | null>(
-    null,
-  );
   const endRef = useRef<HTMLDivElement>(null);
 
   // Always the latest `turns`/`open`/`onTurns`/`onUnread`, for the poll below
@@ -246,13 +340,10 @@ export function ChatWidget({
     // through the refs above instead.
   }, [sessionId]);
 
-  /** Send a message on the shopper's behalf, with whatever they picked.
-   *
-   *  `known` carries ids the engine trusts outright, so a tap never depends on
-   *  matching text. Used by the composer, the option buttons and the product cards
-   *  alike - one path, so they cannot drift apart.
-   */
-  async function act(said: string, known?: Record<string, string>) {
+  /** Send a free-text message on the shopper's behalf. A tap (product card,
+   *  size option) never comes through here - see `tap()` below, which goes
+   *  straight to trusted execution, no model involved. */
+  async function act(said: string) {
     if (busy) return;
 
     const withShopper: ChatTurn[] = [...turns, { speaker: "shopper", text: said }];
@@ -260,34 +351,29 @@ export function ChatWidget({
     setBusy("sending");
 
     try {
-      const r: ChatReply = await api.chat(sessionId, said, {
-        cartId,
-        orderId,
-        known,
-      });
-      setMemory({ turns: r.remembered_turns, friction: r.remembered_friction });
-      onReply?.(r);
+      // Powered by /api/v2/chat (engine/shopper_v2/) - `known` (a tapped
+      // reference's real id) has no V2 equivalent parameter; every tap in
+      // this widget already goes through `tap()`/`api.act` below instead,
+      // never through here, so this is never actually needed for a real
+      // shopper action - see the `known`-carrying callers' own comments.
+      const r: ChatReplyV2 = await api.chatV2(sessionId, said, cartId);
+      const mapped = mapV2Reply(r);
 
-      // Put their message back. The model was never reached, so nothing was
-      // answered - and retyping a sentence into a limit that has not lifted is
-      // what makes this feel broken rather than busy.
-      if (r.rate_limited) {
-        setDraft(said);
-      }
-      if (r.cart_changed) onCartChanged?.();
+      // A V2 chat turn never mutates the cart directly - it can only ever
+      // create a proposal (see cart_proposal.py's own hard rule), which the
+      // existing ProposalsPanel calls `onCartChanged` for itself once the
+      // shopper actually accepts it. Nothing to refresh from this turn.
       onTurns([
         ...withShopper,
         {
           speaker: "assistant",
           text: r.reply,
-          products: r.products,
-          comparison: r.comparison,
-          awaitingPerson: r.awaiting_person,
+          products: mapped.products,
+          comparison: mapped.comparison,
+          awaitingPerson: mapped.awaitingPerson,
           usedModel: r.used_model,
-          choices: r.choices,
-          payment: r.payment,
-          why: r.why,
-          categoryChoices: r.category_choices,
+          payment: mapped.payment,
+          why: mapped.why,
         },
       ]);
     } catch (e) {
@@ -414,17 +500,6 @@ export function ChatWidget({
       <div className="chathead">
         <div>
           <div className="eyebrow">{merchantName ?? "Assistant"}</div>
-          {memory && (memory.friction > 0 || memory.turns > 0) && (
-            <div className="chatmem">
-              remembering {memory.turns} message{memory.turns === 1 ? "" : "s"}
-              {memory.friction > 0 &&
-                ` and ${memory.friction} problem${
-                  memory.friction === 1 ? "" : "s"
-              } from this visit`}
-            </div>
-          )}
-
-
         </div>
         <button className="chatclose" onClick={onClose}>
           ×
@@ -433,10 +508,30 @@ export function ChatWidget({
 
       <div className="chatbody">
         {turns.length === 0 && (
-          <p className="chathint">
-            Ask about a product, a size, or an order. If something went wrong
-            earlier in your visit, I already know about it.
-          </p>
+          <>
+            <p className="chathint">
+              Hi! Ask about a product, a size, or an order - if something
+              went wrong earlier in your visit, I already know about it.
+            </p>
+            {/* Real, merchant-declared departments (the same list the
+                storefront's own nav already fetched) - not invented
+                categories, and reuses the exact `act("Show me X")` path
+                the mid-conversation category buttons already use below. */}
+            {depts && depts.length > 0 && (
+              <div className="optionrow">
+                {depts.slice(0, 6).map((d) => (
+                  <button
+                    key={d}
+                    className="optionbtn"
+                    disabled={busy !== null}
+                    onClick={() => act(`Show me ${d}`)}
+                  >
+                    {d}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
         )}
 
         {turns.map((turn, i) => (
@@ -461,15 +556,6 @@ export function ChatWidget({
                     </span>
                     {p.description && (
                       <span className="cpdesc">{p.description}</span>
-                    )}
-                    {p.fit && p.fit.length > 0 && (
-                      // Grounded, deterministic evidence for why THIS product
-                      // made a mission-aware shortlist (engine/execution/
-                      // mission_ranking.py) - real matched facts, never a
-                      // model-invented justification. Absent whenever no
-                      // shopping mission has been captured yet, same as
-                      // the shortlist mechanism itself.
-                      <span className="cpfit">Why this: {p.fit.join(" · ")}</span>
                     )}
                     {p.return_risk && p.return_risk.length > 0 && (
                       <ReturnRiskNotice findings={p.return_risk} />

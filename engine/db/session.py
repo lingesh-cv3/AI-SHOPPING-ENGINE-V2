@@ -160,6 +160,18 @@ async def create_schema() -> None:
                     text("ALTER TABLE shopping_states ADD COLUMN mission_items TEXT")
                 )
 
+            # recent_product_groups (Shopper V2's cross-turn "in view"
+            # ledger, see engine/shopper_v2/state.py) arrived after the
+            # first shopping_states rows existed, same idempotent-migration
+            # pattern as mission_items above.
+            if "recent_product_groups" not in state_columns:
+                await conn.execute(
+                    text(
+                        "ALTER TABLE shopping_states "
+                        "ADD COLUMN recent_product_groups TEXT"
+                    )
+                )
+
             # mission_item_id (Shopper V2's basket-proposal tagging, see
             # engine/shopper_v2/basket_proposal.py) arrived after the first
             # cart_proposals rows existed, same idempotent-migration

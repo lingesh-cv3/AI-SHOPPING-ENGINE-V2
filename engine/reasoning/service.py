@@ -149,6 +149,21 @@ class Reasoning:
     #: Durable facts the model flagged this turn, almost always empty. Only
     #: ever written to storage for a signed-in shopper - see chat.py.
     durable_facts: list[dict] | None = None
+    #: "shopping" or "conversational" - the model's own genuine judgment of
+    #: what THIS message needs, from the same tool call, no extra cost.
+    #: `None` on the rules fallback (nothing to classify) - callers that
+    #: need a concrete value treat `None` the same as "shopping" (the
+    #: existing, safe default when classification itself is unavailable -
+    #: never worse than before this field existed) OR route to a
+    #: conversational reply, per their own degrade-honestly discipline; see
+    #: `engine/shopper_v2/capability.py::route`'s own handling. Reproduced
+    #: live (Batch 2 review): every conversational turn ("hi", "thanks",
+    #: "okay") was landing on `Capability.DISCOVER` and running a real
+    #: catalog search against a greeting - "hi" once returned a random
+    #: product listing from a blank-query catalog scan. This field is the
+    #: structural fix: a genuine model judgment on the SAME call already
+    #: being made, not a phrase list.
+    message_intent: str | None = None
 
 
 @dataclass
@@ -340,13 +355,44 @@ class ReasoningService:
             # parse intent out of free text.
             return self._fallback(friction, "model did not call the tool", message=message)
 
-        actions = self._parse(call["arguments"])
-        if not actions:
-            return self._fallback(
-                friction, "model proposed nothing usable", message=message
-            )
-
         args = call["arguments"]
+        raw_intent = str(args.get("message_intent", "")).strip()
+        message_intent = raw_intent if raw_intent in ("shopping", "conversational") else None
+
+        actions = self._parse(call["arguments"])
+        reply_text = str(args.get("reply", "")).strip() or None
+        if not actions:
+            # Live-reproduced bug (Batch 2 review, see `Reasoning.message_intent`'s
+            # own docstring): zero proposed actions used to ALWAYS mean "the
+            # model failed, use the rule-based fallback" - but zero actions is
+            # the CORRECT, honest outcome for a message the model has
+            # genuinely judged needs none (a greeting, thanks, small talk).
+            #
+            # Second live-reproduced bug (this pass): the model does not
+            # reliably co-populate `message_intent` every time it leaves
+            # `actions` empty - reproduced directly against "thanks" said
+            # right after a product was shown, 2 of 3 identical calls came
+            # back with `actions=[]` but `message_intent` blank/unclassified,
+            # which the check below used to read as "classification failed"
+            # and discarded a real, valid empty-actions judgment for a
+            # manufactured RECOMMEND_PRODUCTS/ANSWER_PRODUCT_QUESTION guess -
+            # reopening the exact "thanks" -> discovery bug this field exists
+            # to close. The model choosing to propose NOTHING, while still
+            # writing a real reply, is itself the conversational signal
+            # regardless of whether it also separately labelled it that way -
+            # only treated as a genuine classification failure (fall back to
+            # rules) when there is no reply either, i.e. the call produced
+            # nothing usable at all. Never overrides an explicit "shopping"
+            # classification - that means the model saw real shopping intent
+            # but was not confident enough to name a specific action, which
+            # `capability.py::route` already sends to DISCOVER correctly.
+            if message_intent is None and reply_text:
+                message_intent = "conversational"
+            elif message_intent != "conversational":
+                return self._fallback(
+                    friction, "model proposed nothing usable", message=message
+                )
+
         return Reasoning(
             actions=actions,
             diagnosis=Diagnosis(
@@ -355,13 +401,14 @@ class ReasoningService:
                 evidence=[str(e) for e in (args.get("evidence") or [])][:6],
                 diagnosed_at=datetime.now(UTC),
             ),
-            reply=str(args.get("reply", "")).strip() or None,
+            reply=reply_text,
             used_model=True,
             model_name=result.model,
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
             shopping_state=self._parse_shopping_state(args.get("shopping_state")),
             durable_facts=self._parse_durable_facts(args.get("durable_facts")),
+            message_intent=message_intent,
         )
 
     def _parse_shopping_state(self, raw: object) -> dict | None:
@@ -752,6 +799,14 @@ class ReasoningService:
         out: list[ProposedAction] = []
 
         for raw in args.get("actions") or []:
+            if not isinstance(raw, dict):
+                # A provider occasionally returns a malformed items array
+                # (live-reproduced: a bare string instead of an object) -
+                # the honest response is the same as an unknown action
+                # type below: drop it, never crash the turn over a
+                # provider-shaped defect the shopper had nothing to do with.
+                logger.warning("model proposed a non-object action entry %r; discarded", raw)
+                continue
             name = str(raw.get("action_type", "")).strip()
             try:
                 action_type = ActionType(name)

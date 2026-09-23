@@ -34,8 +34,8 @@ import logging
 from engine.execution import mission_ranking
 from shared.models import Product
 
-from .evidence import ProductEvidence, TurnEvidence
-from .state import ShoppingStateV2
+from .evidence import TurnEvidence, already_verified_evidence, product_as_dict
+from .state import ShoppingStateV2, recent_relevant_product_ids
 
 logger = logging.getLogger(__name__)
 
@@ -47,23 +47,6 @@ _FETCH_FAILED_REPLY = (
     "I couldn't re-check those against your new priority right now - "
     "please try again in a moment."
 )
-
-
-def _as_dict(p: Product) -> dict:
-    """Identical shape to `evidence.py::_as_dict` - kept as its own copy
-    rather than importing a module-private helper across files, the same
-    precedent `eval/adapt.py::_as_dict` already established in this
-    package."""
-    return {
-        "product_id": p.product_id,
-        "title": p.title,
-        "description": p.description,
-        "categories": list(p.categories or []),
-        "price": str(p.price) if p.price is not None else None,
-        "availability": str(p.availability),
-        "rating": p.rating,
-        "rating_count": p.rating_count,
-    }
 
 
 async def run_tradeoff_turn(
@@ -83,7 +66,13 @@ async def run_tradeoff_turn(
     exactly as a discovery turn already does - this function itself never
     writes to storage, matching `compare.py`'s own read-only discipline.
     """
-    ids = list(dict.fromkeys(state.active_products))
+    # Batch 2: only reaches into ledger history when `active_products`
+    # alone is genuinely empty (minimum=1) - re-ranking deliberately stays
+    # scoped to the CURRENT single topic whenever one exists, since
+    # blending two unrelated topics (shoes and slides) into one re-rank
+    # would conflate categories rather than correctly resolve historical
+    # context. See `state.recent_relevant_product_ids`'s own docstring.
+    ids = recent_relevant_product_ids(state, minimum=1)
     if not ids:
         return (_NOTHING_TO_RERANK_REPLY, TurnEvidence(query=None, products=[]), [], [])
 
@@ -97,7 +86,7 @@ async def run_tradeoff_turn(
     if not products:
         return (_FETCH_FAILED_REPLY, TurnEvidence(query=None, products=[]), [], [])
 
-    product_dicts = [_as_dict(p) for p in products]
+    product_dicts = [product_as_dict(p) for p in products]
     shortlist, fit_reasons = mission_ranking.rank_and_filter(
         product_dicts, state.as_prompt_dict(), limit=len(product_dicts)
     )
@@ -110,20 +99,13 @@ async def run_tradeoff_turn(
     # never silently kept and re-labelled as still fitting.
     reordered_products = [by_id[pid] for pid in reordered_ids]
 
-    evidence = TurnEvidence(
-        query=None,
-        products=[
-            ProductEvidence(
-                product_id=p.product_id,
-                exists=True,
-                hard_constraints_passed=True,
-                relevance_verified=True,
-                relevance_score=0,
-                weak_match=False,
-                evidence_fields=fit_reasons.get(p.product_id, []),
-            )
-            for p in reordered_products
-        ],
+    # Shared contract with `compare.py` - see
+    # `evidence.already_verified_evidence`'s own docstring. The hard
+    # filtering already happened above (`rank_and_filter`); this only
+    # packages its real survivors with their real, grounded reasons.
+    evidence = already_verified_evidence(
+        reordered_products,
+        {p.product_id: fit_reasons.get(p.product_id, []) for p in reordered_products},
     )
 
     if not reordered_products:

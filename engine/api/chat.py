@@ -1127,6 +1127,29 @@ async def _process_turn(
         memory_facts=memory_facts,
     )
 
+    # V1 has no notion of a purely conversational turn (that classification,
+    # `Reasoning.message_intent`, exists for Shopper V2 - see
+    # engine/reasoning/service.py's own docstring on the field). The shared
+    # `propose_actions` tool schema now genuinely allows the model to return
+    # zero actions (previously structurally impossible - `minItems: 1` - so
+    # V1 never had to handle this), specifically so a V2 turn correctly
+    # judged conversational is not forced to invent one. V1 still needs
+    # *something* to act on for a bare greeting/browse, exactly as it always
+    # did before that schema change, so it falls back to the same
+    # rule-based assistance proposal `ReasoningService._fallback` already
+    # uses when the model is unavailable - identical shape, just triggered
+    # here instead of inside `reason()`, so V2's own message_intent handling
+    # is untouched.
+    if not reasoning.actions:
+        reasoning.actions = [
+            ProposedAction(
+                action_type=ActionType.RECOMMEND_PRODUCTS,
+                operation=operation_for(ActionType.RECOMMEND_PRODUCTS),
+                rationale="proposed by rules; the model judged this turn conversational",
+                confidence=0.5,
+            )
+        ]
+
     # Fold this turn's structured output into stored memory - never a second
     # model call, just parsing what the same call already returned.
     #
@@ -2898,17 +2921,47 @@ async def accept_proposal(
         execution_result=execution_result,
     )
     if all_succeeded:
+        executed_shopper_id = await who.shopper_id_for(req.connection_id)
         try:
             await shopper_events.record(
                 connection_id=req.connection_id,
                 session_id=req.session_id,
                 event_type=shopper_events.EventType.PROPOSAL_EXECUTED,
-                shopper_id=await who.shopper_id_for(req.connection_id),
+                shopper_id=executed_shopper_id,
                 product_id=proposal.get("product_id"),
                 detail={"proposal_id": proposal_id},
             )
         except Exception:  # noqa: BLE001
             logger.exception("could not record proposal_executed; continuing")
+
+        # Measurement closed loop: a real, confirmed add is the strongest
+        # positive signal this codebase has - stronger than a mere
+        # impression - and until now nothing ever turned it into a durable
+        # fact. `mission_ranking.durable_preference_terms`/`respond.py`'s
+        # citation gate already know how to USE a `prefers_X` memory fact;
+        # this is what finally gives them real ones to read instead of
+        # only whatever was manually seeded. Grounded in the product's own
+        # real, merchant-declared category (never invented), and only for
+        # a genuine ADD by a signed-in shopper - never a REMOVE/CLEAR
+        # (a negative signal, not "prefers"), never a guest (memory facts
+        # are account-scoped by design - see ShopperMemoryFact's own
+        # docstring). `provenance="derived_from_purchase"` keeps this
+        # honestly distinguishable from a fact the shopper actually stated.
+        if change_type == "ADD" and executed_shopper_id and fresh is not None:
+            try:
+                category = next(iter(fresh.categories or []), None)
+                if category:
+                    await db.memory_facts.upsert(
+                        req.connection_id,
+                        executed_shopper_id,
+                        key=f"prefers_{category.strip().lower().replace(' ', '_')}",
+                        value=category.strip(),
+                        source_session_id=req.session_id,
+                        provenance="derived_from_purchase",
+                        confidence=0.6,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception("could not derive a preference fact; continuing")
 
     if awaiting_any:
         reply = "That change needs someone at the shop to approve first - I've passed it on."

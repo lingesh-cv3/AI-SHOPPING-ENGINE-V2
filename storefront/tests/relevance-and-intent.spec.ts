@@ -64,11 +64,18 @@ test('product intent and budget survive a follow-up that only restates priority'
   }
 });
 
-test('category browsing still works for a genuine bare request', async ({ page }) => {
+test('a genuine category question gets a real conversational reply, not the old picker UI', async ({ page }) => {
+  // Superseded expectation (was: a `.chatbody .optionrow` category-picker
+  // list, V1's RECOMMEND_PRODUCTS-with-empty-query browse fallback UI).
+  // Shopper V2 has no such picker - a question with no concrete product
+  // need routes to `Capability.CONVERSATIONAL` and answers in prose (see
+  // engine/shopper_v2/conversational.py). This asserts the real, current
+  // behaviour: a natural reply appears, the turn never errors, and the
+  // now-removed picker UI is never shown.
   const input = await openChat(page, '/northfield');
   await input.fill('What categories do you have?');
   await input.press('Enter');
-  await expect(
-    page.locator('.chatbody .optionrow', { hasText: 'Footwear' }),
-  ).toBeVisible({ timeout: 20000 });
+  await expect(page.locator('.bubble').last()).toBeVisible({ timeout: 20000 });
+  await expect(page.locator('.chatwidget')).not.toContainText(/something went wrong/i);
+  await expect(page.locator('.chatbody .optionrow', { hasText: 'Footwear' })).toHaveCount(0);
 });

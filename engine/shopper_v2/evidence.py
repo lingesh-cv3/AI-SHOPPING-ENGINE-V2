@@ -135,7 +135,45 @@ def build_evidence(
     # requires a rival. A divergent query (the model naming something the
     # shopper never said) is a different, unrelated risk and is NOT
     # overridden by this rule.
-    single_hard_survivor = len(shortlisted_ids) == 1
+    #
+    # Generalization ("show me shoes" showing only 1 of 4 real shoes):
+    # `top_score == 1` is also the ONLY possible value whenever a query's
+    # sole significant word is a plain category name shared by several
+    # real products (P1001/P1002/P1005/P1008 all score 1 on "shoe") - the
+    # single-survivor rule above never fires because there are several
+    # survivors, not because the match is actually ambiguous. The genuine
+    # ambiguity case Finding 3 is guarding against is a survivor that
+    # DIDN'T make the top keyword score riding along with ones that did
+    # (e.g. a "Running Cap" hard-filtered alongside real running shoes
+    # would score lower on "shoes" and be excluded from best_ids). So the
+    # safe generalization is: every hard-filter survivor is ALSO a
+    # top-scoring match - no lower-scoring outlier is hiding among them.
+    # That is a strict superset of the single-survivor case (trivially
+    # true when there is only one) and never fires on a mixed bag.
+    all_survivors_are_top_matches = bool(shortlisted_ids) and shortlisted_ids.issubset(best_ids)
+
+    # Batch 4 fix (V2 completion audit): `rank_and_filter`'s own score/order
+    # used to be read ONLY for shortlist membership above - `evidence_products`
+    # was then built by iterating `products` in the adapter's raw search-
+    # result order, so ranking (budget/must-have/priority scoring, and this
+    # batch's own durable-memory personalization) could change WHICH
+    # products were verified but never the ORDER they were shown in. A
+    # shopper's stated priority or a signed-in durable preference had no
+    # visible effect on the shown sequence at all - live-reproduced:
+    # `prefers_lightweight` never moved a genuinely lightweight-described
+    # product up, because nothing downstream of `rank_and_filter` ever
+    # consulted its own ordering. Reordered here to `shortlist`'s real
+    # order for every hard-filter survivor, followed by every
+    # non-survivor in its original order (so a filtered-out product is
+    # still reported on, never silently dropped from evidence - only
+    # WHERE it appears among survivors changes).
+    id_to_product = {p.product_id: p for p in products}
+    ranked_survivors = [
+        id_to_product[pid] for pid in (p["product_id"] for p in shortlist)
+        if pid in id_to_product
+    ]
+    non_survivors = [p for p in products if p.product_id not in shortlisted_ids]
+    products = ranked_survivors + non_survivors
 
     evidence_products: list[ProductEvidence] = []
     for p in products:
@@ -153,7 +191,7 @@ def build_evidence(
         # confirmed match, whichever single reason applies.
         overridden = (
             hard_passed
-            and single_hard_survivor
+            and all_survivors_are_top_matches
             and p.product_id in best_ids
             and weak
             and not diverges
@@ -196,11 +234,60 @@ def build_evidence(
     )
 
 
-def _as_dict(p: Product) -> dict:
+def already_verified_evidence(
+    products: list[Product], evidence_fields_by_id: dict[str, list[str]] | None = None
+) -> TurnEvidence:
+    """Shared-contract helper for a capability whose products are already
+    trusted by construction - the shopper explicitly named or is directly
+    re-examining them (comparison's `active_products` targets,
+    trade-off's re-ranked set), not a fresh query result `build_evidence`'s
+    hard-filter/relevance-scoring pass would need to verify.
+
+    Deliberately NOT built by calling `build_evidence` itself: that
+    function's hard filter (`mission_ranking.rank_and_filter`) would
+    re-apply the shopper's CURRENT budget/exclusions to a product they
+    explicitly named a turn ago - silently dropping a comparison target
+    the shopper is looking straight at because a later, unrelated
+    statement changed their budget would be a real regression, not a
+    correctness improvement. `compare.py` and `tradeoff.py` both used to
+    hand-roll this identical shape (one `ProductEvidence` per product,
+    `hard_constraints_passed=True`, `relevance_verified=True`,
+    `relevance_score=0`, `weak_match=False`) with only `evidence_fields`
+    differing - consolidated here so a third capability with the same
+    "already-in-view, already-trusted" shape (a future post-purchase or
+    return-risk module, say) has one real place to reuse rather than a
+    third hand-rolled copy."""
+    fields_by_id = evidence_fields_by_id or {}
+    return TurnEvidence(
+        query=None,
+        products=[
+            ProductEvidence(
+                product_id=p.product_id,
+                exists=True,
+                hard_constraints_passed=True,
+                relevance_verified=True,
+                relevance_score=0,
+                weak_match=False,
+                evidence_fields=fields_by_id.get(p.product_id, []),
+            )
+            for p in products
+        ],
+    )
+
+
+def product_as_dict(p: Product) -> dict:
     """The plain-dict shape `mission_ranking.rank_and_filter` already
     expects (see `engine/api/chat.py`'s own RECOMMEND_PRODUCTS branch,
     which builds an equivalent dict before calling it) - field names match
-    that existing contract exactly, not reinvented here."""
+    that existing contract exactly, not reinvented here.
+
+    Public (promoted from the former `_as_dict`) so every V2 module that
+    needs to hand a `Product` to `mission_ranking` uses this ONE
+    conversion - `pipeline.py`'s semantic-judge hard-constraint check
+    (`_judge_pick_passes_hard_filter`) and `tradeoff.py`/`compare.py`'s
+    shared-evidence adoption both need it; a second private copy is
+    exactly the duplication this package's shared-contract work exists to
+    close."""
     return {
         "product_id": p.product_id,
         "title": p.title,
@@ -210,4 +297,101 @@ def _as_dict(p: Product) -> dict:
         "availability": str(p.availability),
         "rating": p.rating,
         "rating_count": p.rating_count,
+    }
+
+
+#: Backward-compatible alias - existing in-module call sites keep working
+#: unchanged; new external callers should use `product_as_dict`.
+_as_dict = product_as_dict
+
+
+#: Internal-only evidence tags (real, but written for THIS module's own
+#: `all_survivors_are_top_matches`/weak-match bookkeeping, not shopper
+#: prose) - never shown verbatim in a "Why this?" panel.
+_INTERNAL_EVIDENCE_TAGS = {
+    "title_or_description_overlap",
+    "sole_hard_filter_survivor_weak_match_overridden",
+}
+
+
+def build_why_v2(
+    evidence: TurnEvidence,
+    shopping_state: dict | None,
+    products: list,
+) -> dict | None:
+    """Grounded "Why this?" panel for a V2 turn - real fields only, the
+    same discipline `engine/api/why.py::explain` already applies for V1,
+    just built from THIS package's own real per-turn signals
+    (`ProductEvidence.evidence_fields` - itself only ever real
+    `mission_ranking.rank_and_filter` `fit_reasons` phrases or a real
+    stock fact - never a model guess) instead of V1's decision/risk
+    rejection list, since a V2 discovery/compare/mission turn has no
+    rejected ACTIONS to report on at all.
+
+    Conversational-flow review fix (Issue #7): V1's own `why` field was
+    never wired into `ChatReplyV2` at all - the frontend's existing
+    "Why this?" button silently never rendered for a single V2 turn,
+    since `turn.why` was always `None`. Returns `None` (never renders)
+    when there is genuinely nothing grounded to show - never a placeholder
+    or invented justification."""
+    verified = [p for p in evidence.products if p.relevance_verified]
+    if not verified:
+        return None
+    top = verified[0]
+
+    evidence_lines = [f for f in top.evidence_fields if f not in _INTERNAL_EVIDENCE_TAGS]
+
+    id_to_product = {
+        (p.product_id if hasattr(p, "product_id") else p.get("product_id")): p
+        for p in products
+    }
+    top_product = id_to_product.get(top.product_id)
+    if top_product is not None:
+        availability = getattr(top_product, "availability", None)
+        if availability is None and isinstance(top_product, dict):
+            availability = top_product.get("availability")
+        if availability:
+            evidence_lines.append(f"in stock: {availability}")
+        return_risk = getattr(top_product, "return_risk", None)
+        if return_risk is None and isinstance(top_product, dict):
+            return_risk = top_product.get("return_risk")
+        for finding in return_risk or []:
+            note = finding.get("note") if isinstance(finding, dict) else None
+            if note:
+                evidence_lines.append(note)
+
+    # What else was real and in view, but didn't make the cut - phrased
+    # generically (never attributing a specific reason to a specific
+    # un-named product this module cannot honestly single out), and only
+    # ever built from the shopper's OWN real stated constraints, exactly
+    # as `mission_ranking.explain_no_match` already does for the no-match
+    # case.
+    declined: list[str] = []
+    non_survivors = [p for p in evidence.products if not p.relevance_verified and p.exists]
+    if non_survivors:
+        reasons: list[str] = []
+        state = shopping_state or {}
+        must_haves = [m for m in (state.get("must_have") or []) if m]
+        budget = state.get("budget_amount")
+        if must_haves:
+            reasons.append(f"didn't confirm {must_haves[0]}" if len(must_haves) == 1 else "didn't confirm every requirement")
+        if budget:
+            reasons.append(f"were over your {budget} budget")
+        if reasons:
+            count = len(non_survivors)
+            declined.append(
+                f"{count} other option{'s' if count != 1 else ''} that {' or '.join(reasons)}"
+            )
+
+    if not evidence_lines and not declined:
+        return None
+
+    found: list[str] = []
+    if evidence.query:
+        found.append(f'Matched against "{evidence.query}".')
+
+    return {
+        "found": found,
+        "declined": declined[:3],
+        "evidence": evidence_lines[:4],
     }

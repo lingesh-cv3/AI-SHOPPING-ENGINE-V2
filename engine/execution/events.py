@@ -98,6 +98,54 @@ async def record(
         )
 
 
+async def rejected_product_ids(connection_id: str, session_id: str) -> set[str]:
+    """Product ids this shopper has already explicitly turned down, THIS
+    session - a proposal they rejected, or something they added then
+    removed again.
+
+    First real read-back of `ShopperEvent` into ranking behaviour (see this
+    module's own docstring: "a future pass can read these rows... this one
+    only establishes where those facts get written" - PROGRESS.md's
+    Personalized Recommendations gap). Deliberately session-scoped, not
+    durable/cross-session: a rejection is a real, timestamped fact about
+    THIS shopper's THIS conversation, not yet a stable cross-visit
+    preference the way a signed-in `ShopperMemoryFact` is - conflating the
+    two would let one impulsive "no thanks" quietly suppress a product for
+    that shopper forever, which is a much stronger claim than the event
+    itself supports.
+
+    Callers use this to DEPRIORITIZE, never hard-exclude - a shopper who
+    explicitly asks for the exact thing they just rejected still gets it;
+    this only stops it from being shown again as the unprompted top pick.
+    """
+    async with session_scope() as db:
+        rows = (
+            await db.execute(
+                select(ShopperEvent.product_id).where(
+                    ShopperEvent.connection_id == connection_id,
+                    ShopperEvent.session_id == session_id,
+                    ShopperEvent.event_type.in_(
+                        (EventType.PROPOSAL_REJECTED, EventType.REMOVE_FROM_CART)
+                    ),
+                    ShopperEvent.product_id.is_not(None),
+                )
+            )
+        ).all()
+    return {row.product_id for row in rows if row.product_id}
+
+
+def deprioritize(ordered_ids: list[str], avoid: set[str]) -> list[str]:
+    """Stable-reorders `ordered_ids` so anything in `avoid` moves to the
+    end, without dropping it - a shopper who explicitly asks for the exact
+    product they already rejected still gets a real answer, it just never
+    wins the "shown first" slot on its own."""
+    if not avoid:
+        return ordered_ids
+    kept = [pid for pid in ordered_ids if pid not in avoid]
+    pushed = [pid for pid in ordered_ids if pid in avoid]
+    return kept + pushed
+
+
 async def shortlist_engagement(
     connection_id: str, *, days: int = 30
 ) -> dict[str, int | float | None]:

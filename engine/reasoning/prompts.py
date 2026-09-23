@@ -67,9 +67,11 @@ def propose_tool() -> dict[str, Any]:
             "name": "propose_actions",
             "description": (
                 "Propose the actions that might help this shopper. Propose "
-                "between one and four, best first. You are proposing only - "
-                "another system decides which one runs and whether it needs "
-                "human approval."
+                "between one and four, best first, UNLESS this message is "
+                "purely conversational (see message_intent), in which case "
+                "propose zero. You are proposing only - another system "
+                "decides which one runs and whether it needs human "
+                "approval."
             ),
             "parameters": {
                 "type": "object",
@@ -119,10 +121,21 @@ def propose_tool() -> dict[str, Any]:
                                 "type": "string",
                                 "description": (
                                     "What they are ultimately trying to buy "
-                                    "or accomplish, in their own terms ('a "
-                                    "lightweight marathon setup'). Only "
-                                    "when newly stated or changed this "
-                                    "message."
+                                    "or accomplish - the CATEGORY/mission "
+                                    "itself ('running shoes', 'a marathon "
+                                    "setup'), not a specific attribute or "
+                                    "requirement folded into the same "
+                                    "phrase. 'I need lightweight shoes' -> "
+                                    "goal='shoes' (or 'running shoes'), "
+                                    "must_have_add=['lightweight'] - NOT "
+                                    "goal='lightweight shoes' with nothing "
+                                    "in must_have_add. Folding a real hard "
+                                    "requirement into the goal string means "
+                                    "it only ever softly influences keyword "
+                                    "search, never actually filters out a "
+                                    "product that fails it - the opposite "
+                                    "of what 'need'/'must' means. Only when "
+                                    "newly stated or changed this message."
                                 ),
                             },
                             "budget_amount": {
@@ -164,7 +177,21 @@ def propose_tool() -> dict[str, Any]:
                             "must_have_add": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "New must-have requirements stated this message.",
+                                "description": (
+                                    "A HARD requirement, stated as non-negotiable - "
+                                    "'I need X', 'it must have X', 'it has to be X', "
+                                    "'require X', 'has to X'. This becomes a real "
+                                    "FILTER: a product that does not satisfy it is "
+                                    "excluded outright, never merely ranked lower. "
+                                    "Do NOT put a soft preference here - 'I prefer "
+                                    "X', 'I'd like X', 'ideally X', 'ally X would be "
+                                    "nice' are NOT must-haves, however strongly "
+                                    "worded; those go in nice_to_have_add/"
+                                    "priorities_add instead, specifically because a "
+                                    "shopper who merely prefers something should "
+                                    "still be shown a good option that lacks it, "
+                                    "just ranked behind one that has it."
+                                ),
                             },
                             "must_have_remove": {
                                 "type": "array",
@@ -173,7 +200,18 @@ def propose_tool() -> dict[str, Any]:
                             "nice_to_have_add": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "New preferences that would help but are not required.",
+                                "description": (
+                                    "A SOFT preference, not a hard requirement - "
+                                    "'I prefer X', 'I'd like X', 'ideally X', "
+                                    "'would be nice', 'ally lean toward X'. This is "
+                                    "a RANKING signal only: a product lacking it can "
+                                    "still be shown, just ranked behind one that has "
+                                    "it when other factors are comparable - never "
+                                    "excluded outright the way must_have_add is. "
+                                    "Use this (never must_have_add) whenever the "
+                                    "shopper's own wording is a preference, not a "
+                                    "requirement, however much they seem to want it."
+                                ),
                             },
                             "nice_to_have_remove": {
                                 "type": "array",
@@ -266,9 +304,41 @@ def propose_tool() -> dict[str, Any]:
                             "additionalProperties": False,
                         },
                     },
+                    "message_intent": {
+                        "type": "string",
+                        "enum": ["shopping", "conversational"],
+                        "description": (
+                            "'shopping' if this message is about products, "
+                            "buying, browsing, comparing, the cart, an "
+                            "order, a payment problem, or otherwise "
+                            "requires looking something up in the catalog "
+                            "or acting on the shopper's behalf - even a "
+                            "vague want ('I need something for camping') "
+                            "or a bare product reference ('the second "
+                            "one') is 'shopping'. 'conversational' if the "
+                            "shopper is greeting you, thanking you, "
+                            "acknowledging something you said, making "
+                            "small talk, asking what you can do in "
+                            "general, or otherwise just talking to you "
+                            "with nothing that needs a catalog lookup or "
+                            "an action - this is a genuine judgment about "
+                            "what the message NEEDS, never a keyword "
+                            "match. When genuinely unsure, prefer "
+                            "'conversational' - guessing 'shopping' wastes "
+                            "a real catalog search on nothing to search "
+                            "for. IMPORTANT: if you set this to "
+                            "'conversational', leave 'actions' EMPTY - do "
+                            "not also propose an action such as "
+                            "RECOMMEND_PRODUCTS just to have something in "
+                            "the list. A conversational judgment and a "
+                            "proposed action are contradictory; only "
+                            "propose an action when the message truly "
+                            "needs one, in which case mark it 'shopping'."
+                        ),
+                    },
                     "actions": {
                         "type": "array",
-                        "minItems": 1,
+                        "minItems": 0,
                         "maxItems": 4,
                         "items": {
                             "type": "object",
@@ -450,7 +520,7 @@ def propose_tool() -> dict[str, Any]:
                         },
                     },
                 },
-                "required": ["diagnosis", "reply", "actions"],
+                "required": ["diagnosis", "reply", "actions", "message_intent"],
                 "additionalProperties": False,
             },
         },
@@ -590,6 +660,14 @@ Rules that matter:
   payment is saying hello - offering to retry their card is answering a
   question they did not ask, and it reads as though nothing else has
   registered. If they want to come back to it they will say so.
+- A bare acknowledgment ("thanks", "sure", "okay", "got it", "that's helpful")
+  states no new want, even right after you showed products or asked a
+  question - mark message_intent "conversational" and leave actions empty.
+  Do not propose RECOMMEND_PRODUCTS or any other action just to keep the
+  conversation going or to offer a plausible-sounding next step; offering
+  "more options" nobody asked for is exactly the guessing this tool exists
+  to avoid. If the shopper wants something more, they will say so, and that
+  next message is what you act on, not this one.
 - When a shopper names more than one product to add in the same message
   ("the Trailblazer and the Marathon Pro"), call propose_actions exactly
   ONCE, the same as always, and put one ADD_TO_CART object per product
@@ -767,6 +845,15 @@ def _synthesis_prompt(
         lines.append("  - " + ", ".join(str(b) for b in bits if b))
     parts.append(f"{label}:\n" + "\n".join(lines))
 
+    if kind == "recommendation":
+        parts.append(
+            "The shopper is explicitly asking which one YOU recommend, after seeing "
+            "both - a request for a decisive pick, not another neutral side-by-side "
+            "description. Name the one that best fits their stated mission/constraints "
+            "above (or, if truly nothing distinguishes them for what was stated, say so "
+            "honestly rather than picking arbitrarily) and give the real reason, grounded "
+            "only in the facts above - never invent a preference they did not state."
+        )
     parts.append(
         "Write the reply now - two to three sentences, grounded only in the facts above. "
         "Then call write_synthesis with that reply, a true/false personalizes flag stating "
@@ -1156,13 +1243,19 @@ def cart_reference_prompt(
         "decision about a specific thing while the first group only names "
         "a category or repeats a want.\n\n"
         "What operation does this message ask for - add/remove/set_quantity/"
-        "clear/none? If add/remove/set_quantity and you can tell which item, "
-        "give its 1-based position in the RELEVANT list above "
-        "(reference_type='ordinal' with position), or its name "
-        "(reference_type='name' with named_hint set to the exact title text "
-        "you matched against), or 'pronoun' if it's a bare reference like "
-        "'it'/'that one' with nothing else to go on. If a quantity is "
-        "stated, give it; otherwise leave it unset. Call "
+        "clear/none? If add/remove/set_quantity, decide reference_type:\n"
+        "  - 'all': the shopper means EVERY item in the relevant list "
+        "collectively, not just one - 'add both', 'add both of those', "
+        "'add these two', 'get me all of them', 'I'll take everything you "
+        "showed me'. Check for this FIRST, before considering the others -"
+        " 'both' and 'these two' always mean 'all', never 'pronoun'.\n"
+        "  - 'ordinal': the shopper names a position ('the first one', "
+        "'the second'), with position set to its 1-based number.\n"
+        "  - 'name': the shopper names the product, with named_hint set to "
+        "the exact title text you matched against.\n"
+        "  - 'pronoun': a bare SINGULAR reference with nothing else to go "
+        "on ('it', 'that one', 'this') - never for 'both'/'these two'.\n"
+        "If a quantity is stated, give it; otherwise leave it unset. Call "
         "interpret_cart_reference."
     )
     return "\n\n".join(parts)
@@ -1205,8 +1298,19 @@ def cart_reference_tool() -> dict[str, Any]:
                     },
                     "reference_type": {
                         "type": "string",
-                        "enum": ["ordinal", "pronoun", "name", "none"],
-                        "description": "How the target item was referred to, if applicable. 'none' if is_cart_intent is false, operation is 'clear', or the reference could not be resolved.",
+                        "enum": ["ordinal", "pronoun", "name", "all", "none"],
+                        "description": (
+                            "How the target item was referred to, if applicable. "
+                            "'all' means the shopper refers to EVERY currently-shown "
+                            "item collectively, not one of them - e.g. 'add both', "
+                            "'add these two', 'get me all of them', 'add everything "
+                            "you showed me'. Only 'all' when the shopper's words "
+                            "clearly mean the whole set, never a guess at how many "
+                            "items exist - the caller resolves that against the real "
+                            "list, never this tool. 'none' if is_cart_intent is "
+                            "false, operation is 'clear', or the reference could not "
+                            "be resolved."
+                        ),
                     },
                     "position": {
                         "type": "integer",
@@ -1232,13 +1336,27 @@ _MISSION_REFERENCE_SYSTEM_PROMPT = (
     "mission - a trip with several independent things to buy (e.g. "
     "'running shoes', 'socks', 'a hydration bottle'). You are given the "
     "REAL list of items already tracked this conversation, each shown only "
-    "by its 1-based position and a short label - you never see or invent a "
-    "real product or an internal id. Decide two independent things. "
+    "by its 1-based position, a short label, and (when any exist) a few "
+    "REAL candidate product titles already found for it - you never see or "
+    "invent a real product or an internal id beyond those exact titles. "
+    "IMPORTANT: if the message names a specific product and that name "
+    "matches (exactly or as a clear substring) one of an existing item's "
+    "own candidate_titles, that is NOT a new item - it is the shopper "
+    "picking/naming the thing that item already is. Resolve it as "
+    "reference_type='name' with named_hint set to that exact candidate "
+    "title, and do NOT also list it in new_item_labels. Only use "
+    "new_item_labels for something that matches no existing item's label "
+    "or candidate_titles at all. Example: item 1 is tracked as 'shoes' "
+    "with candidate_titles including 'Trailblazer Running Shoe'; the "
+    "shopper says 'add the Trailblazer' -> reference_type='name', "
+    "named_hint='Trailblazer Running Shoe', new_item_labels=[] - never "
+    "new_item_labels=['Trailblazer']. Decide two independent things. "
     "First: does this message introduce any BRAND NEW item(s) not already "
-    "in the list ('I need running shoes, socks and a hydration bottle' "
-    "with an empty list -> three new labels; 'I also need a water bottle' "
-    "with shoes already tracked -> one new label)? Give each as a short "
-    "noun-phrase label, not a full sentence. Second: does this message "
+    "in the list AND not matching any existing item's candidates "
+    "('I need running shoes, socks and a hydration bottle' with an empty "
+    "list -> three new labels; 'I also need a water bottle' with shoes "
+    "already tracked -> one new label)? Give each as a short noun-phrase "
+    "label, not a full sentence. Second: does this message "
     "REFINE or REFER TO an item already in the list ('make the shoes "
     "lightweight', 'for the socks, I want black', 'under 5000 for the "
     "shoes', 'I've decided on that one')? If so, resolve which one the "
@@ -1275,8 +1393,15 @@ def mission_reference_prompt(
     independently resolved by the caller. `history` is the same bounded
     recent-turns window the rest of this codebase's Context Builder already
     uses."""
+    def _item_line(i: int, item: dict) -> str:
+        titles = [t for t in (item.get("candidate_titles") or []) if t]
+        if not titles:
+            return f"  {i + 1}. {item['label']}"
+        shown = ", ".join(titles[:8])
+        return f"  {i + 1}. {item['label']} (candidates already found: {shown})"
+
     items_list = "\n".join(
-        f"  {i + 1}. {item['label']}" for i, item in enumerate(current_items[:10])
+        _item_line(i, item) for i, item in enumerate(current_items[:10])
     )
     recent = "\n".join(f"  - {h}" for h in (history or [])[-4:])
     parts = [f"Shopper's message: {message!r}"]
@@ -1316,7 +1441,14 @@ def mission_reference_tool() -> dict[str, Any]:
                     "new_item_labels": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Short noun-phrase labels for brand-new items this message introduces. Empty if none.",
+                        "description": (
+                            "Short noun-phrase labels for brand-new items this "
+                            "message introduces. Empty if none. Never include "
+                            "a name that matches (exactly or as a clear "
+                            "substring) an existing item's own label or its "
+                            "candidate_titles - that is reference_type='name' "
+                            "on the existing item, not a new item."
+                        ),
                     },
                     "reference_type": {
                         "type": "string",
@@ -1329,7 +1461,22 @@ def mission_reference_tool() -> dict[str, Any]:
                     },
                     "named_hint": {
                         "type": "string",
-                        "description": "The label text (or a clear substring of it) the shopper's words matched, when reference_type is 'name'.",
+                        "description": (
+                            "WHICH tracked item this message means - the "
+                            "item's own label text (e.g. 'shoes'), OR a real "
+                            "candidate product title already found for it "
+                            "(e.g. 'Trailblazer Running Shoe'), when "
+                            "reference_type is 'name'. This field identifies "
+                            "the ITEM being referred to - it is NEVER the "
+                            "new constraint/attribute/preference the message "
+                            "states about it. 'For the shoes, I want "
+                            "something lightweight' -> named_hint='shoes' "
+                            "(the item), must_have_add or nice_to_have_add "
+                            "=['lightweight'] (the new fact about it) - "
+                            "named_hint is NEVER 'lightweight' here, even "
+                            "though that is the word right next to 'the "
+                            "shoes' - it names the target, not the change."
+                        ),
                     },
                     "constraints_add": {"type": "array", "items": {"type": "string"}},
                     "must_have_add": {"type": "array", "items": {"type": "string"}},

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from engine.execution.mission_ranking import _matches, _text_of, _uncertain
+from engine.execution.mission_ranking import _matches, _text_of
 
 #: Below this many ratings, a numeric average is not evidence of anything -
 #: three five-star reviews and three one-star reviews average identically
@@ -136,19 +136,37 @@ def assess_product(
             continue
         if _matches(text, requirement):
             continue  # confirmed by the product's own description - no concern
-        if _uncertain(text, requirement):
-            title = product.get("title", "this product")
-            findings.append(
-                ReturnRiskFinding(
-                    kind="unconfirmed_requirement",
-                    evidence_type="inferred_concern",
-                    message=(
-                        f"You said {requirement!r} matters, but {title}'s own "
-                        f"description doesn't confirm that - worth checking "
-                        f"before you buy."
-                    ),
-                    product_id=product["product_id"],
-                )
+        # Value-bar review finding: this used to gate on `_uncertain`, which
+        # only recognises a stated requirement as worth flagging when a
+        # narrow, explicit "related-but-not-equivalent" term is present
+        # (the ONLY entry in that table is "waterproof") or - after that
+        # function was separately widened for its OTHER caller, the
+        # exclusion hard-filter in mission_ranking.rank_and_filter - when a
+        # multi-word phrase partially overlaps. Either way, a shopper's
+        # single-word must-have/priority ("breathable", "lightweight")
+        # stated in the overwhelmingly common way people actually phrase
+        # these could never produce a finding at all, silently narrowing
+        # this module's own documented promise ("a stated requirement...
+        # the product's own description does not confirm") down to a
+        # near-unreachable edge case. `_matches` already established this
+        # requirement is NOT confirmed - that fact alone, real and grounded
+        # in the shopper's own explicit statement plus the merchant's own
+        # text, is the finding; no second, narrower gate is needed on top
+        # of it for this advisory-only signal (unlike the exclusion hard-
+        # filter, which genuinely needs the confident/uncertain distinction
+        # because it decides whether to block a product outright).
+        title = product.get("title", "this product")
+        findings.append(
+            ReturnRiskFinding(
+                kind="unconfirmed_requirement",
+                evidence_type="inferred_concern",
+                message=(
+                    f"You said {requirement!r} matters, but {title}'s own "
+                    f"description doesn't confirm that - worth checking "
+                    f"before you buy."
+                ),
+                product_id=product["product_id"],
             )
+        )
 
     return findings

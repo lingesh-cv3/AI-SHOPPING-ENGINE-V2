@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AccountMenu } from "./AccountMenu";
 import {
   api,
@@ -18,8 +18,7 @@ import {
 import { OpsConsole } from "./OpsConsole";
 import { CartPanel } from "./CartPanel";
 import { ProposalsPanel } from "./ProposalsPanel";
-import { ChatWidget } from "./ChatWidget";
-import { ShopperV2Panel } from "./ShopperV2Panel";
+import { ChatWidget, mapV2Reply } from "./ChatWidget";
 import { Gates } from "./Gates";
 import { MerchantConsole } from "./MerchantConsole";
 import { OrderView } from "./OrderView";
@@ -115,8 +114,29 @@ export default function App() {
   // catch up.
   // Who is signed in here, if anybody. Asked once per merchant on load.
   const [account, setAccount] = useState<Account | null>(null);
+  // See the mount effect's own StrictMode comment below - this survives the
+  // double-invoke because refs, unlike the request itself, are shared
+  // across it (same mounted instance, not a remount).
+  const whoAmIRanFor = useRef<string | null>(null);
 
   useEffect(() => {
+    // React 18 StrictMode (dev only) runs this effect twice in a row on
+    // mount - `cancelled` above only ever guarded the STATE UPDATE against
+    // a stale response, not the request itself, so both invocations still
+    // fired a real `whoAmI` call. Live-reproduced root cause of the visitor-
+    // cookie race below: this browser's very first request carries no
+    // `cv3_visitor` cookie yet, so the server mints one and returns it via
+    // `Set-Cookie` (engine/api/auth.py::visitor) - firing that TWICE in
+    // parallel makes the server mint two DIFFERENT cookies, and the browser
+    // keeps whichever `Set-Cookie` it processed last, silently orphaning
+    // whatever the other request's cookie had already claimed (a cart, a
+    // chat session) - surfacing later as an otherwise-inexplicable 404
+    // ("no such conversation") on the shopper's first real message. Guarded
+    // by the last connection actually fetched, not a bare boolean, so a
+    // genuine merchant switch still re-fetches - only the immediate
+    // StrictMode duplicate for the SAME connection is skipped.
+    if (whoAmIRanFor.current === connection) return;
+    whoAmIRanFor.current = connection;
     let cancelled = false;
     whoAmI(connection).then((who) => {
       if (!cancelled) setAccount(who);
@@ -149,40 +169,14 @@ export default function App() {
   const [pipeline, setPipeline] = useState<Pipeline | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // See this effect's own StrictMode comment below.
+  const bootstrappedRef = useRef(false);
 
   // The chat is controlled here so the storefront can start a conversation the
   // shopper did not - when a search finds nothing, the assistant opens itself.
   const [chatOpen, setChatOpen] = useState(false);
   const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
   const [openedForDeadSearch, setOpenedForDeadSearch] = useState(false);
-
-  // Main-Shopper V1<->V2 cutover. V2 (ShopperV2Panel, real /api/v2/chat
-  // traffic) is the default assistant a normal shopper sees - V1
-  // (ChatWidget, unmodified) remains fully intact and reachable through the
-  // "Switch to classic assistant" control, never deleted or disabled.
-  // Two controlled rollback mechanisms, per CLAUDE.md's migration section:
-  // an operator-level one (VITE_SHOPPER_DEFAULT=v1 in storefront/.env.local,
-  // set at build time, no code change needed to roll every shopper back)
-  // and a per-session one (the in-panel link below, remembered for the rest
-  // of this browser session via sessionStorage so a shopper's own choice
-  // survives a page reload but never leaks to another shopper or tab).
-  const [assistantMode, setAssistantMode] = useState<"v1" | "v2">(() => {
-    if (import.meta.env.VITE_SHOPPER_DEFAULT === "v1") return "v1";
-    try {
-      const stored = sessionStorage.getItem("cv3_assistant_mode");
-      if (stored === "v1" || stored === "v2") return stored;
-    } catch {
-      /* sessionStorage unavailable - fall through to the default */
-    }
-    return "v2";
-  });
-  useEffect(() => {
-    try {
-      sessionStorage.setItem("cv3_assistant_mode", assistantMode);
-    } catch {
-      /* best effort only - never block on this */
-    }
-  }, [assistantMode]);
 
   // Pipeline stages, rule names, token counts. Off by default, on for demos.
   const [showEngine, setShowEngine] = useState(false);
@@ -204,14 +198,22 @@ export default function App() {
 
         // A search that found nothing. Rather than leaving the shopper looking at an
         // empty page with a diagnostic panel beside it, the assistant opens and
-        // explains - which is what a person in a shop would do.
+        // explains - which is what a person in a shop would do. Powered by
+        // /api/v2/chat, with the real "friction=DEAD_SEARCH" signal now sent
+        // explicitly (chat_v2.py's own `ChatRequestV2.friction` field) rather
+        // than left for the model to guess from the sentence alone - routes to
+        // the real FRICTION_RECOVERY capability (engine/shopper_v2/
+        // friction_recovery.py), which offers the merchant's own real
+        // department list instead of a generic apology.
         setDeadSearch(q);
 
-        const reply = await api.chat(
+        const reply = await api.chatV2(
           sessionId,
           `I searched for "${q}" and nothing came up.`,
-          { friction: "DEAD_SEARCH", query: q, cartId: cart?.cart_id },
+          cart?.cart_id,
+          "DEAD_SEARCH",
         );
+        const mapped = mapV2Reply(reply);
 
         setChatTurns((prev) => [
           ...prev,
@@ -219,8 +221,8 @@ export default function App() {
           {
             speaker: "assistant",
             text: reply.reply,
-            products: reply.products,
-            awaitingPerson: reply.awaiting_person,
+            products: mapped.products,
+            awaitingPerson: mapped.awaitingPerson,
             usedModel: reply.used_model,
           },
         ]);
@@ -237,8 +239,6 @@ export default function App() {
         } else if (!chatOpen) {
           setUnread((n) => n + 1);
         }
-
-        setPipeline(fromChat(reply, "DEAD_SEARCH"));
       } catch (e) {
         setError(shopperMessage(e));
       } finally {
@@ -255,6 +255,16 @@ export default function App() {
     document.title = merchant.name;
   }, [merchant]);
   useEffect(() => {
+    // Same StrictMode double-invoke as the `whoAmI` effect above, and the
+    // same real consequence here: with no stored cart yet, BOTH invocations
+    // read the same (empty) `cartKey` and each call `api.createCart()`,
+    // creating two real baskets from one page load - live-reproduced via
+    // Playwright network tracing, alongside the matching double
+    // `/api/account/me` fetch, both racing to mint the visitor cookie (see
+    // `whoAmIRanFor`'s own comment). `[]` deps means mount-only, so a bare
+    // once-guard is enough here - no connection-switch case to preserve.
+    if (bootstrappedRef.current) return;
+    bootstrappedRef.current = true;
     load("", null);
     api.connections().then(setConnections).catch(() => {});
     api.departments().then((d) => setDepts(d.departments)).catch(() => {});
@@ -292,16 +302,31 @@ export default function App() {
         })
       : api.createCart();
       
-    // And the same for the conversation: a shopper we cannot find is a new
-    // shopper. Deleting the database used to leave the browser holding an id
-    // nothing knew about, and the only cure was clearing storage by hand.
-    const sessionKey = `cv3_session_${connection}`;
-    const knownSession = sessionStorage.getItem(sessionKey);
-    if (knownSession) {
-      api.transcript(knownSession).catch(() => {
-        sessionStorage.removeItem(sessionKey);
-      });
-    }
+    // Structural fix, live-reproduced: this used to also clear the session
+    // key on ANY transcript-fetch failure, including the completely
+    // ordinary "nothing sent yet" 404 every brand-new session gets (the
+    // transcript route is read-only and structurally never claims an
+    // untouched session - see engine/api/auth.py::may_touch's own
+    // docstring). That 404 is indistinguishable at the HTTP level from a
+    // genuinely orphaned id (server data wiped under a still-remembered
+    // browser id), so this was deleting a session `sessionFor()` had just
+    // freshly created, moments after creating it - and since `sessionId`
+    // is deliberately DERIVED fresh on every render (not held in state,
+    // see that comment above), a later render would then mint a SECOND,
+    // different id before the shopper's first real message ever went out,
+    // and the composer's own POST could land on either one depending on
+    // timing. Reproduced live via Playwright: three different session ids
+    // observed within one page load, and an intermittent 404 on the
+    // shopper's own first chat message as a direct result.
+    //
+    // No replacement recovery is needed here: a genuinely orphaned id
+    // (server data wiped) already self-heals on the shopper's next REAL
+    // write - `require_owner`'s claim-on-first-touch treats an id the
+    // server has never seen as simply unclaimed, and claims it fresh
+    // (`engine/db/owners.py::may_touch`). This read-only pre-check's only
+    // job was cosmetic (skip an empty "checking history" flash), never
+    // load-bearing for correctness - so removing it trades a nonexistent
+    // benefit for closing a real, reproduced bug.
 
     cartReady
       .then((c) => {
@@ -371,25 +396,19 @@ export default function App() {
     }
   }
 
-  /** Report friction to the engine as a conversation rather than a diagnostic.
-   *
-   *  Dead search, a declined card and a rejected coupon are all the same shape from
-   *  the shopper's side: something went wrong and they need to know what to do. They
-   *  get an assistant that explains. The pipeline trace comes back on the same
-   *  response, so the demo panel costs no extra model call.
+  /** Report friction to the engine as a conversation rather than a
+   *  diagnostic - a declined card or a rejected coupon get a real,
+   *  grounded explanation from the assistant, the same as any other
+   *  question. Powered by /api/v2/chat, with the real friction type now
+   *  sent explicitly (chat_v2.py's own `ChatRequestV2.friction` field) so
+   *  it routes to the real FRICTION_RECOVERY/PAYMENT_RECOVERY capability
+   *  (engine/shopper_v2/friction_recovery.py,
+   *  engine/shopper_v2/payment_recovery.py) instead of leaving the model
+   *  to guess the kind of help needed from the sentence alone.
    */
-  const reportFriction = async (
-    friction: string,
-    shopperLine: string,
-    opts: { query?: string; orderId?: string; known?: Record<string, string> } = {},
-  ) => {
-    const reply = await api.chat(sessionId, shopperLine, {
-      friction,
-      query: opts.query,
-      cartId: cart?.cart_id,
-      orderId: opts.orderId,
-      known: opts.known,
-    });
+  const reportFriction = async (shopperLine: string, friction: string) => {
+    const reply = await api.chatV2(sessionId, shopperLine, cart?.cart_id, friction);
+    const mapped = mapV2Reply(reply);
 
     setChatTurns((prev) => [
       ...prev,
@@ -397,8 +416,8 @@ export default function App() {
       {
         speaker: "assistant",
         text: reply.reply,
-        products: reply.products,
-        awaitingPerson: reply.awaiting_person,
+        products: mapped.products,
+        awaitingPerson: mapped.awaitingPerson,
         usedModel: reply.used_model,
       },
     ]);
@@ -412,7 +431,6 @@ export default function App() {
       setUnread((n) => n + 1);
     }
 
-    setPipeline(fromChat(reply, friction));
     return reply;
   };
 
@@ -437,11 +455,7 @@ export default function App() {
       } catch (e) {
         // A rejected coupon is friction, not a dead end. The shopper gets an
         // explanation and an alternative rather than a red error line.
-        await reportFriction(
-          "PROMOTION_FAILED",
-          `My code "${code.toUpperCase()}" didn't work.`,
-          { known: { code: code.toUpperCase() } },
-        );
+        await reportFriction(`My code "${code.toUpperCase()}" didn't work.`, "PROMOTION_FAILED");
         throw e;
       }
     });
@@ -497,11 +511,7 @@ export default function App() {
         // No session_id reached the backend (should not happen from this
         // storefront, but the field is optional) - fall back to the old
         // generic path rather than showing nothing.
-        await reportFriction(
-          "PAYMENT_DECLINED",
-          "My payment didn't go through.",
-          { orderId: r.order?.order_id },
-        );
+        await reportFriction("My payment didn't go through.", "PAYMENT_DECLINED");
       }
 
       // Take the shopper to the order either way. A declined order still exists and
@@ -730,22 +740,14 @@ export default function App() {
         </>
       )}
 
-      {shopView && assistantMode === "v2" && (
-        <ShopperV2Panel
-          cartId={cart?.cart_id}
-          onCartChanged={refreshCart}
-          defaultOpen
-          onSwitchToClassic={() => setAssistantMode("v1")}
-        />
-      )}
-
-      {shopView && assistantMode === "v1" && (
+      {shopView && (
         <ChatWidget
           sessionId={sessionId}
           cartId={cart?.cart_id}
           orderId={openOrder ?? undefined}
           open={chatOpen}
           turns={chatTurns}
+          depts={depts}
           onOpen={() => {
             setChatOpen(true);
             setUnread(0);
@@ -769,17 +771,6 @@ export default function App() {
           }
           onUnread={(n) => setUnread((prev) => prev + n)}
         />
-      )}
-
-      {shopView && assistantMode === "v1" && (
-        <button
-          type="button"
-          className="v2-switch-back"
-          data-testid="assistant-switch-to-v2"
-          onClick={() => setAssistantMode("v2")}
-        >
-          Try the new assistant
-        </button>
       )}
     </>
   );

@@ -26,7 +26,7 @@ import asyncio
 import logging
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
@@ -1638,6 +1638,49 @@ class ExecutionService:
                 findings = cart_intelligence.analyze_cart(
                     cart, products_by_id, shopping_state
                 )
+                # `_missing_complements` can only ever name a complement by
+                # its raw product id (it has no fetch capability of its own
+                # - see that function's docstring); resolve real titles for
+                # every id actually referenced across those findings here,
+                # where the fetching already happens for this whole
+                # dispatch, and rewrite the message. Bounded: only the ids
+                # a real finding already named, never a fresh unrelated
+                # fetch.
+                missing_complement_ids = {
+                    pid
+                    for f in findings
+                    if f.kind == "missing_complement"
+                    for pid in f.product_ids
+                }
+                if missing_complement_ids:
+                    fetched_complements = await asyncio.gather(
+                        *(adapter.get_product(pid) for pid in missing_complement_ids),
+                        return_exceptions=True,
+                    )
+                    complement_titles = {
+                        p.product_id: p.title
+                        for p in fetched_complements
+                        if isinstance(p, Product)
+                    }
+                    findings = [
+                        (
+                            replace(
+                                f,
+                                message=(
+                                    f.message.split(" usually goes with ")[0]
+                                    + " usually goes with "
+                                    + ", ".join(
+                                        complement_titles.get(pid, pid)
+                                        for pid in f.product_ids
+                                    )
+                                    + " - not in your cart yet."
+                                ),
+                            )
+                            if f.kind == "missing_complement"
+                            else f
+                        )
+                        for f in findings
+                    ]
                 # A diagnosis with nothing to do about it is the "read-only
                 # twin" anti-pattern CLAUDE.md names explicitly - so the one
                 # finding this can act on (a real, merchant-declared
@@ -1688,6 +1731,27 @@ class ExecutionService:
                             for f in findings
                         ],
                         "created_proposal": created_proposal,
+                        # Real cart-line data, already fetched above for
+                        # `analyze_cart` itself - included so a caller
+                        # (engine/shopper_v2/cart_intelligence_v2.py) can
+                        # compute a CONCRETE suggestion ("remove X to get
+                        # under budget") grounded in real prices, without a
+                        # second fetch of the same cart.
+                        "lines": [
+                            {
+                                "product_id": line.product_id,
+                                "title": line.title,
+                                "quantity": line.quantity,
+                                "line_total": (
+                                    str(line.line_total.amount)
+                                    if line.line_total is not None else None
+                                ),
+                            }
+                            for line in cart.lines
+                        ],
+                        "grand_total": (
+                            str(cart.grand_total.amount) if cart.grand_total is not None else None
+                        ),
                     },
                 )
             case ActionType.PROPOSE_CART_CHANGE:

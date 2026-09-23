@@ -23,34 +23,81 @@ The catalog is built to exercise specific cases rather than to look full:
 
 import hashlib
 
-# (id, title, dept, price, was, stock_state, qty, sizes, blurb)
-# sizes: None, or a list of (label, qty). price/was in rupees.
+# (id, title, dept, price, was, stock_state, qty, sizes, blurb, subcategories)
+# sizes: None, or a list of (label, qty). price/was in rupees. subcategories is
+# None or a list of real, merchant-declared subcategory tags - the same kind
+# of data `dept` already is, just one level more specific, so a shopper asking
+# for a category by its ordinary name ("running shoes") is not at the mercy of
+# whichever single product's title happens to contain that literal word (see
+# engine/execution/relevance.py's own docstring on why word-overlap re-scoring
+# needs real category text to work with, not just titles).
 _ROWS = [
     # ---- Footwear ----
+    # Ten genuinely distinct running shoes, spanning budget to premium, with
+    # real spec/use-case/stock differences - built so discovery/ranking has
+    # actual diversity to reason over instead of one usable result surrounded
+    # by near-duplicates. Every one of these actually is a running shoe;
+    # P1003/P1004/P1007 below deliberately are NOT, to keep the "Running
+    # Shoes" tag an honest, real distinction rather than everything in
+    # Footwear getting it.
     ("P1001", "Trailblazer Running Shoe", "Footwear", 4299, 5499, "Y", 42,
      [("7", 12), ("8", 18), ("9", 12), ("10", 0)],
-     "Lightweight daily trainer with a cushioned midsole."),
+     "Lightweight daily trainer with a cushioned midsole.",
+     ["Running Shoes"]),
     ("P1002", "Marathon Pro Racing Shoe", "Footwear", 12499, None, "LOW", 3,
      [("8", 1), ("9", 2)],
-     "Carbon plate, built for race day."),
+     "Carbon plate, built for race day.",
+     ["Running Shoes", "Racing Shoes"]),
     ("P1003", "Everyday Canvas Sneaker", "Footwear", 1899, None, "Y", 60, None,
-     "Simple canvas upper, rubber sole."),
+     "Simple canvas upper, rubber sole.",
+     None),
     ("P1004", "Court Classic Tennis Shoe", "Footwear", 3499, None, "N", 0, None,
-     "Flat sole, leather upper."),
+     "Flat sole, leather upper.",
+     ["Tennis Shoes"]),
     ("P1005", "Fell Runner Trail Shoe", "Footwear", 6799, 7999, "Y", 21,
      [("7", 4), ("8", 9), ("9", 8)],
-     "Aggressive lugs for wet ground and loose rock."),
+     "Aggressive lugs for wet ground and loose rock.",
+     ["Running Shoes", "Trail Running Shoes"]),
     ("P1006", "Recovery Slide", "Footwear", 1499, None, "Y", 88,
      [("S", 30), ("M", 34), ("L", 24)],
-     "Contoured foam for after a long run."),
+     "Contoured foam for after a long run.",
+     None),
     # Every variant sold out while the parent still reports stock. The adapter
     # must let the count win over the flag.
     ("P1007", "Studio Training Flat", "Footwear", 2799, None, "Y", 5,
      [("7", 0), ("8", 0), ("9", 0)],
-     "Low profile, wide toe box, gym floor grip."),
+     "Low profile, wide toe box, gym floor grip.",
+     ["Training Shoes"]),
     ("P1008", "Winter Road Shoe", "Footwear", 5299, None, "LOW", 2,
      [("9", 1), ("10", 1)],
-     "Water-resistant knit with a reflective heel."),
+     "Water-resistant knit with a reflective heel for cold-weather running.",
+     ["Running Shoes"]),
+    ("P1009", "Starter Road Running Shoe", "Footwear", 1999, None, "Y", 55,
+     [("7", 14), ("8", 20), ("9", 16), ("10", 5)],
+     "Budget-friendly entry trainer for new runners building up mileage.",
+     ["Running Shoes"]),
+    ("P1010", "Cloudstep Max Cushion Running Shoe", "Footwear", 9499, 10999, "Y", 17,
+     [("8", 5), ("9", 7), ("10", 5)],
+     "Maximalist stack height for long, easy miles and tired legs.",
+     ["Running Shoes", "Max Cushion Shoes"]),
+    ("P1011", "Featherline Speed Running Shoe", "Footwear", 6299, None, "LOW", 3,
+     [("8", 1), ("9", 2)],
+     "Ultra-light tempo trainer for fast sessions, not everyday miles.",
+     ["Running Shoes", "Lightweight Shoes"]),
+    ("P1012", "Highridge Waterproof Trail Running Shoe", "Footwear", 8799, None, "Y", 13,
+     [("8", 4), ("9", 5), ("10", 4)],
+     "Sealed waterproof membrane and deep lugs for wet, technical trail.",
+     ["Running Shoes", "Trail Running Shoes"]),
+    ("P1013", "StableStride Support Running Shoe", "Footwear", 5499, None, "Y", 24,
+     [("8", 7), ("9", 9), ("10", 8)],
+     "Medial post for overpronation, built for stability over long distances.",
+     ["Running Shoes", "Stability Shoes"]),
+    # Deliberately sold out entirely - out-of-stock running shoe, so
+    # discovery/ranking has a real, genuinely relevant candidate to degrade
+    # honestly around rather than only ever seeing in-stock diversity.
+    ("P1014", "Apex Carbon Racing Shoe", "Footwear", 15999, None, "N", 0, None,
+     "Full-length carbon plate racing shoe for competition day only.",
+     ["Running Shoes", "Racing Shoes"]),
 
     # ---- Apparel ----
     ("P2001", "Merino Base Layer Tee", "Apparel", 2799, None, "Y", 25,
@@ -158,7 +205,9 @@ _COMPATIBLE_WITH: dict[str, list[str]] = {
 
 
 def _build(row):
-    pid, title, dept, price, was, state, qty, sizes, blurb = row
+    if len(row) == 9:
+        row = (*row, None)
+    pid, title, dept, price, was, state, qty, sizes, blurb, subcats = row
     rating, rating_count = _rating_for(pid)
     return {
         "product_id": pid,
@@ -167,6 +216,7 @@ def _build(row):
         "price_paise": price * 100,
         "was_price_paise": was * 100 if was else None,
         "dept": dept,
+        "subcategories": list(subcats or []),
         "stock_state": state,
         "qty_available": qty,
         "rating": rating,

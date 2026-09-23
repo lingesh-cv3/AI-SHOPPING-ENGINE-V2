@@ -173,7 +173,10 @@ def to_product(
         compare_at_price=money(raw.get("was_price_paise"), currency),
         availability=availability(raw.get("stock_state"), raw.get("qty_available")),
         url=f"{storefront_url}/product/{raw['product_id']}" if storefront_url else None,
-        categories=[raw["dept"]] if raw.get("dept") else [],
+        categories=(
+            ([raw["dept"]] if raw.get("dept") else [])
+            + list(raw.get("subcategories") or [])
+        ),
         variants=[
             to_variant(v, parent_price=price_paise, currency=currency)
             for v in raw.get("variants", [])

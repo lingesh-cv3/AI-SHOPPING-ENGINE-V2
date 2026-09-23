@@ -70,6 +70,17 @@ class MissionItem(BaseModel):
     #: recent retrieval - never invented, never carried over from a
     #: different item.
     candidates: list[str] = Field(default_factory=list)
+    #: Real product TITLES for `candidates`, same order, same source (the
+    #: adapter's own fetch this item's retrieval already did - never a
+    #: second lookup, never invented). Exists so a shopper naming a specific
+    #: product by name/brand while a mission is active ("add the
+    #: Trailblazer") can be resolved to the tracked item it actually
+    #: belongs to, structurally - see missions.py's own docstring on the
+    #: bug this closes: without real candidate titles, the mission-
+    #: reference interpreter is shown only bare labels ("shoes") and has no
+    #: way to know a named product belongs to that item, so it invents a
+    #: brand-new "ghost" item instead of resolving to the real one.
+    candidate_titles: list[str] = Field(default_factory=list)
     selected_product_id: str | None = None
 
 
@@ -94,6 +105,16 @@ class ShoppingStateV2(BaseModel):
     priorities: list[str] = Field(default_factory=list)
     active_products: list[str] = Field(default_factory=list)
     mission_status: MissionStatus | None = None
+
+    #: Bounded history of recent turns' verified product groups, most
+    #: recent LAST (append order) - see `engine/db/models.py::ShoppingState
+    #: .recent_product_groups`'s own docstring for why this is additive to
+    #: `active_products` rather than a replacement. Populated by
+    #: `orchestrator.py` after each discovery turn; consumed by
+    #: `intent_resolution.py` so a plural reference spanning a topic switch
+    #: ("show shoes" then "show slides" then "add both") can be answered
+    #: from what was actually shown, not just the latest turn.
+    recent_product_groups: list[list[str]] = Field(default_factory=list)
 
     #: Multi-item shopping mission tracking - see `MissionItem`'s own
     #: docstring and `engine/shopper_v2/missions.py`. Empty for an ordinary
@@ -124,6 +145,53 @@ class ShoppingStateV2(BaseModel):
             "active_products": list(self.active_products),
             "mission_status": self.mission_status,
         }
+
+
+#: Bound on how many prior ledger groups `recent_relevant_product_ids` will
+#: walk back through, and how many ids it will ever return - the same
+#: "don't reach back further than makes sense" discipline
+#: `intent_resolution.py::_resolve_all_reference` already applies.
+_MAX_RECENT_LOOKBACK_GROUPS = 2
+_MAX_RECENT_PRODUCT_IDS = 6
+
+
+def recent_relevant_product_ids(
+    state: ShoppingStateV2, *, minimum: int = 1, cap: int = _MAX_RECENT_PRODUCT_IDS,
+) -> list[str]:
+    """Real, already-verified product ids currently relevant to the
+    conversation - `active_products` (this turn's own single-topic focus)
+    extended by prior `recent_product_groups` entries ONLY when the
+    current turn's own set doesn't satisfy `minimum` on its own.
+
+    Shared by `compare.py` and `tradeoff.py` (Batch 2 - "resolve from
+    current AND historical context"): a real, reported gap - "compare the
+    shoes to the slides" after a topic switch could only ever see the
+    slides, because `active_products` alone (like `_clarify_with_ledger`'s
+    identical problem in `intent_resolution.py`) is deliberately
+    overwritten each discovery turn. One shared helper rather than two
+    copies of the same lookback logic - see CLAUDE.md's own standing rule
+    against duplicating this class of fix per call site.
+
+    Never invents: every id here was already a real, `relevance_verified`
+    product from some earlier turn (`orchestrator.py`'s ledger-merge code
+    only ever appends verified ids) - this only decides how far back to
+    look, never which ids exist."""
+    ids = list(dict.fromkeys(state.active_products))
+    if len(ids) >= minimum:
+        return ids[:cap]
+    # `recent_product_groups` is append-ordered, oldest first - its own
+    # last entry duplicates `active_products` in the common case (both are
+    # written from the same verified_ids at the end of a discovery turn),
+    # so walk the REST of it, most-recent-of-the-rest first, bounded to
+    # `_MAX_RECENT_LOOKBACK_GROUPS`.
+    history = list(reversed(state.recent_product_groups[:-1]))[:_MAX_RECENT_LOOKBACK_GROUPS]
+    for group in history:
+        for pid in group:
+            if pid not in ids:
+                ids.append(pid)
+        if len(ids) >= minimum:
+            break
+    return ids[:cap]
 
 
 async def load(session_id: str, connection_id: str) -> ShoppingStateV2:

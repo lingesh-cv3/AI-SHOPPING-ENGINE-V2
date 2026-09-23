@@ -78,7 +78,21 @@ _RELATED_NOT_EQUIVALENT: dict[str, tuple[str, ...]] = {
 
 
 def _text_of(product: dict) -> str:
-    return f"{product.get('title') or ''} {product.get('description') or ''}".lower()
+    """Live-reproduced gap (Batch 2 personalization review): this used to
+    concatenate title+description only, so a durable preference derived
+    from a product's own real CATEGORY (`prefers_footwear`, see
+    `engine/api/chat.py`'s `accept_proposal` derivation) could never
+    actually match anything - almost no product literally repeats its own
+    category name in its title or description text. Measured directly:
+    two real Footwear products scored `reasons={}` against a
+    `prefers_footwear` fact before this fix. Categories are real,
+    merchant-declared data already present on every product this function
+    receives (`product_as_dict`/`_as_dict` already include them) - this is
+    the same kind of structural, grounded signal addition as the stopword
+    fixes elsewhere in this codebase, not a new heuristic or an invented
+    attribute."""
+    categories = " ".join(product.get("categories") or [])
+    return f"{product.get('title') or ''} {product.get('description') or ''} {categories}".lower()
 
 
 def _price_amount(product: dict) -> Decimal | None:
@@ -138,18 +152,49 @@ def _matches(text: str, phrase: str) -> bool:
     return all(_stem(w) in text for w in required)
 
 
-def _uncertain(text: str, exclusion_phrase: str) -> bool:
-    """True when `text` doesn't confidently satisfy `exclusion_phrase` (does
-    not literally match it) but does contain a term this file has explicitly
-    recorded as related-but-not-equivalent - "water-resistant" for a
-    "waterproof" exclusion. An uncertain product is neither confidently
-    excluded (nobody claimed it IS waterproof) nor confidently kept (the
-    merchant's own words raise a real question a stemmed keyword check
-    cannot resolve safely) - see `rank_and_filter`'s own use of this."""
-    related = _RELATED_NOT_EQUIVALENT.get(exclusion_phrase.strip().lower())
-    if not related:
+def _uncertain(text: str, phrase: str) -> bool:
+    """True when `text` shows real but INCOMPLETE evidence for `phrase` -
+    never confidently confirmed (`_matches` already handles that) and never
+    inferred from mere silence either.
+
+    Two independent ways this fires, both genuine positive textual
+    evidence, never a guess:
+
+    1. A term this file has explicitly recorded as related-but-not-
+       equivalent - "water-resistant" for a "waterproof" ask/exclusion.
+    2. SOME but not all of `phrase`'s own distinctive words appear
+       (stemmed) in `text` - a multi-word requirement like "wide toe box"
+       where the text says "toe box" but never "wide" is real, partial
+       evidence of an incomplete match, not nothing.
+
+    A single-word phrase with zero overlap, or ANY phrase where `text`
+    says nothing related to it at all, returns False here - deliberately.
+    Live-reproduced gap this closes (return-risk value-bar review): the
+    original version of this function only ever recognised case 1, and
+    `_RELATED_NOT_EQUIVALENT` has exactly one entry ("waterproof") - so a
+    shopper's stated must-have/priority in literally any other words
+    ("lightweight", "wide toe box", "breathable") could never produce an
+    `inferred_concern` finding at all, silently narrowing the documented
+    capability (engine/execution/return_risk.py's own module docstring:
+    "a stated requirement... the product's own description does not
+    confirm") down to one hardcoded case. Deliberately NOT firing on zero
+    overlap: this catalog's prose is terse and says nothing about most
+    attributes for most products, so treating total silence as "uncertain"
+    would flag nearly everything for nearly every stated requirement - the
+    same "absence of data is not evidence" discipline the rating
+    threshold above already applies, kept consistent here."""
+    phrase = phrase.strip().lower()
+    if not phrase:
         return False
-    return any(term in text for term in related)
+    related = _RELATED_NOT_EQUIVALENT.get(phrase)
+    if related and any(term in text for term in related):
+        return True
+    words = _tokenize(phrase)
+    if not words:
+        return False
+    required = [w for w in words if w not in _INTENSIFIER_PREFIXES] or words
+    hits = sum(1 for w in required if _stem(w) in text)
+    return 0 < hits < len(required)
 
 
 #: Durable-memory keys treated as a stable preference fallback for ranking -
@@ -160,12 +205,19 @@ def _uncertain(text: str, exclusion_phrase: str) -> bool:
 _PREFERENCE_KEY_PREFIX = "prefers_"
 
 
-def _durable_preference_terms(memory_facts: list[dict] | None) -> list[str]:
+def durable_preference_terms(memory_facts: list[dict] | None) -> list[str]:
     """Real, structured shopper preferences - not general memory content -
     expressed as ranking-usable terms. Only `prefers_X` keys qualify (e.g.
     `prefers_lightweight` -> "lightweight"); an owned-product fact, an
     order-history fact, or anything else recorded under a different key
-    convention is not a ranking preference and is left alone."""
+    convention is not a ranking preference and is left alone.
+
+    Public (promoted from the former `_durable_preference_terms`) so
+    `engine/shopper_v2/respond.py` can validate a personalization citation
+    against the SAME durable terms this function already lets influence
+    ranking - closing the gap where a memory-influenced result could never
+    be honestly described as such (a citation source is not this file's
+    own name-mangling)."""
     if not memory_facts:
         return []
     terms = []
@@ -176,6 +228,11 @@ def _durable_preference_terms(memory_facts: list[dict] | None) -> list[str]:
             if term:
                 terms.append(term)
     return terms
+
+
+#: Backward-compatible alias - existing in-module call sites keep working
+#: unchanged; new external callers should use `durable_preference_terms`.
+_durable_preference_terms = durable_preference_terms
 
 
 def rank_and_filter(
@@ -232,7 +289,7 @@ def rank_and_filter(
         _durable_preference_terms(memory_facts) if not priorities and not must_haves else []
     )
 
-    if (not shopping_state and not preference_terms) or not products:
+    if not products:
         return products[:limit], {}
 
     exclusions = [e for e in (shopping_state.get("exclusions") or []) if e]
@@ -261,20 +318,56 @@ def rank_and_filter(
         except InvalidOperation:
             budget_amount = None
 
+    # Stock/availability - a hardening-pass fix, and UNCONDITIONAL: a
+    # shopper being shown a purchasable recommendation should never see one
+    # that is not actually purchasable right now, whether or not anything
+    # else is stated this turn. Live-reproduced regression: this used to be
+    # only reachable through the scoring loop below, which the OLD (buggy)
+    # `not shopping_state` bypass could never actually skip in production
+    # (`ShoppingStateV2.as_prompt_dict()` always returns a 9-key dict, never
+    # a literally empty one - the old bypass was practically dead code on
+    # the live path, so stock filtering always ran there by accident).
+    # Fixing the OLD bug (making the bypass reachable based on real field
+    # CONTENT, not dict truthiness - see `nothing_to_apply` below)
+    # inadvertently made "show me shoes" with no other stated constraint
+    # skip stock filtering for the first time ever - reproduced live, an
+    # out-of-stock product was shown as a confirmed match. Splitting stock
+    # out as its own, always-applied pass closes this the same way the
+    # original hardening pass intended, independent of whatever else this
+    # refactor changes below it.
+    products = [
+        p for p in products
+        if str(p.get("availability") or "").upper() != "OUT_OF_STOCK"
+    ]
+    if not products:
+        return [], {}
+
+    # The OLD early return here fired whenever `shopping_state` was empty
+    # OVERALL, which incorrectly bypassed budget/exclusion hard-filtering
+    # too whenever a turn's state happened to carry ONLY a budget with
+    # nothing else set - the exact shape a bare "under 2000" statement
+    # produces. Hard filters (budget, exclusions) must run whenever THEIR
+    # OWN field is present, independent of whether any other field is.
+    # Only the soft scoring/reordering pass below is skipped when there is
+    # truly nothing left to rank against - the original fast path's actual
+    # purpose (the stocked list, unscored and unreordered) is preserved for
+    # that case, not applied to a state that has a real, actionable hard
+    # constraint.
+    nothing_to_apply = not (
+        priorities
+        or must_haves
+        or preference_terms
+        or exclusions
+        or constraints
+        or budget_amount is not None
+    )
+    if nothing_to_apply:
+        return products[:limit], {}
+
     scored: list[tuple[float, dict, list[str]]] = []
 
     for product in products:
         text = _text_of(product)
-
-        # Stock/availability - a hardening-pass fix. A shopper being shown a
-        # purchasable recommendation should never see one that is not
-        # actually purchasable right now. Only a *confirmed* OUT_OF_STOCK
-        # is dropped; missing/unknown availability is not invented as
-        # either in-stock or out - it is simply not penalized, the same
-        # "absence is not evidence" rule this file already applies to
-        # missing must-have keywords.
-        if str(product.get("availability") or "").upper() == "OUT_OF_STOCK":
-            continue
 
         # The hard filters: an exclusion nobody confirmed the product
         # violates is not dropped; one the merchant's own words confirm is
@@ -287,6 +380,20 @@ def rank_and_filter(
         # was respected when the attribute is actually ambiguous" defect
         # the hardening pass exists to close.
         if any(_matches(text, excl) or _uncertain(text, excl) for excl in exclusions):
+            continue
+
+        # Conversational-flow review fix: `must_have` is what a shopper's
+        # own "I NEED X"/"it MUST have X" wording means - a genuine hard
+        # requirement, not a ranking nicety - and it must behave like one:
+        # a product the merchant's own text does not confirm satisfies it
+        # is excluded outright, the same real-filter discipline exclusions
+        # already get, never merely scored lower. Prior behaviour here
+        # only ever scored a must-have match/miss (see the scoring pass
+        # below, still true for `constraints`/`nice_to_have`/`priorities`
+        # deliberately - only must_have and exclusions are hard filters).
+        # All stated must-haves are required together (AND), matching
+        # ordinary English "I need X and Y".
+        if must_haves and not all(_matches(text, mh) for mh in must_haves):
             continue
 
         price = _price_amount(product)
@@ -341,6 +448,68 @@ def rank_and_filter(
         if p.get("product_id") and why
     }
     return shortlist, reasons
+
+
+def explain_no_match(products: list[dict], shopping_state: dict) -> str | None:
+    """Real, grounded explanation for WHY a mission item has zero surviving
+    candidates after `rank_and_filter` - never a generic "nothing found."
+
+    Conversational-flow review fix (Issue #6's own explicit requirement:
+    "explain which constraint caused the limitation and offer the closest
+    valid next step"). Checks each hard filter (exclusions, must_have,
+    budget) independently against the raw, already-fetched `products` to
+    find which one is actually eliminating everybody, then names the
+    single cheapest/closest real product that fails ONLY that one filter -
+    never invents a product, never guesses which constraint is at fault.
+    Returns `None` when there is nothing to explain (empty `products`, or
+    no hard filter is actually in play - the caller's generic reply already
+    covers a true zero-candidates-in-the-catalog case)."""
+    if not products:
+        return None
+
+    exclusions = [e for e in (shopping_state.get("exclusions") or []) if e]
+    must_haves = [m for m in (shopping_state.get("must_have") or []) if m]
+    budget_amount: Decimal | None = None
+    raw_budget = shopping_state.get("budget_amount")
+    if raw_budget not in (None, ""):
+        try:
+            budget_amount = Decimal(str(raw_budget))
+        except InvalidOperation:
+            budget_amount = None
+
+    if not exclusions and not must_haves and budget_amount is None:
+        return None
+
+    stocked = [p for p in products if str(p.get("availability") or "").upper() != "OUT_OF_STOCK"]
+    if not stocked:
+        return "everything I found for this is currently out of stock"
+
+    def _fails(p: dict) -> list[str]:
+        text = _text_of(p)
+        reasons = []
+        if any(_matches(text, e) or _uncertain(text, e) for e in exclusions):
+            reasons.append(f"excludes {exclusions[0]}" if len(exclusions) == 1 else "an exclusion you named")
+        if must_haves and not all(_matches(text, mh) for mh in must_haves):
+            missing = [mh for mh in must_haves if not _matches(text, mh)]
+            reasons.append(f"doesn't confirm {missing[0]}" if len(missing) == 1 else "doesn't confirm every requirement")
+        price = _price_amount(p)
+        if budget_amount is not None and price is not None and price > budget_amount:
+            over_by = price - budget_amount
+            reasons.append(f"costs {price}, which is {over_by} over your {budget_amount} budget")
+        return reasons
+
+    # The closest real option: fails exactly one hard filter (not several),
+    # preferring the cheapest such option if more than one ties.
+    near_misses = [(p, _fails(p)) for p in stocked]
+    near_misses = [(p, r) for p, r in near_misses if len(r) == 1]
+    if not near_misses:
+        return None
+    near_misses.sort(key=lambda row: (_price_amount(row[0]) or Decimal("Infinity")))
+    closest, reasons = near_misses[0]
+    title = closest.get("title") or "one option"
+    price = closest.get("price")
+    price_part = f" ({price})" if price else ""
+    return f"the closest is {title}{price_part}, but it {reasons[0]}"
 
 
 def has_stated_priority(shopping_state: dict | None) -> bool:

@@ -211,18 +211,38 @@ def _missing_complements(
     already answer from, applied cart-wide instead of to one named
     product."""
     in_cart = {line.product_id for line in cart.lines}
-    out = []
+    # Distinct PRODUCTS, not lines - live-reproduced bug: two lines for the
+    # same product (different variants/sizes, itself normal - see
+    # `_duplicate_lines`'s own docstring) used to each independently walk
+    # the same product's `compatible_with` list, emitting the identical
+    # finding twice for one real cart. Keyed by first-seen title so the
+    # product's own name is still used in the message.
+    seen: dict[str, str] = {}
     for line in cart.lines:
-        product = products_by_id.get(line.product_id)
+        seen.setdefault(line.product_id, line.title)
+
+    out = []
+    for product_id, title in seen.items():
+        product = products_by_id.get(product_id)
         if product is None:
             continue
         missing = [pid for pid in product.compatible_with if pid not in in_cart]
         if missing:
+            # Message uses the raw product ids here - this function is a
+            # pure function over already-fetched data (its own docstring)
+            # and has no fetch capability of its own to resolve a
+            # complement's real title, since a "missing" complement is by
+            # definition NOT among the cart-line products this function
+            # was given. The caller (engine/execution/service.py's
+            # CART_INTELLIGENCE dispatch, which already does the fetching
+            # for this whole analysis) rewrites this message with real
+            # titles once it has fetched them - see that dispatch's own
+            # comment on why.
             out.append(
                 CartFinding(
                     kind="missing_complement",
                     message=(
-                        f"{line.title} usually goes with "
+                        f"{title} usually goes with "
                         f"{', '.join(missing)} - not in your cart yet."
                     ),
                     product_ids=missing,

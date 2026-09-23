@@ -64,6 +64,19 @@ _STOPWORDS = frozenset(
         "these", "those", "can", "could", "would", "will", "sell", "sells",
         "selling", "offer", "offers", "carry", "carries", "got", "get",
         "there", "here", "what", "which", "who", "whom", "about", "into",
+        # Same class as the "you"/"do you sell" gap above, found live
+        # against a broad category browse: "show me shoes" scored every
+        # genuine shoe in the catalog as a weak, top_score==1 match,
+        # because "show" and (once past the length floor) request-framing
+        # verbs like "need"/"want"/"looking"/"find" counted as
+        # "significant" alongside the one real product word "shoes" -
+        # inflating the query's apparent word count with words that
+        # structurally never discriminate one product from another,
+        # exactly the failure mode this list already exists to close.
+        # Never a product name or attribute in English, not a per-example
+        # patch for one failing sentence.
+        "show", "need", "needs", "needed", "want", "wants", "wanted",
+        "looking", "look", "find", "finding", "please", "help",
     }
 )
 
