@@ -1138,30 +1138,35 @@ async def node_discovery(state: ShopperTurnState) -> dict:
     # list, so a display/order decision made once here can never be
     # contradicted by a different one computed somewhere else downstream.
     evidence, products, deterministic_reply = _apply_query_intent(evidence, products, query_intent)
-    # Real-volume honesty (CLAUDE.md's own standing condition): "show me
-    # all shoes" must never silently claim to be the whole catalog when
-    # this turn's own retrieval was itself already capped
+    # Real-volume honesty (CLAUDE.md's own standing condition): a plain,
+    # uncounted request ("show me shoes") or an explicit "show me all
+    # shoes" must never silently claim to be the whole catalog when this
+    # turn's own retrieval was itself already capped
     # (`trace.candidate_set_truncated`, set by `pipeline.py` from the
     # adapter's real `total_available` count, e.g. a 40k-SKU catalog with
     # only a page fetched this turn) - `node_respond` appends an honest
-    # disclosure sentence rather than letting "all" silently imply "the
-    # entire catalog" when it wasn't.
-    show_all_truncated = bool(query_intent.show_all and trace.candidate_set_truncated)
+    # disclosure sentence rather than letting either case silently imply
+    # completeness when it wasn't.
+    #
+    # Product decision (2026-09, corrected after live feedback): a plain
+    # "show me shoes" with NO stated count used to default to a fixed
+    # display cap of 4 - a real fix for a real bug (reply text disagreeing
+    # with the card count) at the time, but the wrong default for what
+    # this product actually wants: an uncounted request should show
+    # everything genuinely found this turn, exactly like an explicit
+    # "all" does, not a capped preview. `_apply_query_intent` no longer
+    # applies any default cap; the disclosure above now covers BOTH cases
+    # identically, since both can equally be a partial view of a larger
+    # real catalog.
+    show_all_truncated = bool(
+        (query_intent.show_all or query_intent.requested_count is None)
+        and trace.candidate_set_truncated
+    )
     return {
         "trace": trace, "evidence": evidence, "products": products,
         "deterministic_reply": deterministic_reply,
         "show_all_truncated": show_all_truncated,
     }
-
-
-#: Applied only when the shopper stated no explicit count and no "all" -
-#: the same "display size, not a hard filter" bound
-#: `mission_ranking.DEFAULT_LIMIT` already uses elsewhere in this
-#: codebase, reused here so an ordinary unbounded query ("show me running
-#: shoes") gets a text/card count that actually agrees with itself
-#: instead of naming 4 while showing however many the catalog happened to
-#: verify.
-_DEFAULT_DISCOVERY_DISPLAY_LIMIT = 4
 
 
 def _superlative_reply(product: Product, query_intent) -> str:
@@ -1219,10 +1224,15 @@ def _apply_query_intent(
         )
 
     if not deterministic_reply:
-        if query_intent.show_all:
-            cap = len(ordered_verified)
+        # No default cap: an explicit "all", and a plain uncounted
+        # request alike, show every real, relevance-verified product this
+        # turn found - never a fixed preview size. Only an EXPLICIT count
+        # ("show me two running shoes") caps the display, to exactly that
+        # number.
+        if query_intent.requested_count is not None:
+            cap = query_intent.requested_count
         else:
-            cap = query_intent.requested_count or _DEFAULT_DISCOVERY_DISPLAY_LIMIT
+            cap = len(ordered_verified)
         ordered_verified = ordered_verified[:cap] if cap > 0 else []
 
     keep_ids = {p.product_id for p in ordered_verified}

@@ -214,6 +214,22 @@ async def _integration_checks(run_turn, engine, connection_id: str, adapter) -> 
         len(r.products) > 4,
     )
 
+    # Product decision (2026-09, corrected after live feedback): a PLAIN,
+    # uncounted request ("show me shoes", no "all", no number) must show
+    # everything genuinely found, the same as an explicit "all" - never a
+    # fixed default preview size.
+    session_id_plain = f"sess_qi_plain_{uuid.uuid4().hex[:8]}"
+    r_plain = await run_turn(
+        reasoning=engine.reasoning, adapter=adapter, session_id=session_id_plain,
+        connection_id=connection_id, message="show me shoes",
+        decision=engine.decision, gate=engine.gate, execution=engine.execution,
+    )
+    check(
+        f"a PLAIN 'show me shoes' (no count, no 'all') is also not capped at 4 "
+        f"(got {len(r_plain.products)})",
+        len(r_plain.products) > 4,
+    )
+
     r = await run_turn(
         reasoning=engine.reasoning, adapter=adapter, session_id=session_id,
         connection_id=connection_id, message="what is the cheapest shoe available here?",
