@@ -38,6 +38,7 @@ from langgraph.graph import END, StateGraph
 
 from shared.models import Product
 
+from engine.db import memory_facts as memory_facts_store
 from engine.db import shopping_state as shopping_state_store
 from engine.execution import events as shopper_events
 from engine.reasoning.service import ReasoningService
@@ -245,6 +246,31 @@ async def node_understand(state: ShopperTurnState) -> dict:
     trace = state["trace"]
     trace.understanding_used_model = result.used_model
     trace.understanding_model_name = result.model_name
+
+    # Signed-in-shopper-only durable memory, mirroring chat.py's own
+    # persist exactly (same db.memory_facts.upsert call, same best-effort
+    # try/except so a hiccup here never fails the turn). Live-reproduced
+    # gap this closes: `understand()` reuses V1's own `reason()` call, which
+    # already extracts `durable_facts` every turn - V2 read memory facts
+    # (chat_v2.py's own fetch, passed into ranking) but never WROTE any,
+    # so a shopper's "I really prefer lightweight gear" was acknowledged in
+    # the reply but never reached storage - the personalization ranking
+    # itself (mission_ranking.rank_and_filter) was correct and reachable
+    # only by seeding the database directly, never by a real conversation.
+    shopper_id = state.get("shopper_id")
+    if shopper_id and result.durable_facts:
+        try:
+            for fact in result.durable_facts:
+                await memory_facts_store.upsert(
+                    state["connection_id"],
+                    shopper_id,
+                    key=fact["key"],
+                    value=fact["value"],
+                    source_session_id=state["session_id"],
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("could not persist shopper_v2 durable facts; continuing")
+
     return {
         "delta": result.delta,
         "hinted_action_type": result.hinted_action_type,

@@ -39,6 +39,7 @@ matter most:
 from __future__ import annotations
 
 import logging
+import re
 
 from pydantic import BaseModel, Field
 
@@ -47,6 +48,48 @@ from engine.reasoning.service import ReasoningService
 logger = logging.getLogger(__name__)
 
 _VALID_MISSION_STATUS = {"exploring", "comparing", "deciding", "done"}
+
+#: A narrow, closed-class backstop for the model's own `durable_facts`
+#: extraction (`ReasoningService.reason()`, same call this module already
+#: reuses) - never a replacement for it. Live-reproduced, same phrasing
+#: shape, two different real outcomes from the SAME underlying model call:
+#: "I really prefer lightweight gear when I shop" produced a real
+#: `durable_facts` entry; "I really prefer decaf coffee." (direct call,
+#: `message_intent="shopping"`) produced `durable_facts=None` - the model
+#: instead folded it straight into an immediate `RECOMMEND_PRODUCTS`
+#: search action. The prompt's own guidance (`prompts.py`: "fill
+#: durable_facts only for something that would still be true on a
+#: completely different visit... a stable preference... stated by the
+#: shopper themselves") already calls this exact shape a durable fact -
+#: this is model inconsistency on an unambiguous case, not an ambiguous
+#: judgment call, and CLAUDE.md's own discipline is to prefer a
+#: deterministic, closed-class check over trusting free-form model output
+#: wherever one is safely possible. Deliberately narrow: only "I
+#: (always/really/absolutely/definitely) prefer <phrase>" - the shopper's
+#: own explicit, general-preference wording, not "I need/want <phrase>"
+#: (an ordinary current-turn goal, never a durable fact by itself). Fires
+#: only when the model supplied NO durable fact this turn - it fills a gap,
+#: it never overrides or duplicates a real model-supplied one.
+_EXPLICIT_PREFERENCE_PATTERN = re.compile(
+    r"\bi\s+(?:always\s+|really\s+|absolutely\s+|definitely\s+)*prefer(?:s)?\s+"
+    r"(?P<term>[a-z][a-z0-9 '-]{2,40}?)(?:\s+(?:coffee|gear|shoes|products|items|"
+    r"stuff|things|when i shop|when i buy|when shopping|for my order)s?\b.*)?"
+    r"[.!?]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _explicit_preference_fact(message: str) -> dict | None:
+    match = _EXPLICIT_PREFERENCE_PATTERN.search(message.strip())
+    if not match:
+        return None
+    term = match.group("term").strip().lower()
+    if not term or len(term) < 3:
+        return None
+    key = "prefers_" + re.sub(r"[^a-z0-9]+", "_", term).strip("_")
+    if not key or key == "prefers_":
+        return None
+    return {"key": key[:120], "value": "true"}
 
 
 class StateDelta(BaseModel):
@@ -126,6 +169,20 @@ class UnderstandingResult(BaseModel):
     #: `message_intent`, this stays `None` and the pre-fetch reply is
     #: discarded exactly as invariant 1 always required.
     conversational_reply: str | None = None
+    #: Durable facts the SAME model call already flagged this turn
+    #: (`ReasoningService.reason`'s own `durable_facts`, validated by
+    #: `_parse_durable_facts` - key/value strings only, never trusted
+    #: further here). Live-reproduced gap this closes: V1's chat.py has
+    #: always persisted these to `db.memory_facts` for a signed-in shopper;
+    #: V2's `understand()` discarded `result.durable_facts` entirely, so a
+    #: shopper saying "I really prefer lightweight gear" through V2 got an
+    #: acknowledging reply but no fact was ever written - `rank_and_filter`'s
+    #: memory-fact personalization (proven correct at the ranking layer
+    #: itself) had nothing to read on any later turn, making it reachable
+    #: only by seeding the database directly, never by a real conversation.
+    #: The caller (graph.py's `node_understand`) does the actual signed-in-
+    #: shopper-only persist, mirroring chat.py exactly.
+    durable_facts: list[dict] = Field(default_factory=list)
 
 
 async def understand(
@@ -271,6 +328,14 @@ async def understand(
     conversational_reply = result.reply if message_intent == "conversational" else None
     _ = result.reply  # explicitly discarded for every other case - see module docstring
 
+    # Deterministic backstop only - see `_explicit_preference_fact`'s own
+    # docstring. Never runs when the model already supplied a real fact.
+    durable_facts = list(result.durable_facts or [])
+    if not durable_facts:
+        backstop_fact = _explicit_preference_fact(message)
+        if backstop_fact is not None:
+            durable_facts = [backstop_fact]
+
     return UnderstandingResult(
         delta=delta,
         used_model=result.used_model,
@@ -281,4 +346,5 @@ async def understand(
         hinted_quantity=hinted_quantity,
         message_intent=message_intent,
         conversational_reply=conversational_reply,
+        durable_facts=durable_facts,
     )
