@@ -20,6 +20,20 @@ export interface Account {
 
 export class AccountError extends Error {}
 
+/** Fired on `window` right after a real signin/signup response comes back,
+ *  carrying the fresh `Account`. `SignInPage` is a sibling route of `App`
+ *  (see main.tsx), not a child, so there is no prop path to hand a freshly
+ *  signed-in account to the state `App` actually renders from - and `App`'s
+ *  own `whoAmI` fetch is deliberately guarded to run only once per
+ *  connection (see its own StrictMode comment), so navigating back after
+ *  signin never re-triggers it either. Live-reproduced: signin/signup
+ *  returned 200 with a real account, but the header kept showing "Sign in"
+ *  and the cart kept asking to sign in, indefinitely, because nothing ever
+ *  told `App` the signin happened. A same-tab event is the minimal fix that
+ *  doesn't require threading `setAccount` across the route boundary or
+ *  weakening the once-per-connection `whoAmI` guard for every navigation. */
+export const ACCOUNT_CHANGED_EVENT = "cv3-account-changed";
+
 function publishableKey(connectionId: string): string {
   const keys: Record<string, string | undefined> = {
     conn_demo: import.meta.env.VITE_CV3_PK_CONN_DEMO,
@@ -95,14 +109,14 @@ export async function whoAmI(connectionId: string): Promise<Account | null> {
   }
 }
 
-export function signIn(
+export async function signIn(
   connectionId: string,
   username: string,
   password: string,
   guestSession: string,
   guestCart?: string | null,
 ): Promise<Account> {
-  return post<Account>("/api/account/signin", connectionId, {
+  const account = await post<Account>("/api/account/signin", connectionId, {
     connection_id: connectionId,
     username,
     password,
@@ -111,9 +125,11 @@ export function signIn(
     guest_session: guestSession,
     guest_cart: guestCart ?? null,
   });
+  window.dispatchEvent(new CustomEvent(ACCOUNT_CHANGED_EVENT, { detail: account }));
+  return account;
 }
 
-export function signUp(
+export async function signUp(
   connectionId: string,
   username: string,
   password: string,
@@ -121,7 +137,7 @@ export function signUp(
   guestSession: string,
   guestCart?: string | null,
 ): Promise<Account> {
-  return post<Account>("/api/account/signup", connectionId, {
+  const account = await post<Account>("/api/account/signup", connectionId, {
     connection_id: connectionId,
     username,
     password,
@@ -129,6 +145,8 @@ export function signUp(
     guest_session: guestSession,
     guest_cart: guestCart ?? null,
   });
+  window.dispatchEvent(new CustomEvent(ACCOUNT_CHANGED_EVENT, { detail: account }));
+  return account;
 }
 /** Add the email to an account created before the field existed.
  *

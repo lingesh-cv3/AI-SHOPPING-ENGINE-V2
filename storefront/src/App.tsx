@@ -26,7 +26,7 @@ import { ProductCard } from "./ProductCard";
 import { ProductDetail } from "./ProductDetail";
 import { Hero } from "./Hero";
 import { themeFor } from "./theme";
-import { type Account, claimCart, setEmail, whoAmI } from "./account";
+import { ACCOUNT_CHANGED_EVENT, type Account, claimCart, setEmail, whoAmI } from "./account";
 
 /** Reshape a chat reply into the engine panel's Pipeline view.
  *
@@ -137,14 +137,40 @@ export default function App() {
     // StrictMode duplicate for the SAME connection is skipped.
     if (whoAmIRanFor.current === connection) return;
     whoAmIRanFor.current = connection;
-    let cancelled = false;
+    // Re-check the ref itself at resolve time, rather than a separate
+    // `cancelled` boolean captured by this closure. The two used to disagree:
+    // StrictMode's mount-cleanup-mount dance runs THIS invocation's cleanup
+    // immediately (before the fetch resolves), which set `cancelled = true`
+    // on the one closure whose promise was actually in flight - while the
+    // second, real mount's effect returned early up above (the ref already
+    // matched `connection`) and never called `whoAmI` at all. Net effect,
+    // live-reproduced: `account` could never be populated on ANY fresh page
+    // load in dev, signed-in cookie or not - a plain reload after a real
+    // signin still showed "Sign in". The ref is already the single source of
+    // truth for "has this connection been fetched" (that's what the early
+    // return above is for) - checking it again here, instead of a redundant
+    // and actively-wrong `cancelled` flag, only ever discards a result that
+    // is genuinely stale (the connection changed since this call was fired).
     whoAmI(connection).then((who) => {
-      if (!cancelled) setAccount(who);
+      if (whoAmIRanFor.current === connection) setAccount(who);
     });
-    return () => {
-      cancelled = true;
-    };
   }, [connection]);
+
+  // `SignInPage` is a sibling route of this component (see main.tsx), not a
+  // child, so it has no prop path to hand a freshly signed-in account to the
+  // state this component actually renders from - and the once-per-connection
+  // guard above deliberately does not re-run on a plain navigation back here.
+  // Live-reproduced: signin/signup returned 200 with a real account, but the
+  // header kept showing "Sign in" and the cart kept asking to sign in,
+  // indefinitely, until a full page reload. `account.ts` dispatches this
+  // event right after a real signin/signup response.
+  useEffect(() => {
+    function onAccountChanged(e: Event) {
+      setAccount((e as CustomEvent<Account>).detail);
+    }
+    window.addEventListener(ACCOUNT_CHANGED_EVENT, onAccountChanged);
+    return () => window.removeEventListener(ACCOUNT_CHANGED_EVENT, onAccountChanged);
+  }, []);
 
   // A signed-in shopper's conversation, or this tab's.
   //
