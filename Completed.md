@@ -61,6 +61,14 @@ partial, unverified, or unbuilt.
 - **Tenant isolation on both chat pipelines**, zero-data and platform-down
   honesty (no fabricated product, no raw exception reaching a shopper's
   reply) — verified for V1 and V2 independently.
+- **Shopper account state now populates after a real signin/signup**
+  (header username, cart's sign-in gate). Two compounding causes fixed:
+  `SignInPage` was a sibling route of `App`, not a child, so it had no
+  channel to hand the account back; and `App`'s mount-time `whoAmI` check
+  had a React 18 StrictMode double-invoke race that silently discarded the
+  one fetch whose promise actually resolved. Fixed with a same-tab custom
+  event plus a corrected ref-check at resolve time; reproduced live before
+  the fix and re-verified live after.
 
 ## Product Discovery & Recommendations
 
@@ -92,8 +100,22 @@ partial, unverified, or unbuilt.
   exclusions, priorities, active products, mission status) is captured from
   the existing tool call, persisted, and read back into ranking and
   synthesis on V1; V2 has its own typed equivalent (`ShoppingStateV2`).
-- **Durable shopper memory** (`ShopperMemoryFact`, signed-in shoppers only)
-  upserts with supersession and per-connection/shopper isolation.
+- **Durable shopper memory writes from a real conversation, not just a
+  seeded row.** V2's `understand()` was calling the same model function that
+  extracts `durable_facts` every turn but discarding the field, so nothing
+  was ever persisted to `db.memory_facts` from a live shopper turn even
+  though ranking could already read facts back in
+  (`mission_ranking.rank_and_filter`). Fixed in
+  `engine/shopper_v2/understanding.py`/`graph.py` (`node_understand`) to
+  persist `durable_facts`, gated to signed-in shoppers, mirroring V1's
+  `chat.py`; a narrow deterministic backstop covers explicit "I prefer X"
+  phrasings the model itself sometimes skips. Live-verified end to end (no
+  DB seeding) on both Northfield and Kettle & Bloom: a stated preference
+  ("I really prefer lightweight gear" / "I really prefer decaf coffee")
+  changes which product ranks first on the next turn, including through
+  mission-item turns (multi-product tracking) — not just plain discovery.
+  `ShopperMemoryFact` upserts with supersession and per-connection/shopper
+  isolation.
 - **Write-only interaction instrumentation** (`ShopperEvent`): impressions,
   comparisons, cart adds/removes, checkout starts, purchases — logged for
   every relevant turn, not yet read back into ranking (tracked in
