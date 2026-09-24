@@ -47,6 +47,7 @@ from engine.execution import events as shopper_events
 from engine.execution import mission_ranking
 from engine.execution.relevance import best_matches_with_score
 
+from . import fulfillment
 from .basket_proposal import run_basket_proposal_turn
 from .evidence import build_evidence, product_as_dict
 from .retrieval import retrieve
@@ -235,10 +236,10 @@ async def apply_mission_message(
     history: list[str] | None,
     state: ShoppingStateV2,
     memory_facts: list[dict] | None = None,
-) -> tuple[ShoppingStateV2, bool, tuple[str, ...], bool, dict[str, list[str]]]:
+) -> tuple[ShoppingStateV2, bool, tuple[str, ...], bool, dict[str, list[str]], str | None]:
     """Interpret one turn against the current mission items, apply
     whatever it genuinely says, run retrieval only for items that need it,
-    and persist. Returns `(state, False, (), False, {})` unchanged when this
+    and persist. Returns `(state, False, (), False, {}, None)` unchanged when this
     turn carries no mission-item information at all (reasoning
     unavailable, or the interpreter found neither a new item, a resolvable
     reference, nor a basket-proposal request) - the caller should then
@@ -270,9 +271,18 @@ async def apply_mission_message(
     (`intent.priorities_add` non-empty), so `run_mission_turn` can explain
     WHY the new pick fits rather than just reporting a bare option count.
     Empty for every other kind of turn.
+
+    The sixth element, `add_now_product_id`, is the referenced item's own
+    real, already-verified top candidate product id - set ONLY when
+    `intent.add_now` was true AND the reference resolved to a real item
+    with at least one real candidate, `None` otherwise. This function never
+    executes a cart action itself (see this module's own docstring) - the
+    caller (`run_mission_turn`) is the one with `decision`/`gate`/
+    `execution`/`cart_id` available, and runs this id through the SAME
+    trusted `ActionType.ADD_TO_CART` path `fulfillment.py` already uses.
     """
     if reasoning is None or not getattr(reasoning, "enabled", False):
-        return state, False, (), False, {}
+        return state, False, (), False, {}, None
 
     # `candidate_titles` (real, adapter-verified product names already
     # fetched for this item - see MissionItem's own docstring) rides along
@@ -296,10 +306,10 @@ async def apply_mission_message(
         )
     except Exception:  # noqa: BLE001 - degrade honestly, never raise into the turn
         logger.exception("missions: interpret_mission_items failed")
-        return state, False, (), False, {}
+        return state, False, (), False, {}, None
 
     if intent is None:
-        return state, False, (), False, {}
+        return state, False, (), False, {}, None
 
     # Deterministic backstop, defense in depth: even if the model still
     # names something in BOTH new_item_labels and reference_type='name'
@@ -365,12 +375,16 @@ async def apply_mission_message(
     )
     propose_basket = bool(intent.propose_basket and state.mission_items)
 
-    if not new_labels and not (target is not None and has_refinement) and not propose_basket:
+    if (
+        not new_labels
+        and not (target is not None and (has_refinement or intent.add_now))
+        and not propose_basket
+    ):
         # Either nothing usable came back, or a refinement was stated but
         # the reference could not be resolved to a real item - never
         # applied to the wrong item, and never silently dropped into the
         # whole-mission fields either.
-        return state, False, (), False, {}
+        return state, False, (), False, {}, None
 
     # Deep copies, never the original objects - see this function's own
     # docstring for the bug this specifically closes.
@@ -400,6 +414,27 @@ async def apply_mission_message(
             live_target.status = "comparing"
         if intent.item_completed:
             live_target.status = "done"
+        # Live-reproduced bug: unlike the sibling `elif` branch two lines
+        # below, this branch never added `target.item_id` to `touched_ids`
+        # - so a real, correctly-applied state change (narrowing to exactly
+        # the named candidate) produced zero lines in the reply-building
+        # loop below, which falls back to a bare "Noted." for an empty
+        # `touched_ids`. The shopper said "add Energy Gel Box", the model
+        # correctly resolved it (`named_hint='Energy Gel Box of 12'`), the
+        # item WAS narrowed to that exact real candidate - and the shopper
+        # was told nothing happened. Every other branch that mutates an
+        # item already appends it here; this one silently didn't.
+        touched_ids.append(live_target.item_id)
+    elif target is not None and intent.add_now and not has_refinement:
+        # A bare "add it"/"add the shoes" with no new constraint and no
+        # named-candidate narrowing - nothing about the item's own state
+        # changes here (no mutation needed), but it must still land in
+        # `touched_ids` so the reply-building loop reports on it and
+        # `add_now_product_id` (resolved after the retrieval loop below,
+        # from whatever this item's own current top real candidate already
+        # is) has an item to read from - the same reason the branch above
+        # was missing this line.
+        touched_ids.append(target.item_id)
     elif target is not None and has_refinement:
         live_target = items_by_id[target.item_id]
         live_target.constraints = _dedup_append(live_target.constraints, intent.constraints_add)
@@ -458,8 +493,22 @@ async def apply_mission_message(
 
     # Real retrieval, only for items that need it (new, or just refined) -
     # every other item's candidates are left exactly as they were, never
-    # re-fetched on a turn that said nothing about them.
-    needs_retrieval = [i for i in all_items if i.item_id in touched_ids and i.status != "done"]
+    # re-fetched on a turn that said nothing about them. A named-candidate
+    # selection (`target.item_id` when `named_candidate_id is not None`,
+    # above) is deliberately excluded even though it is now in
+    # `touched_ids` (for the reply-loop fix below) - its own comment
+    # already explains why: narrowing to a real, already-verified candidate
+    # is not a new search, and re-running retrieval here would silently
+    # overwrite the just-narrowed single candidate with a fresh,
+    # un-narrowed multi-candidate result, undoing the whole point of the
+    # branch that set it.
+    named_candidate_item_id = (
+        target.item_id if target is not None and named_candidate_id is not None else None
+    )
+    needs_retrieval = [
+        i for i in all_items
+        if i.item_id in touched_ids and i.status != "done" and i.item_id != named_candidate_item_id
+    ]
     item_reasons: dict[str, list[str]] = {}
     for item in needs_retrieval:
         query = item.search_query or item.label
@@ -549,7 +598,23 @@ async def apply_mission_message(
         mission_items=[i.model_dump(mode="json") for i in all_items],
     )
     new_state = state.model_copy(update={"mission_items": all_items})
-    return new_state, True, tuple(touched_ids), propose_basket, item_reasons
+
+    # `add_now` resolved AFTER the retrieval loop above, never before - the
+    # named-candidate branch already has its one real candidate by then,
+    # but a pure refinement branch cleared `candidates` and only refills it
+    # inside that same retrieval loop (`item.candidates` mutated in place,
+    # same object `items_by_id` already points at), so resolving any
+    # earlier would silently miss the refinement case. Never a guess: only
+    # ever the item's own real, already-verified top candidate - the exact
+    # same product a shopper reading this turn's reply is looking at,
+    # never a second, independent lookup.
+    add_now_product_id: str | None = None
+    if intent.add_now and target is not None:
+        live_target_for_add = items_by_id.get(target.item_id)
+        if live_target_for_add is not None and live_target_for_add.candidates:
+            add_now_product_id = live_target_for_add.candidates[0]
+
+    return new_state, True, tuple(touched_ids), propose_basket, item_reasons, add_now_product_id
 
 
 async def run_mission_turn(
@@ -595,12 +660,52 @@ async def run_mission_turn(
     honestly rather than silently skipping the request.
     """
     before_ids = {i.item_id for i in state.mission_items}
-    new_state, handled, touched_ids, propose_basket, item_reasons = await apply_mission_message(
+    (
+        new_state, handled, touched_ids, propose_basket, item_reasons, add_now_product_id,
+    ) = await apply_mission_message(
         reasoning=reasoning, adapter=adapter, message=message, history=history, state=state,
         memory_facts=memory_facts,
     )
     if not handled:
         return None, [], state, False, []
+
+    if add_now_product_id:
+        if decision is None or gate is None or execution is None or not connection_id or not session_id:
+            return (
+                "I can't add that through this conversation path right now - "
+                "please try again from the shop page.",
+                [],
+                new_state,
+                True,
+                [],
+            )
+        # Live-reproduced gap this closes: a shopper naming one already-
+        # tracked item ("add Energy Gel Box") had nowhere to go but a
+        # narrowing-only reply ("found 1 option") or, before that, a bare
+        # "Noted." with nothing added at all. Reuses `fulfillment.py`'s own
+        # `start_fulfillment` - the SAME risk-gated `ActionType.ADD_TO_CART`
+        # path every other add in this codebase goes through (variant
+        # question included, if the real product needs one) - never a
+        # second, parallel add implementation. A single real id is a
+        # legitimate call shape for `start_fulfillment` even though its own
+        # docstring describes its usual multi-item caller; nothing about it
+        # requires 2+ items.
+        reply, newly_added = await fulfillment.start_fulfillment(
+            adapter=adapter, decision=decision, gate=gate, execution=execution,
+            connection_id=connection_id, session_id=session_id, cart_id=cart_id,
+            message=message, state=new_state, product_ids=[add_now_product_id], quantity=1,
+        )
+        # Raw `Product` objects, matching the SAME shape the ordinary
+        # reply path below returns via `_mission_item_products` - never a
+        # dict here, which would silently diverge from what this
+        # function's own callers already expect.
+        products = []
+        for pid in newly_added:
+            try:
+                products.append(await adapter.get_product(pid))
+            except Exception:  # noqa: BLE001 - degrade honestly, never invent a card
+                logger.warning("missions: get_product failed for added id %r", pid, exc_info=True)
+        return reply, products, new_state, True, []
 
     if propose_basket:
         if decision is None or gate is None or execution is None or not connection_id or not session_id:

@@ -1489,7 +1489,21 @@ def mission_reference_tool() -> dict[str, Any]:
                     },
                     "propose_basket": {
                         "type": "boolean",
-                        "description": "True only if the shopper explicitly asks to add the tracked mission items to their cart now.",
+                        "description": "True only if the shopper explicitly asks to add ALL the tracked mission items to their cart now (e.g. 'add these to my cart', 'let's get the shoes and socks').",
+                    },
+                    "add_now": {
+                        "type": "boolean",
+                        "description": (
+                            "True only if the shopper explicitly asks to add "
+                            "THIS ONE referenced item (named by reference_type/"
+                            "position/named_hint above) to their cart right now "
+                            "- e.g. 'add Energy Gel Box', 'get me the "
+                            "Trailblazer', 'add that one'. False for propose_basket "
+                            "(that means every tracked item, not one), false for "
+                            "merely naming/narrowing which candidate an item means "
+                            "with no request to add it, and false for item_completed "
+                            "(settled/decided is not the same as added)."
+                        ),
                     },
                 },
                 "required": ["new_item_labels", "reference_type"],

@@ -568,21 +568,61 @@ def strip_intent_phrases(message: str) -> str:
     return cleaned or message
 
 
+_NAME_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "and", "for", "with", "to", "in", "on", "at",
+})
+
+
+def _distinctive_title_words(title: str) -> set[str]:
+    return {
+        w for w in re.findall(r"[a-z0-9]+", title.lower())
+        if len(w) > 2 and w not in _NAME_STOPWORDS
+    }
+
+
 def resolve_named_subset(message: str, titles: list[str]) -> list[int] | None:
     """Real 0-based positions for every one of `titles` (the real,
-    already-shown products' own titles, same order) that appears in
-    `message` as a substring - a general, deterministic mechanism for a
-    message naming SEVERAL real products by their own full titles
-    together in one message ("1. Marathon Pro Racing Shoe; 2. Cloudstep
-    Max Cushion Running Shoe" - pasting a prior clarifying question's own
-    numbered list back verbatim, a real, reported case). Requires at
-    least 2 matches - a single named product is already resolved by the
-    model's own single `named_hint` matching
+    already-shown products' own titles, same order) that `message`
+    genuinely refers to - either the FULL title verbatim, or, live-
+    reproduced gap this closes, a real but PARTIAL reference ("the socks",
+    "add Energy Gel Box" for "Performance Socks Three Pack"/"Energy Gel Box
+    of 12") - ordinary shopper language, not the merchant's exact catalog
+    title. Requires at least 2 matches - a single named product is already
+    resolved by the model's own single `named_hint` matching
     (`intent_resolution.py::_resolve_reference`), so this never fires for
-    an ordinary single-name message and never duplicates that path."""
+    an ordinary single-name message and never duplicates that path.
+
+    The partial match is deliberately conservative: a title's own
+    distinctive word only counts when it belongs to that title ALONE among
+    every title in `titles` this call was given - never a word shared with
+    another shown candidate ("shoe"/"running" shared by two different
+    running shoes must never resolve either one from a bare mention of
+    either word). A genuinely ambiguous partial reference is left
+    unmatched here entirely, never guessed at - the caller's own existing
+    ambiguous-reference handling still applies for it."""
     lowered = message.lower()
-    positions = [
+    exact_positions = [
         i for i, title in enumerate(titles)
         if title and title.strip().lower() in lowered
     ]
-    return positions if len(positions) >= 2 else None
+
+    word_to_indices: dict[str, set[int]] = {}
+    per_title_words: dict[int, set[str]] = {}
+    for i, title in enumerate(titles):
+        if not title:
+            continue
+        words = _distinctive_title_words(title)
+        per_title_words[i] = words
+        for w in words:
+            word_to_indices.setdefault(w, set()).add(i)
+
+    fuzzy_positions = []
+    for i in per_title_words:
+        if i in exact_positions:
+            continue
+        exclusive_words = {w for w in per_title_words[i] if len(word_to_indices[w]) == 1}
+        if any(w in lowered for w in exclusive_words):
+            fuzzy_positions.append(i)
+
+    positions = exact_positions + fuzzy_positions
+    return sorted(set(positions)) if len(set(positions)) >= 2 else None

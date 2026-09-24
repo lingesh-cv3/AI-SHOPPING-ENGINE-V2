@@ -257,6 +257,23 @@ class MissionItemIntent:
     #: flag ever triggers - it still never itself proposes anything; it is
     #: only ever a routing signal the caller deterministically acts on.
     propose_basket: bool = False
+    #: True when the shopper's message asks to add THIS ONE referenced item
+    #: (identified by `reference_type`/`position`/`named_hint` above) to
+    #: their cart NOW - "add Energy Gel Box", "get me the Trailblazer",
+    #: "add that one" - distinct from `propose_basket` (every tracked item)
+    #: and from `item_completed` (merely settled/decided, not necessarily
+    #: added). Live-reproduced gap this closes: before this field existed,
+    #: a correctly-resolved single-item reference with neither flag set had
+    #: nowhere to go - the shopper's real intent was understood by the
+    #: model (`named_hint` correctly named the exact real product) but no
+    #: code path ever acted on "add this one now" as its own case, so nothing
+    #: happened and the shopper was told "Noted." Like `propose_basket`,
+    #: this is only ever a routing signal - the caller
+    #: (`engine/shopper_v2/missions.py`) still runs the referenced item's
+    #: top real candidate through the SAME trusted `ActionType.ADD_TO_CART`
+    #: path `fulfillment.py` already uses, never a direct mutation from
+    #: this flag alone.
+    add_now: bool = False
 
 
 class ReasoningService:
@@ -772,6 +789,8 @@ class ReasoningService:
         item_completed = item_completed if isinstance(item_completed, bool) else False
         propose_basket = args.get("propose_basket")
         propose_basket = propose_basket if isinstance(propose_basket, bool) else False
+        add_now = args.get("add_now")
+        add_now = add_now if isinstance(add_now, bool) else False
 
         return MissionItemIntent(
             new_item_labels=new_item_labels,
@@ -785,6 +804,7 @@ class ReasoningService:
             priorities_add=_str_list("priorities_add"),
             item_completed=item_completed,
             propose_basket=propose_basket,
+            add_now=add_now,
         )
 
     # -- parsing -----------------------------------------------------------

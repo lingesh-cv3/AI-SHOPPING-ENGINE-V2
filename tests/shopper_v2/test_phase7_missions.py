@@ -86,7 +86,7 @@ async def _model_free_checks() -> None:
                 availability=Availability.IN_STOCK,
             )
 
-    new_state, handled, _touched, _basket, _reasons = await apply_mission_message(
+    new_state, handled, _touched, _basket, _reasons, _add_now = await apply_mission_message(
         reasoning=reasoning, adapter=_StubAdapterWithHits(),
         message="I need running shoes, socks and a hydration bottle",
         history=None, state=state,
@@ -105,7 +105,7 @@ async def _model_free_checks() -> None:
             constraints_add=["lightweight"],
         )
     )
-    refined_state, handled2, _touched, _basket, _reasons = await apply_mission_message(
+    refined_state, handled2, _touched, _basket, _reasons, _add_now = await apply_mission_message(
         reasoning=reasoning2, adapter=_StubAdapterWithHits(),
         message="make the shoes lightweight", history=None, state=new_state,
     )
@@ -125,7 +125,7 @@ async def _model_free_checks() -> None:
             constraints_add=["red"],
         )
     )
-    unresolved_state, handled3, _touched, _basket, _reasons = await apply_mission_message(
+    unresolved_state, handled3, _touched, _basket, _reasons, _add_now = await apply_mission_message(
         reasoning=reasoning3, adapter=_NullAdapter(),
         message="make that one red", history=None, state=refined_state,
     )
@@ -138,7 +138,7 @@ async def _model_free_checks() -> None:
     # 4. A plain follow-up question with no new items and no resolvable
     #    reference is honestly not handled - falls through to discovery.
     reasoning4 = _ScriptedReasoning(MissionItemIntent(new_item_labels=[]))
-    unrelated_state, handled4, _touched, _basket, _reasons = await apply_mission_message(
+    unrelated_state, handled4, _touched, _basket, _reasons, _add_now = await apply_mission_message(
         reasoning=reasoning4, adapter=_NullAdapter(),
         message="do you have anything in a different color?", history=None, state=refined_state,
     )
@@ -151,7 +151,7 @@ async def _model_free_checks() -> None:
         async def interpret_mission_items(self, **kwargs):
             raise AssertionError("must not be called when reasoning is disabled")
 
-    disabled_state, handled5, _touched, _basket, _reasons = await apply_mission_message(
+    disabled_state, handled5, _touched, _basket, _reasons, _add_now = await apply_mission_message(
         reasoning=_Disabled(), adapter=_NullAdapter(),
         message="I need shoes and socks", history=None, state=ShoppingStateV2(session_id="s2", connection_id="conn_demo"),
     )
@@ -207,7 +207,7 @@ async def _model_free_checks() -> None:
     )
     from engine.shopper_v2.missions import apply_mission_message as _apply
 
-    refined5b, handled5b, _touched5b, _basket5b, _reasons5b = await _apply(
+    refined5b, handled5b, _touched5b, _basket5b, _reasons5b, _add_now5b = await _apply(
         reasoning=reasoning5b, adapter=_StubAdapterMixedPrices(),
         message="under 5000 for the shoes", history=None, state=budget_state,
     )
@@ -233,7 +233,7 @@ async def _model_free_checks() -> None:
     ]
     full_state = ShoppingStateV2(session_id="s3", connection_id="conn_demo", mission_items=full_items)
     reasoning6 = _ScriptedReasoning(MissionItemIntent(new_item_labels=["one more thing"]))
-    capped_state, handled6, _touched, _basket, _reasons = await apply_mission_message(
+    capped_state, handled6, _touched, _basket, _reasons, _add_now = await apply_mission_message(
         reasoning=reasoning6, adapter=_NullAdapter(),
         message="I also need one more thing", history=None, state=full_state,
     )

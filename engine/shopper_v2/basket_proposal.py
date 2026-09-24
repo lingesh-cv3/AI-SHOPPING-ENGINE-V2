@@ -43,6 +43,7 @@ import logging
 from engine.db import shopping_state as shopping_state_store
 from engine.decision import DecisionEngine
 from engine.execution import ExecutionService
+from engine.execution.relevance import best_matches_with_score
 from engine.risk import RiskGate
 
 from .cart_proposal import run_cart_change_proposal_turn
@@ -56,7 +57,7 @@ class BasketItemResult:
         self,
         *,
         item: MissionItem,
-        outcome: str,  # "proposed" | "no_candidates" | "ambiguous" | "already_settled" | "failed"
+        outcome: str,  # "proposed" | "no_candidates" | "ambiguous" | "already_settled" | "already_in_cart" | "failed"
         proposal: dict | None = None,
     ) -> None:
         self.item = item
@@ -104,8 +105,42 @@ async def run_basket_proposal_turn(
             [],
         )
 
+    # Live-reproduced bug this closes: `mission_items` and the real cart
+    # are two independent state stores with zero reconciliation between
+    # them - a shopper adding a product via the direct accept-flow/
+    # fulfillment path (never touching `mission_items` at all) then saying
+    # "add to the cart" got THIS module blindly proposing whatever
+    # `item.candidates[0]` currently is, with no idea the shopper already
+    # has something in their real cart for that same need - sometimes a
+    # genuinely DIFFERENT product than what's actually in the cart (the
+    # item's own candidate ranking moved on after a later budget
+    # constraint), sometimes a literal duplicate of what's already there.
+    # A single real fetch, once, up front - never per item - checked
+    # against each item's own label/search text via the SAME word-overlap
+    # scoring (`best_matches_with_score`) this codebase already trusts for
+    # relevance everywhere else, never a new heuristic. A real, non-zero
+    # score means the shopper's actual cart already has something that
+    # plausibly fulfills this item; proposing again (the same product or a
+    # different one) would be either a pointless duplicate or a silent
+    # substitution - both dishonest to show as a fresh proposal.
+    cart_lines: list[dict] = []
+    if cart_id:
+        try:
+            real_cart = await adapter.get_cart(cart_id)
+            cart_lines = [
+                {"product_id": line.product_id, "title": line.title}
+                for line in real_cart.lines
+            ]
+        except Exception:  # noqa: BLE001 - degrade honestly, never block on this
+            logger.warning("basket_proposal: get_cart failed for %r", cart_id, exc_info=True)
+
     results: list[BasketItemResult] = []
     for item in eligible:
+        if cart_lines:
+            score, _ = best_matches_with_score(cart_lines, item.search_query or item.label)
+            if score > 0:
+                results.append(BasketItemResult(item=item, outcome="already_in_cart"))
+                continue
         if not item.candidates:
             results.append(BasketItemResult(item=item, outcome="no_candidates"))
             continue
@@ -178,6 +213,7 @@ def _build_reply(results: list[BasketItemResult]) -> str:
     no_candidates = [r for r in results if r.outcome == "no_candidates"]
     ambiguous = [r for r in results if r.outcome == "ambiguous"]
     failed = [r for r in results if r.outcome == "failed"]
+    already_in_cart = [r for r in results if r.outcome == "already_in_cart"]
 
     lines: list[str] = []
     if proposed:
@@ -186,6 +222,9 @@ def _build_reply(results: list[BasketItemResult]) -> str:
             f"I've proposed adding: {labels}. Confirm each from your pending "
             "suggestions to add it to your cart."
         )
+    if already_in_cart:
+        labels = ", ".join(r.item.label for r in already_in_cart)
+        lines.append(f"You already have something in your cart for: {labels}.")
     if ambiguous:
         labels = ", ".join(r.item.label for r in ambiguous)
         lines.append(f"You'll need to pick which one for: {labels}.")
