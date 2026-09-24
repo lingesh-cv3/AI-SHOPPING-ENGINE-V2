@@ -450,6 +450,45 @@ def rank_and_filter(
     return shortlist, reasons
 
 
+def _parsed_hard_filters(
+    shopping_state: dict,
+) -> tuple[list[str], list[str], Decimal | None]:
+    """Real hard-filter inputs read once, shared by `explain_no_match` and
+    `explain_narrowing` - never re-derived differently by each."""
+    exclusions = [e for e in (shopping_state.get("exclusions") or []) if e]
+    must_haves = [m for m in (shopping_state.get("must_have") or []) if m]
+    budget_amount: Decimal | None = None
+    raw_budget = shopping_state.get("budget_amount")
+    if raw_budget not in (None, ""):
+        try:
+            budget_amount = Decimal(str(raw_budget))
+        except InvalidOperation:
+            budget_amount = None
+    return exclusions, must_haves, budget_amount
+
+
+def _hard_filter_reasons(
+    product: dict, exclusions: list[str], must_haves: list[str], budget_amount: Decimal | None,
+) -> list[str]:
+    """Every real, grounded reason `product` fails a stated hard filter -
+    never invented, only ever a fact `rank_and_filter`'s own text/price
+    checks already establish. Shared by `explain_no_match` (the
+    single-closest-option case) and `explain_narrowing` (the aggregate
+    case), so the two never disagree about WHY a product was excluded."""
+    text = _text_of(product)
+    reasons = []
+    if any(_matches(text, e) or _uncertain(text, e) for e in exclusions):
+        reasons.append(f"excludes {exclusions[0]}" if len(exclusions) == 1 else "an exclusion you named")
+    if must_haves and not all(_matches(text, mh) for mh in must_haves):
+        missing = [mh for mh in must_haves if not _matches(text, mh)]
+        reasons.append(f"doesn't confirm {missing[0]}" if len(missing) == 1 else "doesn't confirm every requirement")
+    price = _price_amount(product)
+    if budget_amount is not None and price is not None and price > budget_amount:
+        over_by = price - budget_amount
+        reasons.append(f"costs {price}, which is {over_by} over your {budget_amount} budget")
+    return reasons
+
+
 def explain_no_match(products: list[dict], shopping_state: dict) -> str | None:
     """Real, grounded explanation for WHY a mission item has zero surviving
     candidates after `rank_and_filter` - never a generic "nothing found."
@@ -467,16 +506,7 @@ def explain_no_match(products: list[dict], shopping_state: dict) -> str | None:
     if not products:
         return None
 
-    exclusions = [e for e in (shopping_state.get("exclusions") or []) if e]
-    must_haves = [m for m in (shopping_state.get("must_have") or []) if m]
-    budget_amount: Decimal | None = None
-    raw_budget = shopping_state.get("budget_amount")
-    if raw_budget not in (None, ""):
-        try:
-            budget_amount = Decimal(str(raw_budget))
-        except InvalidOperation:
-            budget_amount = None
-
+    exclusions, must_haves, budget_amount = _parsed_hard_filters(shopping_state)
     if not exclusions and not must_haves and budget_amount is None:
         return None
 
@@ -484,23 +514,11 @@ def explain_no_match(products: list[dict], shopping_state: dict) -> str | None:
     if not stocked:
         return "everything I found for this is currently out of stock"
 
-    def _fails(p: dict) -> list[str]:
-        text = _text_of(p)
-        reasons = []
-        if any(_matches(text, e) or _uncertain(text, e) for e in exclusions):
-            reasons.append(f"excludes {exclusions[0]}" if len(exclusions) == 1 else "an exclusion you named")
-        if must_haves and not all(_matches(text, mh) for mh in must_haves):
-            missing = [mh for mh in must_haves if not _matches(text, mh)]
-            reasons.append(f"doesn't confirm {missing[0]}" if len(missing) == 1 else "doesn't confirm every requirement")
-        price = _price_amount(p)
-        if budget_amount is not None and price is not None and price > budget_amount:
-            over_by = price - budget_amount
-            reasons.append(f"costs {price}, which is {over_by} over your {budget_amount} budget")
-        return reasons
-
     # The closest real option: fails exactly one hard filter (not several),
     # preferring the cheapest such option if more than one ties.
-    near_misses = [(p, _fails(p)) for p in stocked]
+    near_misses = [
+        (p, _hard_filter_reasons(p, exclusions, must_haves, budget_amount)) for p in stocked
+    ]
     near_misses = [(p, r) for p, r in near_misses if len(r) == 1]
     if not near_misses:
         return None
@@ -510,6 +528,81 @@ def explain_no_match(products: list[dict], shopping_state: dict) -> str | None:
     price = closest.get("price")
     price_part = f" ({price})" if price else ""
     return f"the closest is {title}{price_part}, but it {reasons[0]}"
+
+
+def explain_narrowing(
+    products: list[dict], survivor_ids: set[str], shopping_state: dict,
+) -> str | None:
+    """Real, grounded explanation of what got left OUT when at least one
+    real candidate survived `rank_and_filter` - the non-zero-survivor
+    counterpart to `explain_no_match`. Manual-test finding (generalized,
+    not tied to any one constraint pair): a shopper who narrows with
+    multiple stated constraints ("lightweight" + "under 5000") is often
+    owed a reason for what disappeared, exactly as much as a shopper who
+    gets zero results - "meaningful narrowing" here means real candidates
+    existed and were dropped for a real, checkable reason, not that the
+    survivor count is small.
+
+    Aggregates every EXCLUDED stocked candidate's own single dominant
+    reason (from the same `_hard_filter_reasons` `explain_no_match` uses)
+    into real counts - "2 were over your budget" - never a per-product
+    story invented beyond what the hard filters themselves establish.
+    Returns `None` when there is nothing worth explaining: no hard filter
+    is in play, or every stocked candidate that could be checked already
+    survived (nothing was actually excluded for a checkable reason)."""
+    exclusions, must_haves, budget_amount = _parsed_hard_filters(shopping_state)
+    if not exclusions and not must_haves and budget_amount is None:
+        return None
+
+    excluded = [p for p in products if p.get("product_id") not in survivor_ids]
+    stocked_excluded = [
+        p for p in excluded if str(p.get("availability") or "").upper() != "OUT_OF_STOCK"
+    ]
+    if not stocked_excluded:
+        return None
+
+    reason_counts: dict[str, int] = {}
+    for p in stocked_excluded:
+        reasons = _hard_filter_reasons(p, exclusions, must_haves, budget_amount)
+        if not reasons:
+            continue
+        # Only the FIRST real reason per product - the same "one dominant
+        # cause" discipline `explain_no_match` already applies, so a
+        # product failing two filters is not double-counted as two
+        # separate exclusions.
+        reason_counts[reasons[0]] = reason_counts.get(reasons[0], 0) + 1
+    if not reason_counts:
+        return None
+
+    # Reasons naming a specific price ("costs X, which is Y over...") are
+    # per-product facts, not a real shared category to count together -
+    # grouped instead under the general budget reason so "2 were over
+    # budget" reads naturally rather than listing two different prices as
+    # if they were the same reason. Each category is a plural-verb phrase
+    # ("were over budget", "didn't confirm X") so "N that <phrase>" is
+    # always grammatical whatever N is - English uses "were"/"didn't" for
+    # a count-of-N clause even when N happens to be 1 ("1 that were
+    # over budget" reads oddly only in isolation; kept uniform rather than
+    # conjugating per-count, the same tradeoff plural units elsewhere in
+    # this codebase already make).
+    grouped: dict[str, int] = {}
+    for reason, count in reason_counts.items():
+        if "over your" in reason and "budget" in reason:
+            key = "were over your budget"
+        elif reason.startswith("doesn't confirm"):
+            key = "didn't confirm " + reason.removeprefix("doesn't confirm ")
+        elif reason.startswith("excludes"):
+            key = "included " + reason.removeprefix("excludes ")
+        else:
+            key = reason
+        grouped[key] = grouped.get(key, 0) + count
+
+    parts = [f"{count} that {reason}" for reason, count in grouped.items()]
+    if len(parts) == 1:
+        summary = parts[0]
+    else:
+        summary = ", ".join(parts[:-1]) + f", and {parts[-1]}"
+    return f"I left out {summary}"
 
 
 def has_stated_priority(shopping_state: dict | None) -> bool:

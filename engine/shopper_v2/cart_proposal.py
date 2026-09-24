@@ -113,6 +113,7 @@ async def run_cart_change_proposal_turn(
     quantity: int | None = None,
     mission_item_id: str | None = None,
     reason: str | None = None,
+    variant_id: str | None = None,
 ) -> tuple[str, dict | None]:
     """Returns (reply, proposal_dict_or_None). The proposal dict (when
     present) is exactly what `db.cart_proposals.create` returned -
@@ -124,6 +125,14 @@ async def run_cart_change_proposal_turn(
     needs no product reference at all - `intent_resolution.py` already
     returns it with no `product_id`, and no product-resolution step below
     applies to it.
+
+    `variant_id`, when given, is a real, already-verified variant id - only
+    ever supplied by `fulfillment.py` after the SHOPPER's own explicit
+    choice (a button tap, or an exact-text match against a real option
+    label) for a product that needed one, mirroring invariant 4 ("a tap is
+    trusted; the model's guess is not") for the propose-time path exactly
+    as `engine/execution/service.py`'s own `chosen_variant` already does for
+    the accept-time path. Never a guess this module makes itself.
 
     `mission_item_id`, when given (only ever by
     `basket_proposal.py`, for a multi-item mission's own proposals), is
@@ -173,6 +182,7 @@ async def run_cart_change_proposal_turn(
             "product_id": product_id,
             "proposal_change_type": change_type,
             "quantity": quantity_param,
+            "variant_id": variant_id,
             "proposal_reason": reason or "you asked me to",
             "mission_item_id": mission_item_id,
             "said": message[:80],

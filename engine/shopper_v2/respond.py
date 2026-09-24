@@ -255,10 +255,16 @@ def _honest_no_match(evidence: TurnEvidence, state: ShoppingStateV2) -> str:
 #: count, the titles, whether a stated budget was honored) - nothing new
 #: is asserted, only phrased more like a person than a search result line.
 def _deterministic_summary(verified: list[Product], shopping_state: dict | None = None) -> str:
-    names = [p.title for p in verified[:4]]
+    # Cardinality contract (Shopper item 2): `verified` reaching this
+    # function is already capped to the shopper's requested/default
+    # display count by `graph.py::_apply_query_intent` - naming
+    # every one of them (not a separate `[:4]` truncation) is what keeps
+    # this text's count and its own list of names from ever diverging
+    # from each other, or from the product cards the same turn renders.
+    names = [p.title for p in verified]
     count = len(verified)
     budget_honored = bool((shopping_state or {}).get("budget_amount")) and all(
-        p.price is not None for p in verified[:4]
+        p.price is not None for p in verified
     )
     named = _join_naturally(names)
 

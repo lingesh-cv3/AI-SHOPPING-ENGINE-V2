@@ -20,12 +20,23 @@ from __future__ import annotations
 
 import logging
 
+from engine.execution import ranking
 from engine.execution.relevance import best_matches_with_score
 from engine.reasoning.service import ReasoningService
 from shared.models import Product
 
-from .capability import looks_like_historical_reference, looks_like_recommendation_request
+from .capability import (
+    looks_like_comparison_request,
+    looks_like_historical_reference,
+    looks_like_recommendation_request,
+)
 from .evidence import TurnEvidence, already_verified_evidence
+from .reference_resolution import (
+    looks_like_comparative_pair_reference,
+    parse_query_intent,
+    resolve_comparative_pair,
+    resolve_group_selector,
+)
 from .respond import _claims_a_cart_action
 from .state import ShoppingStateV2, recent_relevant_product_ids
 
@@ -39,15 +50,6 @@ _FETCH_FAILED_REPLY = (
     "I couldn't fetch both of those products to compare them right now - "
     "please try again in a moment."
 )
-
-#: Closed-class superlative vocabulary - the same discipline
-#: `capability.py`'s own comparison/temporal-reference word lists use.
-#: When present, the answer is computed deterministically from real,
-#: freshly-fetched price data (never a model guess at "the cheapest one")
-#: - grounded the same way `mission_ranking.py`'s budget hard-filter
-#: already is.
-_CHEAPEST_WORDS = ("cheapest", "least expensive", "lowest price", "lowest priced")
-_PRICIEST_WORDS = ("most expensive", "priciest", "highest price", "highest priced")
 
 
 async def _best_matching_historical_group(
@@ -63,14 +65,24 @@ async def _best_matching_historical_group(
     products against the message using the SAME word-overlap scoring
     `relevance.py` already uses for ordinary discovery, and returns the
     full membership of whichever group scores highest - never a partial
-    group, never a guess at which one id represents the whole topic."""
+    group, never a guess at which one id represents the whole topic.
+
+    Tie-break fix (2026-09, live-reproduced): when the message's only real
+    matching word is generic ("shoe"), every shoe-related group in the
+    ledger ties for the same score - a real, common case once a
+    conversation has shown the same category more than once. Scanning
+    `groups` MOST-RECENT-FIRST (it is stored oldest-first) and keeping the
+    strict first winner means a tie is now resolved in favor of the group
+    the shopper most recently saw, matching what "earlier" colloquially
+    means in an ongoing conversation - not whichever matching group
+    happened to be stored first."""
     groups = [g for g in state.recent_product_groups if g]
     if not groups:
         return []
 
     best_score = 0
     best_products: list[Product] = []
-    for group_ids in groups:
+    for group_ids in reversed(groups):
         products: list[Product] = []
         for pid in group_ids:
             try:
@@ -91,18 +103,54 @@ async def _best_matching_historical_group(
 
 def _deterministic_superlative(message: str, products: list[Product]) -> str | None:
     """Real, grounded answer for a closed-class superlative question over
-    a real historical group - never a model guess, never invented. Only
-    ever considers products with a real, known price."""
-    lowered = message.lower()
-    priced = [p for p in products if p.price is not None]
-    if not priced:
+    a real historical group - never a model guess, never invented.
+    Consolidated onto the shared `engine.execution.ranking`/
+    `reference_resolution.parse_query_intent` (the same ones
+    `graph.py::node_discovery` uses) rather than this module's own,
+    separate word list and min/max logic - see the root-cause
+    consolidation this closes: a superlative used to only exist inside
+    this one branch, unreachable from a bare discovery question with no
+    historical-reference wording."""
+    query_intent = parse_query_intent(message)
+    if not query_intent.superlative or query_intent.sort_attribute not in ranking.KNOWN_ATTRIBUTES:
         return None
-    if any(w in lowered for w in _CHEAPEST_WORDS):
-        pick = min(priced, key=lambda p: p.price.amount)
-        return f"The cheapest one I showed you was {pick.title}, at {pick.price}."
-    if any(w in lowered for w in _PRICIEST_WORDS):
-        pick = max(priced, key=lambda p: p.price.amount)
-        return f"The most expensive one I showed you was {pick.title}, at {pick.price}."
+    pick = ranking.pick_superlative(products, query_intent.sort_attribute, query_intent.superlative)
+    if pick is None:
+        return None
+    which = "cheapest" if query_intent.superlative == "min" else "most expensive"
+    if query_intent.sort_attribute == "rating":
+        which = "best rated" if query_intent.superlative == "max" else "lowest rated"
+        return f"The {which} one I showed you was {pick.title}, rated {pick.rating}."
+    return f"The {which} one I showed you was {pick.title}, at {pick.price}."
+
+
+def _named_list(products: list[Product]) -> str:
+    if len(products) == 1:
+        return products[0].title
+    return ", ".join(p.title for p in products[:-1]) + f" and {products[-1].title}"
+
+
+def _resolve_named_subset(
+    message: str, group_products: list[Product],
+) -> tuple[list[Product], str] | None:
+    """Real, structured resolution of WHICH real products in
+    `group_products` (already in real display order) `message` names -
+    "the first one", "both", "all three", "the first and third", or one
+    side of a real comparative pair ("the cheaper one"). Never a phrase
+    match against a specific example - see `reference_resolution.py`'s own
+    docstring for why these markers generalize to any product/catalog.
+    Returns `(products, why)` for the resolved real subset, or `None` when
+    the message names no subset this can determine from real structure
+    (the caller then falls back to the group as a whole)."""
+    if looks_like_comparative_pair_reference(message):
+        priced = [p for p in group_products if p.price is not None]
+        pick = resolve_comparative_pair(message, priced)
+        if pick is not None:
+            return ([pick], f"the one you named is {pick.title}, at {pick.price}")
+    positions = resolve_group_selector(message, len(group_products))
+    if positions is not None:
+        subset = [group_products[i] for i in positions]
+        return (subset, f"you're referring to {_named_list(subset)}")
     return None
 
 
@@ -114,6 +162,59 @@ async def run_compare_turn(
     state: ShoppingStateV2,
 ) -> tuple[str, TurnEvidence, list[Product], bool]:
     """Returns (reply, evidence, fetched products, used_model)."""
+    # Contextual reference resolution fix: a BARE comparative-pair
+    # question ("which one was cheaper?", with no "earlier"/"before"
+    # wording) means the products CURRENTLY in view - `active_products`,
+    # this turn's own single topic - never a blend with a different,
+    # earlier topic. Live-reproduced gap this closes: "show running
+    # shoes" then "show socks" then "which one was cheaper" compared a
+    # sock against a shoe, because the general merged-ids path below
+    # backfills from history whenever the current topic alone is smaller
+    # than its own minimum - correct for an EXPLICIT cross-topic ask
+    # ("compare the shoes to the slides"), wrong for a bare pronoun that
+    # named no second topic at all. Tried first, and only when the
+    # message itself carries no historical-reference wording (that case
+    # is handled by the historical-group branch below, which explicitly
+    # reaches into the ledger on purpose).
+    if looks_like_comparative_pair_reference(message) and not looks_like_historical_reference(
+        message
+    ):
+        current_ids = list(dict.fromkeys(state.active_products))
+        current_products: list[Product] = []
+        for pid in current_ids:
+            try:
+                current_products.append(await adapter.get_product(pid))
+            except Exception:  # noqa: BLE001 - degrade honestly, never raise
+                logger.warning(
+                    "shopper_v2 compare: current-topic get_product failed for %r",
+                    pid, exc_info=True,
+                )
+        priced = [p for p in current_products if p.price is not None]
+        if len(priced) == 2:
+            pick = resolve_comparative_pair(message, priced)
+            if pick is not None:
+                evidence = already_verified_evidence(
+                    priced, {p.product_id: ["shopper_named_comparison_target"] for p in priced},
+                )
+                return (f"That's {pick.title}, at {pick.price}.", evidence, priced, False)
+        elif len(priced) < 2:
+            # Genuinely nothing else currently in view to compare against -
+            # say so honestly, naming what IS in view, rather than
+            # silently reaching into a different, earlier topic the
+            # shopper never asked to bring back in.
+            named = f" I currently have {priced[0].title} in view." if priced else ""
+            return (
+                "I don't have two products from the same search in view to "
+                f"compare yet.{named} Ask me to show something else first, "
+                "or say 'from earlier' if you mean something I showed you before.",
+                TurnEvidence(query=None, products=[]),
+                current_products,
+                False,
+            )
+        # More than 2 priced products currently in view - genuinely
+        # ambiguous which pair "which one" means; falls through to the
+        # general merged-ids path below rather than guessing a pair.
+
     # Conversational-flow review fix: a genuine reference to a PAST group
     # ("what was the cheapest shoe you showed me earlier") is not a 2-item
     # comparison at all - it needs the FULL matching historical group, not
@@ -125,13 +226,39 @@ async def run_compare_turn(
     if looks_like_historical_reference(message):
         historical_products = await _best_matching_historical_group(message, state, adapter)
         if historical_products:
-            deterministic = _deterministic_superlative(message, historical_products)
             evidence = already_verified_evidence(
                 historical_products,
                 {p.product_id: ["historical_group_reference"] for p in historical_products},
             )
+            # Generalized structured resolution FIRST - "the second one you
+            # showed me earlier", "both of the shoes from before", "the
+            # cheaper one from that group" all name a specific real subset
+            # of the historical group, not just its absolute superlative.
+            named = _resolve_named_subset(message, historical_products)
+            if named is not None:
+                subset, why = named
+                return (f"From what I showed you earlier - {why}.", evidence, subset, False)
+            deterministic = _deterministic_superlative(message, historical_products)
             if deterministic:
                 return (deterministic, evidence, historical_products, False)
+            # A bare callback ("what about those shoes from earlier?") is
+            # not itself asking for a comparison or analysis - it wants
+            # the real group back, cleanly. Live-reproduced gap: routing
+            # this through the same "comparison" model-synthesis prompt
+            # every genuine compare/recommend question uses produced a
+            # broad, vague reply, because there was no actual analytical
+            # question in the message for the model to answer. Only a
+            # message that ITSELF carries a real comparison word
+            # ("compare"/"versus"/"which is better") reaches the model
+            # synthesis path below; every other historical callback gets
+            # this same deterministic, grounded re-listing - structural,
+            # not phrase-specific (the same closed-class check
+            # `capability.py`'s own routing already uses).
+            if not looks_like_comparison_request(message):
+                return (
+                    f"Here's what I showed you earlier: {_named_list(historical_products)}.",
+                    evidence, historical_products, False,
+                )
             items = [
                 {
                     "product_id": p.product_id,
@@ -153,8 +280,11 @@ async def run_compare_turn(
     # `state.recent_relevant_product_ids`'s own docstring for the real,
     # reported gap this closes ("compare the shoes to the slides" after a
     # topic switch, when `active_products` alone only ever holds the
-    # latest topic).
-    ids = recent_relevant_product_ids(state, minimum=2, cap=2)
+    # latest topic). Widened from a hard cap of 2 - "all three"/"the first
+    # and third" genuinely need the FULL currently-relevant group to
+    # resolve against; the fixed-at-2 cap made those structurally
+    # unresolvable regardless of what the shopper actually said.
+    ids = recent_relevant_product_ids(state, minimum=2, cap=10)
     if len(ids) < 2:
         return (_NEED_TWO_REPLY, TurnEvidence(query=None, products=[]), [], False)
 
@@ -167,6 +297,23 @@ async def run_compare_turn(
 
     if len(products) < 2:
         return (_FETCH_FAILED_REPLY, TurnEvidence(query=None, products=[]), products, False)
+
+    # Generalized structured resolution: a named subset ("both", "all
+    # three", "the first and third", "the cheaper one") narrows to exactly
+    # those real products before anything else runs - never the default
+    # top-2, and never a guess when the count named doesn't match reality
+    # (see `resolve_group_selector`'s own docstring).
+    named = _resolve_named_subset(message, products)
+    if named is not None:
+        subset, _why = named
+        if len(subset) == 1:
+            evidence = already_verified_evidence(
+                subset, {p.product_id: ["shopper_named_comparison_target"] for p in subset},
+            )
+            return (f"That's {subset[0].title}, at {subset[0].price}.", evidence, subset, False)
+        products = subset
+    else:
+        products = products[:2]
 
     # Every fetched product is real, by construction - `exists=True` for
     # both, unconditionally verified relevant (a shopper-named comparison

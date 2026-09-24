@@ -4,8 +4,9 @@
 
 Overall project: **~70%** implementation complete against the currently
 defined scope in CLAUDE.md's roadmap. Shopper V2: **~75%** implementation
-complete — it is now the default shopper experience (V1 remains reachable
-as a rollback), but several roadmap-level shopper outcomes and real-volume
+complete — it is the ONLY shopper routing the real storefront calls (see
+"Shopper V2 — the only shopper routing" below for what was verified and
+corrected here), but several roadmap-level shopper outcomes and real-volume
 validation are still open. Merchant Intelligence: **~55%** — the console and
 Merchant Copilot are built and visually complete, but most "diagnosis leads
 to an attached action" work is still read-only. CV3 Operations: **~25%** —
@@ -24,12 +25,23 @@ counted as unfinished implementation work.
 
 ## Current Focus
 
-### Shopper V2 as the default assistant — ~90% complete
-- `/api/v2/chat` (`engine/api/chat_v2.py`) is now the default path the real
-  storefront opens (`storefront/src/App.tsx`, `assistantMode` defaults to
-  `"v2"`); V1 (`engine/api/chat.py`) remains fully intact and reachable via
-  a build-time flag (`VITE_SHOPPER_DEFAULT=v1`) or a per-session "switch to
-  classic assistant" control.
+### Shopper V2 — the only shopper routing — ~90% complete
+- `/api/v2/chat` (`engine/shopper_v2/`, routed via `engine/api/chat_v2.py`)
+  is the ONLY shopper path the real storefront calls today —
+  `storefront/src/ChatWidget.tsx` invokes `api.chatV2` exclusively, and
+  `storefront/src/App.tsx` has no `assistantMode` state, no
+  `VITE_SHOPPER_DEFAULT` build flag, and no "switch to classic assistant"
+  control (verified by inspecting the actual source; a prior version of
+  this entry described that toggle as existing — it does not, and the
+  wording was corrected here rather than left to imply a live rollback
+  path that isn't wired up). Intended final architecture is V2-only; V1 is
+  not being kept as a parallel shopper architecture.
+- V1 (`engine/api/chat.py`, `/api/chat`) is still mounted at the API level
+  and is exercised directly by `healthcheck.py`/`fuzz.py`/`auditroutes.py` -
+  real, live test coverage, not dead code - but nothing in the shopper-
+  facing storefront can reach it; it is not a shopper-selectable fallback.
+  Retiring it entirely (deleting the route and its test coverage) is not
+  yet done and is not currently scheduled - see Next Work.
 - V2 owns discovery, comparison, compatibility, cart proposals, checkout
   continuity, payment recovery, missions, basket proposals, trade-off
   re-ranking, cart status and clear-cart — all routed through the
@@ -167,6 +179,13 @@ Not started.
 8. Select and spec (via `feature-spec`) the next Merchant Phase 1 item —
    Recovery Opportunity Radar, Catalog Intelligence, or Inventory
    Intelligence — before writing any code for it.
+9. Decide and execute V1's actual end state: the intended final
+   architecture is V2-only, and V1 (`engine/api/chat.py`, `/api/chat`) is
+   no longer reachable from the shopper-facing storefront at all - it
+   remains only as a backend route with its own test coverage
+   (`healthcheck.py`/`fuzz.py`/`auditroutes.py`). Retiring it means
+   migrating whatever those suites still uniquely check into V2's own
+   test coverage first, then deleting the route - not yet started.
 
 ---
 

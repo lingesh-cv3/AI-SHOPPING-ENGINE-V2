@@ -77,6 +77,18 @@ _STOPWORDS = frozenset(
         # patch for one failing sentence.
         "show", "need", "needs", "needed", "want", "wants", "wanted",
         "looking", "look", "find", "finding", "please", "help",
+        # Live-reproduced (2026-09): common copula/auxiliary verbs
+        # ("was"/"is"/"were") were never added alongside "has"/"had"/
+        # "does"/"did" above - the exact same class of word, just missed.
+        # Dangerous specifically because `_overlap`'s own stemming
+        # (stripping one trailing "s") turns "was" into "wa" - a
+        # 2-character fragment that coincidentally substring-matches many
+        # real words ("water", "wallet", "warranty"), silently inflating
+        # an unrelated product's score above a genuinely correct match in
+        # a query as ordinary as "what was the cheapest X you showed me
+        # earlier". Never a product name or attribute in English, exactly
+        # the same closed-class reasoning as every entry above.
+        "was", "is", "were", "am", "being", "been",
     }
 )
 
@@ -216,6 +228,31 @@ def best_matches_with_score(products: list, query: str) -> tuple[int, list]:
         return 0, []
     top = max(s for s, _ in scored)
     return top, [p for s, p in scored if s == top]
+
+
+def any_overlap_ids(products: list, query: str) -> set[str]:
+    """Product ids sharing AT LEAST ONE significant word with `query` -
+    a genuinely broader set than `best_matches_with_score`'s own top-scoring
+    winners, and the set this exists for: telling apart a real rival
+    interpretation (some real relevance signal, just not the strongest)
+    from a product that merely survived an unrelated hard filter (budget/
+    stock/exclusions) with ZERO relevance signal at all - e.g. a shopper
+    asking for "something for energy" retrieves both a real energy product
+    AND an unrelated sock that only reached the candidate set because
+    nothing about it violates budget/stock/exclusions. That sock is not a
+    competing interpretation of "energy" - it shares no word with it at
+    all - so it must never be treated as a rival when deciding whether a
+    single strong match is genuinely unambiguous (see
+    `engine/shopper_v2/evidence.py::build_evidence`'s own
+    `all_survivors_are_top_matches` - this is the fix for a live-reproduced
+    gap where exactly that kind of zero-overlap survivor blocked the
+    single-strong-match override from ever firing, for ANY vague-but-
+    genuine mission-item label, on any merchant/category, not one
+    phrase)."""
+    words = _significant_words(query)
+    if not words:
+        return set()
+    return {p.product_id for p in products if _overlap(words, _product_text(p)) > 0}
 
 
 def best_matches(products: list, query: str) -> list:

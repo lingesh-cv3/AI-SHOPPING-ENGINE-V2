@@ -27,12 +27,20 @@ partial, unverified, or unbuilt.
 
 ## Shopper AI
 
-- **Shopper V2 is the default conversational architecture.** `/api/v2/chat`
-  opens by default in the real storefront; V1 remains fully intact and
-  reachable via a rollback flag or a per-session switch. V2 structurally
-  fixes the reply-before-data defect: the model's pre-fetch reply is
-  discarded before retrieval runs, so shopper-facing text can only be
-  generated from real, already-fetched evidence, by construction.
+- **Shopper V2 is the only shopper routing the real storefront calls.**
+  `/api/v2/chat` (`engine/shopper_v2/`) is the sole path
+  `storefront/src/ChatWidget.tsx` invokes (`api.chatV2`, unconditional) -
+  there is no `assistantMode` state, build flag, or per-session control in
+  the storefront that reaches V1 instead. V1's `/api/chat`
+  (`engine/api/chat.py`) remains mounted at the API level only, exercised
+  directly by `healthcheck.py`/`fuzz.py`/`auditroutes.py`, but is not a
+  shopper-selectable fallback - the intended final architecture is
+  V2-only, with V1 retained only for its own existing test coverage during
+  the transition, not as a permanent parallel shopper architecture (see
+  PROGRESS.md's Next Work for retiring it outright). V2 structurally fixes
+  the reply-before-data defect: the model's pre-fetch reply is discarded
+  before retrieval runs, so shopper-facing text can only be generated from
+  real, already-fetched evidence, by construction.
 - **V2 discovery, comparison, and compatibility** turns run against live,
   freshly-fetched product data on both demo merchants.
 - **V2 cart actions**: cart proposals, shopper accept/reject, checkout

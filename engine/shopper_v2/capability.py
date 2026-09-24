@@ -247,9 +247,22 @@ def route(
 #: deterministic backstop at all today, relying entirely on the primary
 #: model's own `hinted_action_type` classification, which this exact
 #: phrasing did not reliably produce.
+#: Regression fix (2026-09-24, live-reproduced via `test_phase13_cart_status.py`):
+#: "my cart"/"in my cart"/"the cart" removed - they matched a BARE "what's
+#: in my cart?" status question just as readily as a genuine budget-
+#: analysis one, and once `SOFT_CAPABILITIES` (below) made `CART_STATUS`
+#: itself overridable by this same backstop, that bare question got
+#: reclassified from a plain contents echo into a full cart-intelligence
+#: analysis it never asked for - confusing the two capabilities the same
+#: way `cart_intelligence_v2.py`'s own docstring says they must never be
+#: conflated. Every phrase kept below is genuinely budget/cost-analysis-
+#: shaped, never satisfied by a bare "what's in my cart" - the original
+#: live-reproduced case this list exists for ("My cart is over 10000. What
+#: can I change to bring it under budget?") still matches on "bring it
+#: under" alone.
 _CART_INTELLIGENCE_WORDS = (
-    "my cart", "in my cart", "the cart", "over budget", "under budget",
-    "bring it under", "within budget", "too expensive", "cart total",
+    "over budget", "under budget", "bring it under", "within budget",
+    "too expensive", "cart total", "bring it down", "over my budget",
 )
 
 
@@ -260,3 +273,69 @@ def looks_like_cart_intelligence_request(message: str) -> bool:
     has nothing for `cart_intelligence_v2.py` to analyze)."""
     lowered = f" {message.lower().strip()} "
     return any(word in lowered for word in _CART_INTELLIGENCE_WORDS)
+
+
+#: Manual-test finding: the deterministic backstops above only ever
+#: overrode `capability` when `route()`'s own single-shot classification
+#: had landed on DISCOVER or CONVERSATIONAL - the two "the model was not
+#: decisive about anything else" defaults. A REAL routing-precedence bug,
+#: not tied to any one phrase: whenever that same single primary call
+#: instead guessed one of the OTHER capabilities below - COMPATIBILITY,
+#: COMPLEMENTARY, TRADE_OFF, CART_STATUS, CART_INTELLIGENCE, ORDER_STATUS -
+#: every backstop was structurally unreachable, because none of those
+#: guesses ever gets checked against anything beyond the model's own single
+#: call either. Live-reproduced: "what was the cheapest shoe you showed me
+#: earlier" landing on COMPATIBILITY instead of DISCOVER/CONVERSATIONAL
+#: skipped the historical-reference backstop entirely, for no reason tied
+#: to that phrase - ANY of these six guesses being wrong would have hidden
+#: the exact same bug for a differently-worded reference. `SOFT_CAPABILITIES`
+#: is every capability value reachable from nothing but that one raw guess,
+#: with no independent, deterministic confirmation anywhere downstream -
+#: `COMPARE` (a 2+-tracked-product check), `CART_ACTION`
+#: (`resolve_cart_target`), `CHECKOUT`/`PAYMENT_RECOVERY`/
+#: `FRICTION_RECOVERY` (an explicit signal or financial gate) all have
+#: their own separate confirmation and are deliberately excluded - a
+#: reference backstop that finds real, structured evidence must be free to
+#: override every equally-unconfirmed guess, not only the two the model
+#: happens to default to.
+SOFT_CAPABILITIES = frozenset(
+    {
+        Capability.DISCOVER,
+        Capability.CONVERSATIONAL,
+        Capability.COMPATIBILITY,
+        Capability.COMPLEMENTARY,
+        Capability.TRADE_OFF,
+        Capability.CART_STATUS,
+        Capability.CART_INTELLIGENCE,
+        Capability.ORDER_STATUS,
+        Capability.UNKNOWN,
+    }
+)
+
+
+def looks_like_reference(message: str) -> bool:
+    """Union of every closed-class marker meaning 'point at something
+    already shown or discussed' rather than naming a new search: a
+    comparison word, a recommendation follow-up, a temporal/historical
+    marker, or an ordinal/collective reference ("the first one", "both",
+    "all three"). Never sufficient alone - every caller still requires
+    real tracked state before trusting this, exactly like each of the
+    individual checks it combines."""
+    from .reference_resolution import (
+        looks_like_comparative_pair_reference,
+        looks_like_group_or_ordinal_reference,
+    )
+
+    return (
+        looks_like_comparison_request(message)
+        or looks_like_recommendation_request(message)
+        or looks_like_historical_reference(message)
+        or looks_like_group_or_ordinal_reference(message)
+        # "which one was cheaper"/"the pricier one" - a real, closed-class
+        # comparative-pair reference, structurally identical to the
+        # ordinal/collective markers just above but not itself a
+        # "compare"/"versus"-shaped `_COMPARISON_WORDS` hit - live-
+        # reproduced gap: this bare phrasing never overrode the primary
+        # model's own SOFT guess, so it never reached COMPARE at all.
+        or looks_like_comparative_pair_reference(message)
+    )

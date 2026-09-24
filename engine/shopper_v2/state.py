@@ -84,6 +84,44 @@ class MissionItem(BaseModel):
     selected_product_id: str | None = None
 
 
+class FulfillmentItem(BaseModel):
+    """One product in an in-progress multi-product "add these to my cart"
+    conversation (CLAUDE.md Shopper item 3 - conversational multi-product
+    purchasing). Tracks, per real product, whatever real variant selection
+    it actually needs before it can be proposed - never a fixed "size"
+    assumption; see `fulfillment.py::_required_dimension` for how this is
+    derived from the product's own real `ProductVariant.attributes`, never
+    invented or hardcoded to any one product/category.
+
+    `status` transitions: "pending" (not looked at yet) -> "needs_variant"
+    (a real choice is required and not yet made) -> "added" (the shopper's
+    own chosen variant, if any, was used to add this real product to the
+    real cart directly, via `engine.execution.trusted_action.run_trusted_action`
+    - the SAME risk-gated pipeline every other cart action already runs
+    through, never a bypass) - or "awaiting_approval" (the Risk Gate itself
+    required a human before this specific item could go through - reported
+    honestly, never silently retried as if it had succeeded) or "failed"
+    (the add attempt itself failed - never silently dropped)."""
+
+    product_id: str
+    title: str
+    quantity: int = 1
+    status: Literal[
+        "pending", "needs_variant", "added", "awaiting_approval", "failed"
+    ] = "pending"
+    #: Real attribute key(s) this product's own buyable variants vary by
+    #: (e.g. "size", "color", "size / color", "flavor") - always derived
+    #: from `ProductVariant.attributes`, never a fixed vocabulary.
+    dimension_label: str | None = None
+    #: Real, currently-buyable options - `{"variant_id", "label", "left"}`
+    #: per option, the same shape `engine/execution/service.py`'s own
+    #: `needs_choice`/`choices` mechanism already uses for the single-item
+    #: case - reused, not reinvented.
+    options: list[dict] = Field(default_factory=list)
+    chosen_variant_id: str | None = None
+    proposal_id: str | None = None
+
+
 class ShoppingStateV2(BaseModel):
     """A typed mirror of one `shopping_states` row, plus a domain-only
     `version` counter. Field names and semantics match
@@ -123,6 +161,14 @@ class ShoppingStateV2(BaseModel):
     #: additive, not a replacement for single-item state.
     mission_items: list[MissionItem] = Field(default_factory=list)
 
+    #: Shopper item 3 - an in-progress multi-product cart-fulfillment
+    #: conversation ("add both" -> collect each real product's own real
+    #: variant requirement, one at a time, before proposing any of them).
+    #: See `FulfillmentItem`'s own docstring and `fulfillment.py`. Empty
+    #: for the ordinary single-item/no-variant case - purely additive,
+    #: same discipline as `mission_items` above.
+    fulfillment_queue: list[FulfillmentItem] = Field(default_factory=list)
+
     #: Domain-only, in-memory. See module docstring - NOT a DB column, NOT a
     #: durable optimistic-concurrency token.
     version: int = 0
@@ -148,10 +194,17 @@ class ShoppingStateV2(BaseModel):
 
 
 #: Bound on how many prior ledger groups `recent_relevant_product_ids` will
-#: walk back through, and how many ids it will ever return - the same
-#: "don't reach back further than makes sense" discipline
-#: `intent_resolution.py::_resolve_all_reference` already applies.
-_MAX_RECENT_LOOKBACK_GROUPS = 2
+#: walk back through, and how many ids it will ever return. Matches
+#: `graph.py::_LEDGER_MAX_GROUPS` (the ledger's own retention bound) -
+#: never a SMALLER, second, arbitrary limit. Context-awareness fix: this
+#: used to stop at 2 groups back while `compare.py`'s own historical-match
+#: path scanned the full ledger - a shopper switching topics 3+ times
+#: ("shoes... socks... a jacket... which one was cheaper, the shoes or the
+#: jacket") could ask the SAME historical-recall question through two
+#: different capabilities and get two different answers, one honest, one
+#: silently truncated at 2. One shared bound now, matched to how far back
+#: this codebase actually retains anything at all.
+_MAX_RECENT_LOOKBACK_GROUPS = 5
 _MAX_RECENT_PRODUCT_IDS = 6
 
 

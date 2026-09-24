@@ -158,20 +158,66 @@ def finding_3_generalizes_to_several_genuine_tied_survivors() -> None:
     )
 
 
-def finding_3_still_withholds_a_real_mixed_bag() -> None:
-    """The generalization above is a strict superset, not a loosening: a
-    survivor that does NOT share the top keyword score (a real rival that
-    is still just riding along on the hard filter, not on the query) must
-    still keep the whole set withheld - the exact case Finding 3 always
-    existed to guard."""
+def finding_3_ordinary_multiword_match_still_discriminates() -> None:
+    """Corrected 2026-09-24 - this test used to assert that a real,
+    genuinely-scoring-lower rival blocks Finding 3's override. That
+    premise is unreachable: `weak_single_word_match` (the ONLY gate the
+    override can ever affect) is true exclusively when `top_score == 1`,
+    and no candidate can score strictly between 0 and 1 (overlap counts
+    are non-negative integers) - so the "real, nonzero, lower-scoring
+    rival" this test's old fixture claimed to construct never actually
+    existed; the fixture's second candidate ("Trail Running Cap" for
+    query "shoe") in fact scored exactly 0, which is
+    `finding_3_zero_overlap_survivor_never_blocks_a_real_match`'s case,
+    not this one - and asserting it should stay withheld was itself the
+    bug the live "something for energy" report exposed. What remains
+    genuinely worth testing here: an ordinary multi-word match
+    (`top_score >= 2`, never weak in the first place) still correctly
+    verifies the real match and withholds an unrelated candidate - the
+    override mechanism is irrelevant to this case, by construction."""
+    candidates = [
+        _p(
+            "P1", "Packable Rain Jacket",
+            "Lightweight, waterproof, packs into its own pocket.", "4999.00 INR", 4.0,
+        ),
+        _p(
+            "P2", "Lightweight Base Layer Top",
+            "Moisture-wicking layer for cold starts.", "1999.00 INR", 4.0,
+        ),
+    ]
+    ev = build_evidence(
+        query="lightweight waterproof",
+        raw_said="something lightweight and waterproof",
+        products=candidates,
+        shopping_state=None,
+        memory_facts=None,
+        catalog_sample=candidates,
+        platform_unavailable=False,
+    )
+    by_id = {p.product_id: p for p in ev.products}
+    check(
+        "Finding 3: a genuine two-word match verifies; a one-word-weaker candidate does not",
+        by_id["P1"].relevance_verified and not by_id["P2"].relevance_verified,
+    )
+
+
+def finding_3_zero_overlap_survivor_never_blocks_a_real_match() -> None:
+    """Live-reproduced, platform-agnostic gap (2026-09-24): a mission item
+    labeled "something for energy" retrieved a real energy product (one
+    genuine word overlap on "energy") ALONGSIDE an unrelated sock that
+    shares ZERO query words - the sock only "survived" because nothing
+    about it violates budget/stock/exclusions, not because it is a
+    plausible second reading of "energy". A hard-filter survivor with NO
+    real word overlap at all is not a rival interpretation and must never
+    block the single-strong-match override - see
+    `engine.execution.relevance.any_overlap_ids`'s own docstring. Same
+    shape, any category: a "shoe" query alongside a completely unrelated
+    "cap" survivor must verify the shoe, not withhold both."""
     candidates = [
         _p("P1", "Marathon Pro Racing Shoe", "Carbon plate build for shoe fans.", "12499.00 INR", 4.0),
         _p(
-            "P2",
-            "Trail Running Cap",
-            "A breathable cap for trail runners.",
-            "1299.00 INR",
-            4.0,
+            "P2", "Trail Running Cap",
+            "A breathable cap for trail runners.", "1299.00 INR", 4.0,
         ),
     ]
     ev = build_evidence(
@@ -183,9 +229,10 @@ def finding_3_still_withholds_a_real_mixed_bag() -> None:
         catalog_sample=candidates,
         platform_unavailable=False,
     )
+    by_id = {p.product_id: p for p in ev.products}
     check(
-        "Finding 3 override does not apply when a lower-scoring outlier is mixed in",
-        not any(p.relevance_verified for p in ev.products),
+        "Finding 3: a zero-overlap survivor never blocks a real single-word match",
+        by_id["P1"].relevance_verified and not by_id["P2"].relevance_verified,
     )
 
 
@@ -222,7 +269,8 @@ def main() -> int:
     finding_3_single_hard_survivor_weak_match_is_confirmed()
     finding_3_does_not_override_a_diverging_query()
     finding_3_generalizes_to_several_genuine_tied_survivors()
-    finding_3_still_withholds_a_real_mixed_bag()
+    finding_3_ordinary_multiword_match_still_discriminates()
+    finding_3_zero_overlap_survivor_never_blocks_a_real_match()
     asyncio.run(finding_4_search_context_round_trip())
 
     print()

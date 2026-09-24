@@ -860,6 +860,14 @@ class ShoppingState(Base):
     #: column.
     recent_product_groups: Mapped[list] = mapped_column(JSON, default=list)
 
+    #: Shopper V2 only (see engine/shopper_v2/fulfillment.py) - an
+    #: in-progress multi-product cart-fulfillment conversation, one entry
+    #: per product still being collected ("add both" -> ask each product's
+    #: own real variant requirement in turn before proposing it). Replaced
+    #: wholesale each time it changes, same reasoning as `mission_items`
+    #: above. V1 never reads or writes this column.
+    fulfillment_queue: Mapped[list] = mapped_column(JSON, default=list)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )

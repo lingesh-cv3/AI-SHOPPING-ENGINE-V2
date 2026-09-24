@@ -43,11 +43,10 @@ from engine.execution import events as shopper_events
 from engine.reasoning.service import ReasoningService
 
 from .capability import (
+    SOFT_CAPABILITIES,
     Capability,
     looks_like_cart_intelligence_request,
-    looks_like_comparison_request,
-    looks_like_historical_reference,
-    looks_like_recommendation_request,
+    looks_like_reference,
     route,
 )
 from .cart_proposal import run_cart_change_proposal_turn
@@ -58,14 +57,18 @@ from .context import build_turn_context
 from .cart_status import run_cart_status_turn
 from .cart_intelligence_v2 import run_cart_intelligence_turn
 from . import friction_recovery
+from . import fulfillment
 from .friction_recovery import run_friction_recovery_turn
 from .conversational import run_conversational_turn
 from .order_status import run_order_status_turn
 from .payment_recovery import run_payment_recovery_turn
-from .evidence import TurnEvidence
+from .evidence import TurnEvidence, already_verified_evidence
 from .intent_resolution import resolve_cart_target
 from .missions import run_mission_turn
 from .pipeline import run_discovery_turn
+from .reference_resolution import parse_query_intent
+from engine.execution import ranking
+from engine.execution.relevance import best_matches_with_score
 from .respond import respond as respond_
 from .state import ShoppingStateV2, apply_delta, load, recent_relevant_product_ids
 from .tracing import TurnTrace
@@ -169,6 +172,12 @@ class ShopperTurnState(TypedDict, total=False):
     execution: Any
     owner_keys: list[str] | None
     shopper_id: str | None
+    #: A tapped variant-option button, when the frontend has one to send -
+    #: see `fulfillment.py::_match_answer`'s own docstring on why a tap is
+    #: trusted here exactly like `chosen_variant` elsewhere in this
+    #: codebase. `None` for an ordinary turn; the exact-text fallback in
+    #: the same function covers a shopper who types the option instead.
+    selected_variant_id: str | None
 
     # Working state, populated as nodes run.
     trace: TurnTrace
@@ -192,6 +201,19 @@ class ShopperTurnState(TypedDict, total=False):
     evidence: TurnEvidence
     reply_text: str
     used_model: bool
+    #: A real, deterministic reply already computed in `node_discovery`
+    #: (a genuine superlative - "the cheapest one is X, at Y" - grounded
+    #: in `engine.execution.ranking.pick_superlative`, never a model
+    #: guess). When set, `node_respond` uses it directly instead of
+    #: running model synthesis - the same "a real computed fact beats a
+    #: model's free text" discipline `compare.py`'s own superlative
+    #: handling already applies, now shared instead of living in one
+    #: capability only.
+    deterministic_reply: str | None
+    #: True when the shopper explicitly asked for "all"/"every" but this
+    #: turn's own retrieval was itself already capped by the platform's
+    #: real total-count - see `node_discovery`'s own comment.
+    show_all_truncated: bool
 
     # Terminal output - set by whichever node ends the turn.
     result: TurnResultV2
@@ -234,11 +256,77 @@ async def node_understand(state: ShopperTurnState) -> dict:
     }
 
 
+def _fulfillment_pending_dict(new_state: ShoppingStateV2) -> dict | None:
+    """The one currently-pending `fulfillment.py` question, if any, in the
+    shape a future frontend needs to render real option buttons
+    (`selected_variant_id` on the next `ChatRequestV2` is how a tap answers
+    it) - `None` when nothing is pending. Purely a read of already-real,
+    already-verified state; invents nothing."""
+    item = next(
+        (i for i in new_state.fulfillment_queue if i.status == "needs_variant"), None
+    )
+    if item is None:
+        return None
+    return {
+        "product_id": item.product_id,
+        "product_title": item.title,
+        "dimension_label": item.dimension_label,
+        "options": item.options,
+    }
+
+
 async def node_apply_delta(state: ShopperTurnState) -> dict:
     new_state = await apply_delta(state["current_state"], state["delta"])
     trace = state["trace"]
     trace.state_version = new_state.version
     return {"new_state": new_state, "trace": trace}
+
+
+async def node_fulfillment_continue(state: ShopperTurnState) -> dict:
+    """Answers a pending `fulfillment.py` question, if this turn's message
+    resolves it or is a plausible attempt to. When `handled=False` (no
+    pending question, or - see `continue_fulfillment`'s own docstring -
+    this message plainly abandoned the pending one), no `result` is set
+    and the graph falls through to ordinary routing for this SAME message,
+    via `edge_after_fulfillment_continue` below - never left stuck
+    answering a question nobody is trying to answer anymore."""
+    trace = state["trace"]
+    new_state = state["new_state"]
+    reply_text, added_ids, handled = await fulfillment.continue_fulfillment(
+        adapter=state["adapter"], decision=state["decision"], gate=state["gate"],
+        execution=state["execution"], connection_id=state["connection_id"],
+        session_id=state["session_id"], cart_id=state.get("cart_id"),
+        message=state["message"], state=new_state,
+        selected_variant_id=state.get("selected_variant_id"),
+    )
+    if not handled:
+        return {"trace": trace, "new_state": new_state}
+    for product_id in added_ids:
+        await _record_event(
+            connection_id=state["connection_id"], session_id=state["session_id"],
+            shopper_id=state.get("shopper_id"),
+            event_type=shopper_events.EventType.ADD_TO_CART,
+            product_id=product_id,
+            detail={"source": "multi_item_add"},
+        )
+    evidence = TurnEvidence(query=None, products=[], no_match_reason=None)
+    trace.response_used_model = False
+    trace.finish()
+    result = TurnResultV2(
+        reply=reply_text, state=new_state, evidence=evidence, used_model=False,
+        trace={
+            **trace.as_dict(),
+            "cart_added_product_ids": added_ids,
+            "fulfillment_pending": _fulfillment_pending_dict(new_state),
+        },
+    )
+    return {"trace": trace, "new_state": new_state, "result": result}
+
+
+def edge_after_fulfillment_continue(state: ShopperTurnState) -> str:
+    if state.get("result") is not None:
+        return END
+    return _edge_after_fulfillment_check(state)
 
 
 # --------------------------------------------------------------------------
@@ -250,6 +338,45 @@ async def node_apply_delta(state: ShopperTurnState) -> dict:
 # --------------------------------------------------------------------------
 
 def edge_after_apply_delta(state: ShopperTurnState) -> str:
+    new_state = state["new_state"]
+    friction = state.get("friction")
+    # Highest precedence, above mission/tradeoff/ordinary routing: a
+    # pending multi-product fulfillment question (`fulfillment.py`) is a
+    # direct question THIS assistant just asked. This ALWAYS visits
+    # `fulfillment_continue` when one is pending - deliberately NOT
+    # pre-filtered by a second, separate "does this look like an answer"
+    # guess here (a prior version of this function tried that with a
+    # phrase/comma heuristic and it caused two different live-reproduced
+    # bugs: a genuine reply routed away without ever clearing the stale
+    # question, permanently trapping every later message; and a genuine
+    # button tap's own synthesized sentence, which happens to contain a
+    # comma, was misread as a topic change). `fulfillment.py::
+    # continue_fulfillment` is the ONE place that decides continue-vs-
+    # abandon, against the pending item's own REAL options
+    # (`looks_like_answer_attempt`) - abandoning there always clears the
+    # stale state AND falls through to ordinary routing for this same
+    # message (`edge_after_fulfillment_continue` below), so a single
+    # source of truth can never leave this gate and that decision
+    # disagreeing with each other.
+    if (
+        friction is None
+        and new_state.fulfillment_queue
+        and any(i.status == "needs_variant" for i in new_state.fulfillment_queue)
+        and state.get("decision") is not None
+        and state.get("gate") is not None
+        and state.get("execution") is not None
+    ):
+        return "fulfillment_continue"
+    return _edge_after_fulfillment_check(state)
+
+
+def _edge_after_fulfillment_check(state: ShopperTurnState) -> str:
+    """The mission/tradeoff/route_capability decision, unchanged from
+    before the fulfillment-pending gate existed - factored out so
+    `edge_after_fulfillment_continue` can fall through to the EXACT same
+    ordinary routing when `fulfillment.py` itself decides a pending
+    question was abandoned (see that function's own docstring), not a
+    second, potentially-diverging copy of this logic."""
     new_state = state["new_state"]
     friction = state.get("friction")
     if friction is None and state.get("reasoning") is not None and (
@@ -399,40 +526,38 @@ async def node_route_capability(state: ShopperTurnState) -> dict:
         capability = Capability.FRICTION_RECOVERY
     else:
         capability = route(state["hinted_action_type"], state.get("message_intent"))
-        # Deterministic comparison backstop - see capability.py's own
-        # docstring on the live-reproduced primary-classifier variance
-        # this closes. Only overrides a "soft" default (DISCOVER/
-        # CONVERSATIONAL, i.e. the model itself was not decisive about
-        # anything else) and only when there are genuinely 2+ real,
-        # already-tracked products to compare - never invents a
-        # comparison out of nothing, never overrides an already-specific
-        # hint like CART_ACTION/CHECKOUT.
-        # Conversational-flow review fix (Issue #2): a genuine historical
-        # reference ("what was the cheapest shoe you showed me earlier")
-        # has neither a comparison nor a recommendation word in it - live-
-        # reproduced via Playwright, this fell through to an ordinary new
-        # discovery search (re-querying the catalog from scratch) because
-        # `looks_like_historical_reference` was checked inside
-        # `run_compare_turn` but that turn is only ever REACHED when
-        # routing already picked COMPARE - it never fired here at all.
+        # Deterministic reference backstop - see capability.py's own
+        # docstring on `SOFT_CAPABILITIES`/`looks_like_reference`. This is
+        # a routing-PRECEDENCE fix, not a phrase fix: `route()`'s single
+        # primary-model call can land on ANY of `SOFT_CAPABILITIES` with no
+        # independent confirmation behind it - a genuine reference
+        # ("what was the cheapest shoe you showed me earlier", "the first
+        # one", "both", "the cheaper one") must override every one of
+        # those equally, not only the two the model happens to default to
+        # (DISCOVER/CONVERSATIONAL) - live-reproduced landing on
+        # COMPATIBILITY instead. Only ever overrides a SOFT guess, and only
+        # when there is genuinely at least one real, already-tracked
+        # product to resolve against - never invents a reference target
+        # out of nothing. `run_compare_turn` itself refuses to answer
+        # anything it cannot resolve from real structure (ordinal/group
+        # selectors, the historical-group matcher, the comparative-pair
+        # resolver) - this only decides whether that logic gets a turn to
+        # try, never what it may conclude.
         if (
-            capability in (Capability.DISCOVER, Capability.CONVERSATIONAL)
-            and (
-                looks_like_comparison_request(state["message"])
-                or looks_like_recommendation_request(state["message"])
-                or looks_like_historical_reference(state["message"])
-            )
-            and len(recent_relevant_product_ids(state["new_state"], minimum=2)) >= 2
+            capability in SOFT_CAPABILITIES
+            and looks_like_reference(state["message"])
+            and len(recent_relevant_product_ids(state["new_state"], minimum=1)) >= 1
         ):
             capability = Capability.COMPARE
         # Deterministic cart-intelligence backstop - see capability.py's
         # own docstring on the live-reproduced gap this closes ("My cart
         # is over 10000..." fell through to a literal catalog search for
-        # those words instead of analyzing the real cart). Only overrides
-        # the same "soft" defaults, and only when a cart genuinely exists
-        # for this turn - never invents cart analysis out of nothing.
+        # those words instead of analyzing the real cart). Same precedence
+        # fix as above - overrides any SOFT guess, and only when a cart
+        # genuinely exists for this turn - never invents cart analysis out
+        # of nothing.
         elif (
-            capability in (Capability.DISCOVER, Capability.CONVERSATIONAL)
+            capability in SOFT_CAPABILITIES
             and looks_like_cart_intelligence_request(state["message"])
             and state.get("cart_id")
         ):
@@ -675,42 +800,38 @@ async def node_complementary(state: ShopperTurnState) -> dict:
 async def node_cart_action(state: ShopperTurnState) -> dict:
     trace = state["trace"]
     hinted_product_ids = state.get("hinted_product_ids")
-    if hinted_product_ids:
-        reply_parts: list[str] = []
-        proposal_ids: list[str] = []
-        for pid in hinted_product_ids:
-            item_reply, item_proposal = await run_cart_change_proposal_turn(
-                decision=state["decision"], gate=state["gate"], execution=state["execution"],
+    if hinted_product_ids and len(hinted_product_ids) >= 2 and state.get("cart_operation") == "add":
+        # Shopper item 3: a genuine plural add ("add both") starts a
+        # conversational fulfillment queue - one real product/variant
+        # question at a time, each answer added to the real cart directly
+        # (never a proposal sitting pending on a separate confirm) - see
+        # `fulfillment.py`'s own module docstring for the full argument.
+        reply_text, added_ids = await fulfillment.start_fulfillment(
+            adapter=state["adapter"], decision=state["decision"], gate=state["gate"],
+            execution=state["execution"], connection_id=state["connection_id"],
+            session_id=state["session_id"], cart_id=state.get("cart_id"),
+            message=state["message"], state=state["new_state"],
+            product_ids=hinted_product_ids, quantity=state.get("hinted_quantity"),
+        )
+        for product_id in added_ids:
+            await _record_event(
                 connection_id=state["connection_id"], session_id=state["session_id"],
-                cart_id=state.get("cart_id"), message=state["message"], state=state["new_state"],
-                operation="add", hinted_product_id=pid, quantity=state.get("hinted_quantity"),
+                shopper_id=state.get("shopper_id"),
+                event_type=shopper_events.EventType.ADD_TO_CART,
+                product_id=product_id,
+                detail={"source": "multi_item_add"},
             )
-            reply_parts.append(item_reply)
-            if item_proposal:
-                proposal_ids.append(item_proposal.get("proposal_id"))
-                await _record_event(
-                    connection_id=state["connection_id"], session_id=state["session_id"],
-                    shopper_id=state.get("shopper_id"),
-                    event_type=shopper_events.EventType.PROPOSAL_CREATED,
-                    product_id=item_proposal.get("product_id"),
-                    detail={
-                        "proposal_id": item_proposal.get("proposal_id"),
-                        "change_type": item_proposal.get("change_type"),
-                        "source": "multi_item_add",
-                    },
-                )
         evidence = TurnEvidence(query=None, products=[], no_match_reason=None)
         trace.response_used_model = False
         trace.finish()
-        reply_text = (
-            f"I've put together {len(proposal_ids)} suggestions for you to approve: "
-            + " ".join(reply_parts)
-            if proposal_ids
-            else "I couldn't propose those - please try one at a time."
-        )
         result = TurnResultV2(
             reply=reply_text, state=state["new_state"], evidence=evidence,
-            used_model=False, trace={**trace.as_dict(), "cart_proposal_ids": proposal_ids},
+            used_model=False,
+            trace={
+                **trace.as_dict(),
+                "cart_added_product_ids": added_ids,
+                "fulfillment_pending": _fulfillment_pending_dict(state["new_state"]),
+            },
         )
         return {"trace": trace, "result": result}
 
@@ -905,6 +1026,64 @@ async def node_unimplemented(state: ShopperTurnState) -> dict:
 # dispatch branch - continues to respond/finalize).
 # --------------------------------------------------------------------------
 
+async def _try_superlative_from_existing_group(
+    state: ShopperTurnState, query_intent,
+) -> dict | None:
+    """Answers a bare superlative question ("what is the most expensive
+    shoe?", no historical wording) from a REAL, already-established, LARGER
+    group already in view this session, instead of a fresh, possibly much
+    narrower retrieval - see `node_discovery`'s own comment for the exact
+    live-reproduced gap this closes. Returns a complete node-result dict
+    when it can genuinely answer this way, `None` when it can't (no
+    established group, too small a group, or the established group isn't
+    actually related to what THIS turn asked about) - the caller then
+    falls through to the ordinary fresh-retrieval path unchanged."""
+    new_state = state["new_state"]
+    ids = recent_relevant_product_ids(new_state, minimum=2, cap=20)
+    if len(ids) < 2:
+        return None
+
+    adapter = state["adapter"]
+    products: list[Product] = []
+    for pid in ids:
+        try:
+            products.append(await adapter.get_product(pid))
+        except Exception:  # noqa: BLE001 - skip what can't be fetched, never guess
+            logger.warning(
+                "shopper_v2 discovery: superlative-reuse get_product failed for %r",
+                pid, exc_info=True,
+            )
+    if len(products) < 2:
+        return None
+
+    # Never blindly reuse an unrelated leftover group - the established
+    # group must actually share a real word with THIS turn's own core
+    # query (the same word-overlap check `compare.py`'s historical-group
+    # matching already uses), or this returns None and the caller runs a
+    # real, fresh search instead.
+    core = query_intent.core_query or state["message"]
+    score, _ = best_matches_with_score(products, core)
+    if score <= 0:
+        return None
+
+    pick = ranking.pick_superlative(products, query_intent.sort_attribute, query_intent.superlative)
+    if pick is None:
+        return None
+
+    trace = state["trace"]
+    evidence = already_verified_evidence(
+        [pick], {pick.product_id: ["reused_established_group_superlative"]}
+    )
+    trace.response_used_model = False
+    return {
+        "trace": trace,
+        "evidence": evidence,
+        "products": [pick],
+        "deterministic_reply": _superlative_reply(pick, query_intent),
+        "show_all_truncated": False,
+    }
+
+
 async def node_discovery(state: ShopperTurnState) -> dict:
     trace = state["trace"]
     delta = state["delta"]
@@ -914,14 +1093,166 @@ async def node_discovery(state: ShopperTurnState) -> dict:
     # turn stated a new budget with no new goal of its own.
     constraint_only_turn = delta.budget_amount is not None and not delta.goal
 
+    # Root-cause consolidation (2026-09): cardinality, sorting, and
+    # superlatives are now ALL decided from the SAME typed `QueryIntent`
+    # (`reference_resolution.parse_query_intent`) in this ONE place -
+    # never a separate word-list per capability. Computed BEFORE
+    # retrieval (not just after) so `core_query` - the message with
+    # recognized count/sort/superlative PHRASES stripped - can replace
+    # the raw message as the retrieval/relevance-scoring text whenever
+    # the model itself supplied no rewritten query. Live-reproduced,
+    # generalized gap this closes: "ranked by price high to low" left
+    # unstripped let the bare word "high" spuriously substring-match
+    # "Highridge..." during relevance scoring, starving every other
+    # genuine match - see `QueryIntent.core_query`'s own docstring.
+    query_intent = parse_query_intent(state["message"])
+
+    # Superlative-scope fix (live-reproduced): "what is the most expensive
+    # shoe?" with no prior reference wording used to always trigger a
+    # BRAND-NEW, narrowly-scoped retrieval for that one turn, and compute
+    # the superlative only over whatever subset the adapter's own keyword
+    # search happened to return this time - which is not guaranteed to
+    # include the actual highest-priced item, and visibly didn't in the
+    # reported case. When a larger, genuinely related group is ALREADY
+    # established this session (`recent_relevant_product_ids` - the same
+    # ledger historical references already use), the superlative is
+    # answered from that real, already-verified, larger group instead of
+    # re-searching from scratch.
+    if query_intent.superlative and query_intent.sort_attribute in ranking.KNOWN_ATTRIBUTES:
+        reused = await _try_superlative_from_existing_group(state, query_intent)
+        if reused is not None:
+            return reused
+
+    delta_query = delta.search_query or query_intent.core_query
+
     evidence, products, _intent = await run_discovery_turn(
         reasoning=state["reasoning"], adapter=state["adapter"], session_id=state["session_id"],
         connection_id=state["connection_id"], message=state["message"],
-        delta_query=delta.search_query, constraint_only_turn=constraint_only_turn,
+        delta_query=delta_query, constraint_only_turn=constraint_only_turn,
         shopping_state=new_state.as_prompt_dict(), memory_facts=state.get("memory_facts"),
         trace=trace,
     )
-    return {"trace": trace, "evidence": evidence, "products": products}
+    # Every downstream consumer (the reply text in `respond.py`, the
+    # product cards in `finalize`, and `active_products`/
+    # `recent_product_groups` state) reads the SAME resulting `products`
+    # list, so a display/order decision made once here can never be
+    # contradicted by a different one computed somewhere else downstream.
+    evidence, products, deterministic_reply = _apply_query_intent(evidence, products, query_intent)
+    # Real-volume honesty (CLAUDE.md's own standing condition): "show me
+    # all shoes" must never silently claim to be the whole catalog when
+    # this turn's own retrieval was itself already capped
+    # (`trace.candidate_set_truncated`, set by `pipeline.py` from the
+    # adapter's real `total_available` count, e.g. a 40k-SKU catalog with
+    # only a page fetched this turn) - `node_respond` appends an honest
+    # disclosure sentence rather than letting "all" silently imply "the
+    # entire catalog" when it wasn't.
+    show_all_truncated = bool(query_intent.show_all and trace.candidate_set_truncated)
+    return {
+        "trace": trace, "evidence": evidence, "products": products,
+        "deterministic_reply": deterministic_reply,
+        "show_all_truncated": show_all_truncated,
+    }
+
+
+#: Applied only when the shopper stated no explicit count and no "all" -
+#: the same "display size, not a hard filter" bound
+#: `mission_ranking.DEFAULT_LIMIT` already uses elsewhere in this
+#: codebase, reused here so an ordinary unbounded query ("show me running
+#: shoes") gets a text/card count that actually agrees with itself
+#: instead of naming 4 while showing however many the catalog happened to
+#: verify.
+_DEFAULT_DISCOVERY_DISPLAY_LIMIT = 4
+
+
+def _superlative_reply(product: Product, query_intent) -> str:
+    which = "cheapest" if query_intent.superlative == "min" else "most expensive"
+    if query_intent.sort_attribute == "rating":
+        which = "best rated" if query_intent.superlative == "max" else "lowest rated"
+        return f"The {which} one is {product.title}, rated {product.rating}."
+    return f"The {which} one is {product.title}, at {product.price}."
+
+
+def _apply_query_intent(
+    evidence: TurnEvidence, products: list[Product], query_intent,
+) -> tuple[TurnEvidence, list[Product], str | None]:
+    """Reorders (sort/superlative) and caps (count/all) the real,
+    relevance-verified products for this turn, from ONE typed intent -
+    never a second, local count/sort decision anywhere else. Returns
+    `(evidence, products, deterministic_reply)` - CRITICALLY, `evidence`
+    is a NEW `TurnEvidence` whose own `.products` is reordered to match
+    the same final order as the returned `products` list.
+
+    Root-cause fix, second half: reordering `products` alone (a prior
+    version of this function did only that) is not enough - `respond.py`'s
+    reply-text ordering and `node_finalize`'s persisted
+    `active_products`/`recent_product_groups` order BOTH iterate
+    `evidence.products`, not this function's own `products` return value.
+    Live-reproduced: "three shoes ranked high to low" showed the cards in
+    the correct sorted order but named them in a DIFFERENT order in the
+    reply text, and a later "add the first two" resolved against the
+    WRONG first product - because the evidence order and the card order
+    had silently diverged, the exact class of "two representations of the
+    same thing, not kept in sync" bug this whole consolidation exists to
+    close. Returning one, single reordered `TurnEvidence` from this one
+    function is what makes every downstream consumer agree by
+    construction, not by each one separately remembering to reorder
+    itself.
+
+    The reply is set (bypassing model synthesis entirely - see
+    `node_respond`) only for a genuine superlative request that a real
+    product actually answers; `None` otherwise, exactly as before."""
+    verified_ids = [e.product_id for e in evidence.products if e.relevance_verified]
+    by_id = {p.product_id: p for p in products}
+    ordered_verified = [by_id[pid] for pid in verified_ids if pid in by_id]
+
+    deterministic_reply: str | None = None
+    if query_intent.superlative and query_intent.sort_attribute in ranking.KNOWN_ATTRIBUTES:
+        pick = ranking.pick_superlative(
+            ordered_verified, query_intent.sort_attribute, query_intent.superlative
+        )
+        if pick is not None:
+            deterministic_reply = _superlative_reply(pick, query_intent)
+            ordered_verified = [pick]
+    elif query_intent.sort_attribute in ranking.KNOWN_ATTRIBUTES and query_intent.sort_direction:
+        ordered_verified = ranking.sort_products(
+            ordered_verified, query_intent.sort_attribute, query_intent.sort_direction
+        )
+
+    if not deterministic_reply:
+        if query_intent.show_all:
+            cap = len(ordered_verified)
+        else:
+            cap = query_intent.requested_count or _DEFAULT_DISCOVERY_DISPLAY_LIMIT
+        ordered_verified = ordered_verified[:cap] if cap > 0 else []
+
+    keep_ids = {p.product_id for p in ordered_verified}
+    all_verified_ids = set(verified_ids)
+    # Preserve `ordered_verified`'s own order for the verified ones (so
+    # sort/superlative actually shows up in the cards), followed by any
+    # NEVER-verified products `respond.py`/`finalize` already ignore
+    # anyway - deliberately NOT the verified-but-capped-away ones (that
+    # would silently defeat the whole cap by re-adding them here).
+    final = list(ordered_verified) + [
+        p for p in products
+        if p.product_id not in keep_ids and p.product_id not in all_verified_ids
+    ]
+    final_ids = [p.product_id for p in final]
+    evidence_by_id = {e.product_id: e for e in evidence.products}
+    reordered_evidence_products = [
+        evidence_by_id[pid] for pid in final_ids if pid in evidence_by_id
+    ] + [e for e in evidence.products if e.product_id not in set(final_ids)]
+    reordered_evidence = evidence.model_copy(update={"products": reordered_evidence_products})
+    return reordered_evidence, final, deterministic_reply
+
+
+#: Appended, never prepended or blended into the model/deterministic
+#: reply's own sentence - keeps the disclosure honest and separable from
+#: whatever else the reply says, and identical regardless of which reply
+#: path produced the rest of the text.
+_SHOW_ALL_TRUNCATED_NOTE = (
+    " (Showing everything this search found - there may be more in the "
+    "full catalog than one search page returns.)"
+)
 
 
 async def node_respond(state: ShopperTurnState) -> dict:
@@ -929,10 +1260,17 @@ async def node_respond(state: ShopperTurnState) -> dict:
     evidence = state["evidence"]
     products = state["products"]
     new_state = state["new_state"]
+    show_all_truncated = state.get("show_all_truncated", False)
+    deterministic_reply = state.get("deterministic_reply")
+    if deterministic_reply:
+        trace.response_used_model = False
+        return {"trace": trace, "reply_text": deterministic_reply, "used_model": False}
     reply_text, used_model = await respond_(
         reasoning=state["reasoning"], message=state["message"], evidence=evidence,
         products=products, state=new_state, memory_facts=state.get("memory_facts"),
     )
+    if show_all_truncated:
+        reply_text = reply_text + _SHOW_ALL_TRUNCATED_NOTE
     trace.response_used_model = used_model
     return {"trace": trace, "reply_text": reply_text, "used_model": used_model}
 
@@ -945,7 +1283,17 @@ async def node_finalize(state: ShopperTurnState) -> dict:
     session_id = state["session_id"]
     connection_id = state["connection_id"]
 
-    verified_ids = [e.product_id for e in evidence.products if e.relevance_verified]
+    # Intersected with `products` (already cardinality-capped in
+    # `node_discovery`) - never the raw, uncapped evidence list - so the
+    # state persisted as "what was just shown" (`active_products`/
+    # `recent_product_groups`, read back by every later reference/compare
+    # turn) can never name more products than actually rendered as cards
+    # this turn.
+    available_ids = {p.product_id for p in products}
+    verified_ids = [
+        e.product_id for e in evidence.products
+        if e.relevance_verified and e.product_id in available_ids
+    ]
     if verified_ids:
         groups = list(new_state.recent_product_groups)
         if not groups or groups[-1] != verified_ids:
@@ -984,6 +1332,7 @@ def _build_graph():
     g.add_node("load_context", node_load_context)
     g.add_node("understand", node_understand)
     g.add_node("apply_delta", node_apply_delta)
+    g.add_node("fulfillment_continue", node_fulfillment_continue)
     g.add_node("mission", node_mission)
     g.add_node("tradeoff", node_tradeoff)
     g.add_node("route_capability", node_route_capability)
@@ -1011,7 +1360,16 @@ def _build_graph():
 
     g.add_conditional_edges(
         "apply_delta", edge_after_apply_delta,
-        {"mission": "mission", "tradeoff": "tradeoff", "route_capability": "route_capability"},
+        {
+            "fulfillment_continue": "fulfillment_continue",
+            "mission": "mission",
+            "tradeoff": "tradeoff",
+            "route_capability": "route_capability",
+        },
+    )
+    g.add_conditional_edges(
+        "fulfillment_continue", edge_after_fulfillment_continue,
+        {END: END, "mission": "mission", "tradeoff": "tradeoff", "route_capability": "route_capability"},
     )
     g.add_conditional_edges(
         "mission", edge_after_mission,
@@ -1085,11 +1443,14 @@ async def run_turn_via_graph(
     execution=None,
     owner_keys: list[str] | None = None,
     shopper_id: str | None = None,
+    selected_variant_id: str | None = None,
 ) -> TurnResultV2:
     """Run one V2 turn through the compiled graph. Same signature and
     return type as the pre-graph `orchestrator.run_turn` - `catalog_sample`
     is accepted, unused, for signature compatibility (it was already
-    unused in the pre-graph implementation)."""
+    unused in the pre-graph implementation). `selected_variant_id` is a
+    tapped variant-option button, when the frontend sends one - see
+    `fulfillment.py`'s own docstring."""
     initial: ShopperTurnState = {
         "reasoning": reasoning,
         "adapter": adapter,
@@ -1104,6 +1465,7 @@ async def run_turn_via_graph(
         "execution": execution,
         "owner_keys": owner_keys,
         "shopper_id": shopper_id,
+        "selected_variant_id": selected_variant_id,
     }
     final_state = await _COMPILED_GRAPH.ainvoke(initial)
     return final_state["result"]

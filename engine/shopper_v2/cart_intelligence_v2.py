@@ -81,12 +81,28 @@ def _requested_kinds(message: str) -> set[str] | None:
 
 
 def _budget_reduction_suggestion(message: str, payload: dict) -> str | None:
-    """A CONCRETE change - which real line(s) to drop - that brings the
-    real cart total under the shopper's stated (or, failing that,
-    message-stated) budget. Grounded entirely in `payload["lines"]`'s own
-    real prices (see service.py's CART_INTELLIGENCE dispatch, which
-    already fetched them for `analyze_cart`) - never a guess at what
-    "cheaper" might mean."""
+    """A CONCRETE change that brings the real cart total under the
+    shopper's stated (or, failing that, message-stated) budget - grounded
+    entirely in `payload["lines"]`'s own real prices/quantities (see
+    service.py's CART_INTELLIGENCE dispatch, which already fetched them
+    for `analyze_cart`) - never a guess at what "cheaper" might mean, and
+    never bounded to a specific line count (manual-test finding: the old
+    top-1/top-2-only logic could genuinely never solve a cart needing 3+
+    real removals, not because no solution existed but because this
+    function never looked for one).
+
+    Two real strategies, tried in order of how disruptive they are:
+
+    1. Reduce a single line's own QUANTITY (never touching any other
+       line) when that alone reaches the target - the least disruptive
+       real change, since every distinct product stays in the cart.
+    2. Remove whole lines - the MINIMUM number of them, by real price,
+       largest-first. This is the standard optimal greedy for "cover at
+       least this much excess using the fewest real items" (taking the
+       largest available amounts first can never need more items than
+       any other combination that also reaches the target), so this
+       finds a genuinely minimal-disruption combination for a cart of any
+       size, not a first-two-tried guess."""
     lines = payload.get("lines") or []
     grand_total = payload.get("grand_total")
     if not lines or grand_total is None:
@@ -101,39 +117,73 @@ def _budget_reduction_suggestion(message: str, payload: dict) -> str | None:
         return None
     if total <= target:
         return None
+    excess = total - target
 
-    # Greedy: drop the single most expensive real line first; if that
-    # alone is enough, that is the concrete suggestion. Never proposes
-    # removing more than actually needed.
     priced = [
-        (l, Decimal(l["line_total"])) for l in lines if l.get("line_total") is not None
+        line for line in lines
+        if line.get("line_total") is not None and Decimal(line["line_total"]) > 0
     ]
     if not priced:
         return None
-    priced.sort(key=lambda pair: pair[1], reverse=True)
-    costliest_line, costliest_amount = priced[0]
-    remaining = total - costliest_amount
-    if remaining <= target:
+
+    # Strategy 1: a single line's own quantity can absorb the excess
+    # without removing any distinct product. Only offered when the line
+    # has more than one unit (reducing a quantity-of-one line IS removing
+    # it, already covered by strategy 2) and the real per-unit price
+    # (line_total / quantity) actually divides the excess without
+    # needing the WHOLE line removed.
+    for line in sorted(priced, key=lambda l: Decimal(l["line_total"]), reverse=True):
+        qty = line.get("quantity") or 1
+        if qty <= 1:
+            continue
+        line_total = Decimal(line["line_total"])
+        unit_price = line_total / qty
+        if unit_price <= 0:
+            continue
+        units_to_drop = 0
+        for _ in range(qty - 1):  # never drop every unit - that's strategy 2's job
+            units_to_drop += 1
+            new_total = total - unit_price * units_to_drop
+            if new_total <= target:
+                new_qty = qty - units_to_drop
+                return (
+                    f"Reducing {line['title']} from {qty} to {new_qty} would bring "
+                    f"your total to {new_total.quantize(Decimal('0.01'))}, under your {target} budget."
+                )
+
+    # Strategy 2: minimal-count whole-line removal, largest real price
+    # first - optimal for "fewest lines needed to cover this much excess."
+    by_price_desc = sorted(priced, key=lambda l: Decimal(l["line_total"]), reverse=True)
+    removed: list[dict] = []
+    covered = Decimal(0)
+    for line in by_price_desc:
+        removed.append(line)
+        covered += Decimal(line["line_total"])
+        if covered >= excess:
+            break
+
+    if covered < excess:
+        # Removing EVERY real line still isn't enough - genuinely
+        # unsolvable by removal alone; say so honestly rather than
+        # implying a combination exists.
         return (
-            f"Removing {costliest_line['title']} ({costliest_line['line_total']}) "
-            f"would bring your total to {remaining}, under your {target} budget."
+            f"Your cart is {total}, {total - target} over your {target} budget - "
+            f"removing everything in it would still only save {covered}, so this "
+            f"budget isn't reachable by removing items alone."
         )
-    # One line isn't enough - name the top 2 real candidates rather than
-    # guessing a specific combination the shopper didn't ask to see
-    # computed exhaustively.
-    if len(priced) >= 2:
-        second_line, second_amount = priced[1]
-        combined_remaining = remaining - second_amount
-        if combined_remaining <= target:
-            return (
-                f"Removing {costliest_line['title']} ({costliest_line['line_total']}) "
-                f"and {second_line['title']} ({second_line['line_total']}) would bring "
-                f"your total to {combined_remaining}, under your {target} budget."
-            )
+
+    new_total = total - covered
+    if len(removed) == 1:
+        line = removed[0]
+        return (
+            f"Removing {line['title']} ({line['line_total']}) would bring your "
+            f"total to {new_total}, under your {target} budget."
+        )
+    named = ", ".join(f"{l['title']} ({l['line_total']})" for l in removed[:-1])
+    named += f", and {removed[-1]['title']} ({removed[-1]['line_total']})"
     return (
-        f"Your cart is {total}, {total - target} over your {target} budget - "
-        f"even removing your most expensive item, {costliest_line['title']} "
-        f"({costliest_line['line_total']}), won't be enough on its own."
+        f"Removing {len(removed)} items - {named} - would bring your total to "
+        f"{new_total}, under your {target} budget."
     )
 
 

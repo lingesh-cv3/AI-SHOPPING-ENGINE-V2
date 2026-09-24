@@ -50,6 +50,11 @@ from engine.execution.relevance import best_matches_with_score
 from engine.reasoning.service import CartReferenceIntent, ReasoningService
 from shared.models import Product
 
+from .reference_resolution import (
+    looks_like_group_or_ordinal_reference,
+    resolve_group_selector,
+    resolve_named_subset,
+)
 from .retrieval import retrieve
 from .state import ShoppingStateV2
 
@@ -80,17 +85,6 @@ class CartTargetResult:
         self.product_ids = product_ids
         self.quantity = quantity
         self.clarifying_question = clarifying_question
-
-
-#: Closed-class vocabulary for "both/all of what's in view" - see the
-#: `_looks_like_all_reference` call site's own comment for the live gap
-#: this backstop closes.
-_ALL_REFERENCE_WORDS = ("both", "all of them", "all of those", "each of them", "every one of them")
-
-
-def _looks_like_all_reference(message: str) -> bool:
-    lowered = f" {message.lower()} "
-    return any(f" {w} " in lowered for w in _ALL_REFERENCE_WORDS)
 
 
 async def resolve_cart_target(
@@ -177,18 +171,37 @@ async def resolve_cart_target(
     # `looks_like_comparison_request`/etc already use for a measurably
     # unreliable primary classification: a small, fixed, non-phrase-
     # specific word list, gated on the same real-data precondition
-    # `_resolve_all_reference` itself already requires (2+ real
+    # `_resolve_group_reference` itself already requires (2+ real
     # candidates) before ever overriding the model's own field.
+    #
+    # Manual-test finding (generalized): the old check here only ever
+    # recognized "both"/"all of them"-shaped phrases - "add the first and
+    # third", or "add all three" validated against a real 3-item group,
+    # never resolved at all, always falling through to a single-product
+    # guess or a bare clarifying question. `looks_like_group_or_ordinal_reference`
+    # (`reference_resolution.py` - the SAME closed-class ordinal/collective
+    # markers `capability.py`'s routing backstop already uses for the
+    # ANSWER side of a reference) generalizes this to the same real class
+    # of message for the CART-ACTION side.
+    # Live-reproduced, generalized: a message naming SEVERAL real shown
+    # products by their own full titles together ("1. Marathon Pro Racing
+    # Shoe; 2. Cloudstep Max Cushion Running Shoe" - pasting a prior
+    # clarifying question's own numbered list back verbatim) named no
+    # ordinal/collective word at all, so `looks_like_group_or_ordinal_reference`
+    # alone never caught it - checked here, against the real, already-shown
+    # titles, deterministically, never via the model's own single
+    # `named_hint` (which only ever extracts one name).
+    named_subset_positions = resolve_named_subset(message, [p.title for p in shown])
     if (
         intent.operation == "add"
         and intent.reference_type not in ("all", "ordinal", "name")
-        and _looks_like_all_reference(message)
+        and (looks_like_group_or_ordinal_reference(message) or named_subset_positions is not None)
     ):
         intent = dataclasses.replace(intent, reference_type="all")
 
     if intent.operation == "add":
         if intent.reference_type == "all":
-            resolved_ids = await _resolve_all_reference(shown, state=state, adapter=adapter)
+            resolved_ids = await _resolve_group_reference(message, shown, state=state, adapter=adapter)
             # Deliberately conservative: "all" only ever resolves when there
             # are at least 2 real, distinct candidates to resolve it TO - a
             # single-item "all" is not a meaningfully different case from
@@ -294,30 +307,89 @@ async def _resolve_reference(
 _MAX_ALL_REFERENCE_ITEMS = 6
 
 
-async def _resolve_all_reference(
-    shown: list[Product], *, state: ShoppingStateV2, adapter
+async def _resolve_group_reference(
+    message: str, shown: list[Product], *, state: ShoppingStateV2, adapter
 ) -> list[str]:
-    """Resolves "all"/"both" to the real, currently-relevant set of
-    products - THIS turn's own shown set, extended by the ledger's most
-    recent PRIOR group when the current turn's own set is too small to be
-    what "both" plausibly means (exactly the "shoes... slides... add both"
-    shape - `shown` alone would be just the slide). Every id returned was
-    already a real, independently-verified `active_products`/ledger entry
-    - nothing here is invented or guessed at; the only judgment made is
-    WHICH already-real ids to include, never fabricating a new one.
+    """Resolves a collective/ordinal cart-add reference ("both", "all of
+    them", "all three" - count-validated, "the first and third") to the
+    real, currently-relevant set of products - THIS turn's own shown set,
+    extended by the ledger's most recent PRIOR group when the current
+    turn's own set is too small to be what the reference plausibly means
+    (exactly the "shoes... slides... add both" shape - `shown` alone would
+    be just the slide). Every id returned was already a real,
+    independently-verified `active_products`/ledger entry - nothing here
+    is invented or guessed at.
 
-    Deliberately does NOT reach further back than the immediately prior
-    group - "add both" said right after two things were shown is
-    unambiguous; reaching three or more topics back to guess which two the
-    shopper means would be exactly the guess this module exists to refuse
-    to make."""
+    Context-awareness fix (generalized, not tied to any one phrasing):
+    used to reach back only as far as the SINGLE immediately-prior group -
+    correct for "shoes... slides... add both" (one topic switch), wrong
+    for a conversation with several switches in between ("shoes...
+    socks... a jacket... add both the shoes and the jacket"), where the
+    right historical group is not necessarily the most recent one. Now
+    scores every OTHER real, still-retained ledger group by the SAME real
+    word-overlap the message's own words actually match
+    (`best_matches_with_score` - the identical scoring `compare.py`'s own
+    `_best_matching_historical_group` already uses for the read side of
+    this same problem, reused here rather than re-derived) and reaches
+    into whichever one scores highest. Falls back to the single
+    immediately-prior group only when nothing scores at all - the correct,
+    honest behavior for a bare "add both" that names no topic of its own
+    to match against, exactly as before.
+
+    Manual-test finding (generalized): this used to just return the whole
+    universe for ANY "all"-shaped reference, with no way to select a named
+    subset of it ("add the first and third", "add all three" of a real
+    4-item group) - `resolve_group_selector` (the same real, count-aware
+    ordinal/collective resolver `capability.py`'s reference backstop
+    already uses) now narrows to exactly the real subset named, when the
+    message names one; a generic "both"/"all of them" still resolves to
+    the whole real universe, exactly as before."""
     ids = list(dict.fromkeys(p.product_id for p in shown))
     if len(ids) < _MAX_ALL_REFERENCE_ITEMS:
         groups = [g for g in state.recent_product_groups if g]
-        if len(groups) >= 2:
+        other_groups = [g for g in groups if [pid for pid in g if pid not in ids]]
+        best_ids: list[str] = []
+        best_score = 0
+        for group_ids in other_groups:
+            candidate_ids = [pid for pid in group_ids if pid not in ids][:8]
+            if not candidate_ids:
+                continue
+            products = []
+            for pid in candidate_ids:
+                try:
+                    products.append(await adapter.get_product(pid))
+                except Exception:  # noqa: BLE001 - skip what can't be fetched, never guess
+                    logger.warning(
+                        "intent_resolution: group-reference get_product failed for %r",
+                        pid, exc_info=True,
+                    )
+            if not products:
+                continue
+            score, _ = best_matches_with_score(products, message)
+            if score > best_score:
+                best_score = score
+                best_ids = [p.product_id for p in products]
+        if best_score > 0 and best_ids:
+            ids = [*ids, *best_ids]
+        elif len(groups) >= 2:
             prior_ids = [pid for pid in groups[-2] if pid not in ids]
             ids = [*ids, *prior_ids]
-    return ids[:_MAX_ALL_REFERENCE_ITEMS]
+    ids = ids[:_MAX_ALL_REFERENCE_ITEMS]
+
+    # A message naming SEVERAL real shown products by their own full
+    # titles together is unambiguous regardless of any ordinal/collective
+    # wording - checked against `shown` (this turn's own real products,
+    # the case the reported gap named exactly) before falling to ordinal
+    # position resolution.
+    named_positions = resolve_named_subset(message, [p.title for p in shown])
+    if named_positions is not None:
+        shown_ids = [p.product_id for p in shown]
+        return [shown_ids[i] for i in named_positions if i < len(shown_ids)]
+
+    positions = resolve_group_selector(message, len(ids))
+    if positions is not None:
+        return [ids[i] for i in positions]
+    return ids
 
 
 async def _clarify_with_ledger(

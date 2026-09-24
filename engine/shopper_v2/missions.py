@@ -56,6 +56,32 @@ logger = logging.getLogger(__name__)
 
 _MAX_ITEMS = 8
 
+#: Bound on how many of a mission item's own real, already-ranked
+#: candidates are ever rendered as product cards for one item, mirroring
+#: `mission_ranking.DEFAULT_LIMIT` - the same "display size, not a hard
+#: filter" cap that module already uses. Any reply text quoting a count
+#: for this item MUST derive it from this same bound (see
+#: `_mission_item_products` below) - this is the single place that
+#: decides "how many of this item's real matches actually get shown,"
+#: so a stated count and a rendered count can never diverge for any
+#: mission item, any label, any constraint set.
+_MISSION_CANDIDATES_PER_ITEM = 4
+
+
+async def _mission_item_products(adapter, item: MissionItem) -> list:
+    """The real, already-ranked candidates actually rendered for `item` -
+    up to `_MISSION_CANDIDATES_PER_ITEM` of them, fetched fresh, skipping
+    (never fabricating) any that fail to fetch. Any narrative count for
+    this item must be `len()` of this same list - see the caller in
+    `run_mission_turn`."""
+    products = []
+    for pid in item.candidates[:_MISSION_CANDIDATES_PER_ITEM]:
+        try:
+            products.append(await adapter.get_product(pid))
+        except Exception:  # noqa: BLE001 - skip what can't be fetched, never guess
+            logger.warning("missions: get_product failed for candidate %r", pid, exc_info=True)
+    return products
+
 # Multi-item missions extract constraints as free text only (no dedicated
 # budget field on `MissionItemIntent` - see engine/reasoning/service.py).
 # Without this, a stated "under 5000" constraint only ever affected
@@ -291,9 +317,31 @@ async def apply_mission_message(
                 return True
         return False
 
+    # Manual-test finding (generalized): `interpret_mission_items` is
+    # handed BOTH `message` and `history` - a real, live-reproduced defect
+    # let it extract a "new item" grounded only in something the shopper
+    # said in an EARLIER turn (already present in `history`), not the
+    # CURRENT message, turning an unrelated later turn ("add the first and
+    # third to my cart") into phantom mission-item bookkeeping for a
+    # topic ("running shoes") the shopper had already moved past. This is
+    # the same class of "words present only in context, not in what was
+    # just said" defect `engine/execution/relevance.py::query_diverges_from_said`
+    # already exists to catch for discovery queries, applied here for
+    # mission-item creation: a genuinely NEW item must have at least one
+    # of its own significant words actually present in THIS turn's raw
+    # message, never only in history - never a phrase-specific check, and
+    # never a guess when the label is a real word.
+    lowered_message = f" {message.lower().strip()} "
+
+    def _grounded_in_current_message(label: str) -> bool:
+        words = [w for w in label.lower().split() if len(w) > 2]
+        if not words:
+            return True  # nothing substantial to check - don't block on it
+        return any(w in lowered_message for w in words)
+
     new_labels = [
         label for label in dict.fromkeys(intent.new_item_labels)
-        if not _matches_existing(label)
+        if not _matches_existing(label) and _grounded_in_current_message(label)
     ]
     room = max(_MAX_ITEMS - len(state.mission_items), 0)
     new_labels = new_labels[:room]
@@ -618,6 +666,17 @@ async def run_mission_turn(
     new_items = [items_by_id[tid] for tid in touched_ids if tid not in before_ids]
     touched = [items_by_id[tid] for tid in touched_ids if tid in items_by_id]
 
+    # Fetched ONCE per item, up front - the reply text below and the
+    # `products` this function returns both read from this SAME dict, so a
+    # stated count and what actually renders can never diverge even if a
+    # fetch fails partway through (see `_mission_item_products`'s own
+    # docstring and this function's own docstring on the result-count/
+    # render-consistency contract this closes).
+    rendered_by_item: dict[str, list] = {}
+    for item in touched:
+        if item.candidates and item.status != "done":
+            rendered_by_item[item.item_id] = await _mission_item_products(adapter, item)
+
     lines: list[str] = []
     if new_items:
         labels = ", ".join(i.label for i in new_items)
@@ -658,20 +717,61 @@ async def run_mission_turn(
             why = "; ".join(item_reasons[item.item_id][:2])
             lines.append(f"For {item.label}, that now fits best - {why}.")
         else:
-            count = len(item.candidates)
-            lines.append(
-                f"For {item.label}, I found {count} option{'s' if count != 1 else ''} "
-                "that fit what you've said so far."
-            )
+            # Result-count/render-contract fix: the number stated here is
+            # `len()` of the SAME real, already-fetched list this function
+            # returns as `products` for this item - never a separately
+            # computed number (the item's full `candidates` count).
+            # Live-reproduced, generalized bug: only `candidates[0]` was
+            # ever rendered per item, but the text quoted the FULL
+            # candidate count - so "2 options" could be said while exactly
+            # 1 product card rendered, for any item with more real matches
+            # than actually get shown, on any turn, any capability. Also
+            # correctly reads as 0 (not 1) if every fetch for this item's
+            # own candidates failed - a transient fetch failure degrades
+            # the claimed count along with the render, never just the
+            # render.
+            count = len(rendered_by_item.get(item.item_id, []))
+            if count == 0:
+                lines.append(f"I couldn't fetch a real match for {item.label} right now - please try again in a moment.")
+            else:
+                line = (
+                    f"For {item.label}, I found {count} option{'s' if count != 1 else ''} "
+                    "that fit what you've said so far."
+                )
+                # Manual-test finding (Issue #4, generalized): a shopper who
+                # just narrowed an EXISTING item with a new constraint is
+                # owed a reason for what disappeared, not only a shopper
+                # who gets zero results - re-runs the same real search this
+                # item's own state already committed to (never a new
+                # query) purely to compute which stocked, non-surviving
+                # candidates existed and why, via the same hard-filter
+                # checks `explain_no_match` already uses. Only for an
+                # item that existed BEFORE this turn (a brand-new item has
+                # no narrowing story yet) and only when there is real,
+                # checkable exclusion to report - never invented, never
+                # shown for a turn where nothing was actually narrowed out.
+                if item not in new_items:
+                    try:
+                        raw_result = await retrieve(adapter, item.search_query or item.label, limit=20)
+                        narrowing = mission_ranking.explain_narrowing(
+                            [product_as_dict(p) for p in raw_result.products],
+                            set(item.candidates),
+                            {
+                                "must_have": item.must_have,
+                                "exclusions": item.exclusions,
+                                "budget_amount": _extract_budget(item.constraints),
+                            },
+                        )
+                    except Exception:  # noqa: BLE001 - degrade honestly, never raise to the shopper
+                        narrowing = None
+                        logger.warning("missions: explain_narrowing failed for %r", item.item_id, exc_info=True)
+                    if narrowing:
+                        line += f" ({narrowing}.)"
+                lines.append(line)
 
     products = []
     for item in touched:
-        if not item.candidates:
-            continue
-        try:
-            products.append(await adapter.get_product(item.candidates[0]))
-        except Exception:  # noqa: BLE001
-            logger.warning("missions: get_product failed for candidate %r", item.candidates[0], exc_info=True)
+        products.extend(rendered_by_item.get(item.item_id, []))
 
     reply = " ".join(lines) if lines else "Noted."
     return reply, products, new_state, True, []

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from engine.execution import mission_ranking
 from engine.execution.relevance import (
+    any_overlap_ids,
     best_matches_with_score,
     query_diverges_from_said,
     shop_carries,
@@ -150,7 +151,27 @@ def build_evidence(
     # top-scoring match - no lower-scoring outlier is hiding among them.
     # That is a strict superset of the single-survivor case (trivially
     # true when there is only one) and never fires on a mixed bag.
-    all_survivors_are_top_matches = bool(shortlisted_ids) and shortlisted_ids.issubset(best_ids)
+    # Generalized fix: a hard-filter survivor with ZERO real word overlap
+    # with the query (it merely didn't violate budget/stock/exclusions -
+    # nothing about it says "this might be what the query means") is not a
+    # rival interpretation and must never block the single-strong-match
+    # override below. Live-reproduced, platform-agnostic gap: a mission
+    # item labeled "something for energy" retrieved a real energy product
+    # (one genuine word overlap) ALONGSIDE an unrelated sock that shares no
+    # word with the query at all - the sock still counted as a "survivor"
+    # under the old, unrestricted check, made `all_survivors_are_top_matches`
+    # false, and starved the override that exists exactly for this shape of
+    # match. Restricting to survivors with `any_overlap_ids` (relevance.py)
+    # keeps the override's own safety property (a genuine rival with real,
+    # if lower, overlap still blocks it) while no longer letting completely
+    # irrelevant candidates - on ANY merchant, ANY category, any vague-but-
+    # genuine item label - do the same. See that function's own docstring.
+    relevant_survivor_ids = (
+        shortlisted_ids & any_overlap_ids(products, query) if query else shortlisted_ids
+    )
+    all_survivors_are_top_matches = bool(shortlisted_ids) and relevant_survivor_ids.issubset(
+        best_ids
+    )
 
     # Batch 4 fix (V2 completion audit): `rank_and_filter`'s own score/order
     # used to be read ONLY for shortlist membership above - `evidence_products`

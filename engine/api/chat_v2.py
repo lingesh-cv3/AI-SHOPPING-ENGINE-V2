@@ -63,6 +63,13 @@ class ChatRequestV2(BaseModel):
     #: code, a declined payment); asking the model to re-infer it from a
     #: synthesized sentence is strictly worse than just being told.
     friction: str | None = None
+    #: Optional. A tapped variant-option button, when the frontend renders
+    #: one - the reply to a pending `fulfillment.py` question ("what size
+    #: for the Trailblazer?"). Trusted over anything the shopper's own
+    #: typed message might say, the same "a tap beats a guess" discipline
+    #: `variant_id`/`chosen_variant` already carry elsewhere in this
+    #: codebase - see `engine/shopper_v2/fulfillment.py::_match_answer`.
+    selected_variant_id: str | None = None
 
 
 class ProductSummaryV2(BaseModel):
@@ -180,6 +187,7 @@ async def chat_v2(
         execution=engine.execution,
         owner_keys=await who.keys_for(req.connection_id),
         shopper_id=shopper_id,
+        selected_variant_id=req.selected_variant_id,
     )
 
     evidence_fields_by_id = {

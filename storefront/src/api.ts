@@ -242,13 +242,26 @@ export interface ChatTurn {
    *  what charges. */
   payment?: PaymentOffer;
   /** Options offered with this message. Rendered as buttons: a shopper tapping
-   *  "250g ground" cannot be misread, where typing "ground" can. */
+   *  "250g ground" cannot be misread, where typing "ground" can.
+   *
+   *  `source` distinguishes the TWO real, independently-evolved mechanisms
+   *  that both populate this same shape - restored 2026-09 after a real
+   *  regression: a shared button handler was repointed to only one of
+   *  them, silently breaking the other. "accept_flow" is V1's real,
+   *  live `/api/chat/act` + `/api/chat/proposals/{id}/accept` variant
+   *  check (a cart proposal that turns out to need a size/option);
+   *  "fulfillment" is V2's `engine/shopper_v2/fulfillment.py` pending
+   *  question for a multi-product "add both" conversation. Never
+   *  omitted - every real populating site sets it explicitly so the
+   *  button handler can never again guess which mechanism a choice
+   *  belongs to. */
   choices?: {
     variant_id: string;
     label: string;
     product_id: string;
     product_title: string;
     left: number | null;
+    source: "accept_flow" | "fulfillment";
   }[];
   speaker: "shopper" | "assistant";
   text: string;
@@ -863,7 +876,13 @@ export const api = {
    *  proposal is approved/rejected through the EXISTING
    *  `acceptProposal`/`rejectProposal` calls above - there is no
    *  separate V2 approval endpoint. */
-  chatV2: (sessionId: string, message: string, cartId?: string, friction?: string) =>
+  chatV2: (
+    sessionId: string,
+    message: string,
+    cartId?: string,
+    friction?: string,
+    selectedVariantId?: string,
+  ) =>
     call<ChatReplyV2>("/api/v2/chat", {
       method: "POST",
       body: JSON.stringify({
@@ -872,6 +891,7 @@ export const api = {
         message,
         cart_id: cartId ?? null,
         friction: friction ?? null,
+        selected_variant_id: selectedVariantId ?? null,
       }),
     }),
 };

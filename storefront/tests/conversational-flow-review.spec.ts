@@ -112,6 +112,27 @@ test('Northfield: "Why this?" renders and shows grounded evidence, not internal 
   expect(text.length).toBeGreaterThan(0);
 });
 
+test('Northfield: "add both" after a comparison creates real, separate proposals for exactly the compared products', async ({ page }) => {
+  test.setTimeout(120000);
+  await openChat(page, NORTHFIELD);
+  await send(page, 'Show me the trailblazer and the starter road shoe');
+  await send(page, 'compare both');
+  await send(page, 'add both to the cart');
+  const reply = (await lastAssistantTurn(page).textContent()) ?? '';
+  expect(reply.toLowerCase()).toMatch(/trailblazer/i);
+  expect(reply.toLowerCase()).toMatch(/starter road/i);
+});
+
+test('Northfield: an ordinal multi-product reference ("the first and third") resolves to the real, correct products', async ({ page }) => {
+  test.setTimeout(120000);
+  await openChat(page, NORTHFIELD);
+  await send(page, 'Show me running shoes');
+  await send(page, 'compare the first and third');
+  const reply = (await lastAssistantTurn(page).textContent()) ?? '';
+  expect(reply.toLowerCase()).toMatch(/trailblazer/i);
+  expect(reply.toLowerCase()).toMatch(/cloudstep/i);
+});
+
 test('Kettle: mission refinement + budget flow works on the second merchant too', async ({ page }) => {
   test.setTimeout(150000);
   await openChat(page, KETTLE);

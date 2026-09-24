@@ -35,6 +35,14 @@ import { type Account } from "./account";
  *    existing `ProposalsPanel` (unchanged, already generic over who created
  *    a proposal) is what a shopper approves/rejects it through, exactly as
  *    it already does for any other proposal.
+ *  - `choices`: a pending `engine/shopper_v2/fulfillment.py` question
+ *    ("what size for the Trailblazer?"), reusing this SAME `choices`
+ *    button mechanism V1's own single-item variant picker already renders
+ *    (`trace.fulfillment_pending`, built server-side from the real
+ *    product's own real buyable variants - never invented here). Tapping
+ *    one sends `selected_variant_id` back on the NEXT `/api/v2/chat` call
+ *    (see `tapOption`/`act` below) - the tap itself is what adds that one
+ *    item directly, per `fulfillment.py`'s own docstring.
  */
 export function mapV2Reply(r: ChatReplyV2): {
   products?: ChatTurn["products"];
@@ -42,6 +50,7 @@ export function mapV2Reply(r: ChatReplyV2): {
   payment?: ChatTurn["payment"];
   awaitingPerson?: boolean;
   why?: ChatTurn["why"];
+  choices?: ChatTurn["choices"];
 } {
   const capability = r.trace?.capability as string | undefined;
   const evidenceById = new Map(
@@ -85,12 +94,33 @@ export function mapV2Reply(r: ChatReplyV2): {
   // into the panel, and never distinguished "found" from "declined").
   const why = r.why ?? undefined;
 
+  const fulfillmentPending = r.trace?.fulfillment_pending as
+    | {
+        product_id: string;
+        product_title: string;
+        dimension_label: string;
+        options: { variant_id: string; label: string; left: number | null }[];
+      }
+    | null
+    | undefined;
+  const choices = fulfillmentPending?.options?.length
+    ? fulfillmentPending.options.map((o) => ({
+        variant_id: o.variant_id,
+        label: o.label,
+        product_id: fulfillmentPending.product_id,
+        product_title: fulfillmentPending.product_title,
+        left: o.left,
+        source: "fulfillment" as const,
+      }))
+    : undefined;
+
   return {
     products,
     comparison,
     payment: checkoutPayload ?? undefined,
     awaitingPerson: capability === "payment_recovery" ? true : undefined,
     why,
+    choices,
   };
 }
 
@@ -253,7 +283,13 @@ export function ChatWidget({
           stored.map((t) => ({
             speaker: t.speaker,
             text: t.text,
-            choices: t.choices.length > 0 ? t.choices : undefined,
+            // Restored from V1's own transcript storage - the ONLY
+            // mechanism that ever writes choices there is the accept-flow
+            // variant check (see `tap()`'s own comment on why this tag
+            // exists); V2's fulfillment_pending never persists here.
+            choices: t.choices.length > 0
+              ? t.choices.map((ch) => ({ ...ch, source: "accept_flow" as const }))
+              : undefined,
             products: t.products.length > 0 ? t.products : undefined,
             comparison: t.comparison.length > 0 ? t.comparison : undefined,
             payment: t.payment ?? undefined,
@@ -374,8 +410,57 @@ export function ChatWidget({
           usedModel: r.used_model,
           payment: mapped.payment,
           why: mapped.why,
+          choices: mapped.choices,
         },
       ]);
+    } catch (e) {
+      onTurns([...withShopper, { speaker: "assistant", text: shopperMessage(e) }]);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Answers a pending `engine/shopper_v2/fulfillment.py` question - "what
+   *  size for the Trailblazer?" - with a tapped option. Goes straight to
+   *  `/api/v2/chat` with `selected_variant_id` set, the SAME trusted-tap
+   *  path `fulfillment.py::_match_answer` checks against that item's own
+   *  real options before adding anything - never through the model, and
+   *  never through V1's `api.act`/`tap()` (unreachable from this widget;
+   *  see `App.tsx`'s own routing - V2 is the only path here). The reply
+   *  may itself carry the NEXT product's own choices (fulfillment.py
+   *  chains through every item in one turn until one needs an answer),
+   *  so this keeps the same "choices in, choices out" shape `act()` uses.
+   */
+  async function tapFulfillmentChoice(c: {
+    variant_id: string;
+    label: string;
+    product_id: string;
+    product_title: string;
+  }) {
+    if (busy) return;
+    const said = `The ${c.label}, for the ${c.product_title}`;
+    const withShopper: ChatTurn[] = [...turns, { speaker: "shopper", text: said }];
+    onTurns(withShopper);
+    setBusy("tapping");
+
+    try {
+      const r = await api.chatV2(sessionId, said, cartId, undefined, c.variant_id);
+      const mapped = mapV2Reply(r);
+      onTurns([
+        ...withShopper,
+        {
+          speaker: "assistant",
+          text: r.reply,
+          products: mapped.products,
+          usedModel: r.used_model,
+          why: mapped.why,
+          choices: mapped.choices,
+        },
+      ]);
+      // A `fulfillment.py` tap can add a real line to the cart directly
+      // (see that module's own docstring) - the cart panel needs to
+      // refresh even though nothing here went through a proposal.
+      onCartChanged?.();
     } catch (e) {
       onTurns([...withShopper, { speaker: "assistant", text: shopperMessage(e) }]);
     } finally {
@@ -407,7 +492,10 @@ export function ChatWidget({
           speaker: "assistant",
           text: r.reply,
           awaitingPerson: r.awaiting_person,
-          choices: r.choices,
+          // The real, live accept-flow variant check (`/api/chat/act` /
+          // `/api/chat/proposals/{id}/accept`) - see `ChatTurn.choices`'s
+          // own docstring for why this tag must always be set explicitly.
+          choices: r.choices?.map((ch) => ({ ...ch, source: "accept_flow" as const })),
           payment: r.payment,
           why: r.why,
         },
@@ -458,10 +546,15 @@ export function ChatWidget({
     return tap(p.product_id, `Add the ${p.title}`);
   }
 
-  /** The option carries its own product id, set when the engine offered it. Relying
-   *  on parsing it out of the variant id would break on any platform using opaque
-   *  ids, and Kettle's happen to be readable only by accident. */
-  function tapOption(c: {
+  /** The real, live accept-flow variant answer - a shopper picking a
+   *  size/option for a cart proposal that turned out to need one
+   *  (`/api/chat/act` -> `chosen_variant`). Restored 2026-09: this used
+   *  to be the only handler `turn.choices`' button ever called; it was
+   *  briefly replaced outright by `tapFulfillmentChoice` when that
+   *  mechanism was added, which broke this real, still-live flow. Both
+   *  now coexist, dispatched by the choice's own `source` tag - see
+   *  `ChatTurn.choices`'s docstring. */
+  function tapAcceptFlowChoice(c: {
     variant_id: string;
     label: string;
     product_id: string;
@@ -540,10 +633,19 @@ export function ChatWidget({
 
             {/* Products the engine actually fetched, never ones the model merely
                 described. Tappable, because reading a name and then typing it back
-                is work the shopper should not have to do. */}
+                is work the shopper should not have to do.
+                Root-cause fix (2026-09): this used to hard-cap at 4 cards
+                regardless of how many the engine actually returned - a second,
+                unrelated display-count decision living here, independent of
+                (and silently overriding) the backend's own real count
+                (`engine/shopper_v2/graph.py::_apply_query_intent`, the single
+                source of truth for "how many"). The backend is now the ONLY
+                place that decides a count ("show me two" -> 2, "show me all" ->
+                every real match, no count stated -> its own honest default) -
+                this renders exactly what it was sent, never a second opinion. */}
             {turn.products && turn.products.length > 0 && (
               <div className="chatproducts">
-                {turn.products.slice(0, 4).map((p) => (
+                {turn.products.map((p) => (
                   <button
                     key={p.product_id}
                     className="chatproduct tappable"
@@ -673,7 +775,11 @@ export function ChatWidget({
                     // from - and the conversation and the cart would then
                     // disagree. A stale offer is history, not a control.
                     disabled={busy !== null || i !== turns.length - 1}
-                    onClick={() => tapOption(ch)}
+                    onClick={() =>
+                      ch.source === "fulfillment"
+                        ? tapFulfillmentChoice(ch)
+                        : tapAcceptFlowChoice(ch)
+                    }
                   >
                     {ch.label}
                     {ch.left !== null && (
