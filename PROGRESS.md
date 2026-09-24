@@ -115,6 +115,33 @@ counted as unfinished implementation work.
   reproduced during the Merchant console functional audit but not
   resolved — rare, dev-environment only, not reproduced against the
   production-shaped single-writer path.
+- **Four pre-existing `healthcheck.py` failures**, unrelated to recent
+  Shopper V2 personalization/storefront work: `chat.py` recovery-explain
+  reply, `session/store.py` shared-memory-across-surfaces, `repository.py`
+  `checkout_conversion` counting, and `webhooks.py` pipeline not reaching
+  the ops queue. Last confirmed on a 114-pass run; not yet root-caused or
+  fixed.
+- **An ordinary Shopper V2 turn can cost up to 3 model calls** —
+  `understand()` (Stage 1, every turn), then `intent_resolution.py`'s
+  `resolve_cart_target` → `interpret_cart_reference` (runs on nearly every
+  turn once anything has been shown or a cart exists, not only
+  cart-related messages), then `respond()`'s `synthesize()` for any turn
+  that doesn't produce a deterministic reply. Against the documented
+  ~4-calls/minute Groq free-tier throttle, a single ordinary turn can by
+  itself consume most of a minute's budget — a real, previously
+  uncharacterized contributor to the throttling seen during live testing,
+  not only an artifact of rapid manual/automated testing. No fix applied:
+  the obvious fix (a deterministic keyword pre-filter to skip
+  `interpret_cart_reference` when the message looks unrelated to the
+  cart) was deliberately rejected — `intent_resolution.py`'s own docstring
+  explains this module exists specifically because keyword-matching for
+  cart-intent already failed historically in this codebase (~20
+  point-fixes in `relevance.py`), for phrasings like "I'll take this" or
+  "get me the Trailblazer" that a keyword list would miss; a skip-only
+  filter still risks silently reintroducing that exact defect. The
+  correct fix (merging 2-3 of these model calls into one) is a real
+  architecture change, not a quick patch, and needs its own scoped design
+  pass before being attempted.
 
 ---
 
@@ -127,12 +154,14 @@ A deterministic mission-aware shortlist/ranking building block
 roadmap outcome ("a product they would not have found by keyword, and why")
 has been built on either pipeline.
 
-### Personalized Recommendations — ~15% complete
-Write-only interaction instrumentation (`ShopperEvent`,
-`engine/execution/events.py`) exists, logging impressions/cart-adds/
-purchases, but nothing reads it back into ranking, synthesis, or durable
-memory. A returning shopper is not yet shown anything that visibly reflects
-past purchases/keeps/returns.
+### Personalized Recommendations — ~35% complete
+Durable-fact personalization (a stated preference changing which product
+ranks first on the next turn, including through mission-item turns) is now
+implemented and live-verified end to end on V2 — see Completed.md. Remaining
+gap: `ShopperEvent` interaction instrumentation (`engine/execution/events.py`)
+logs impressions/cart-adds/purchases write-only; nothing reads it back into
+ranking or synthesis, so a returning shopper is not yet shown anything that
+visibly reflects past purchases/keeps/returns.
 
 ### Mission-Based Shopping — ~30% complete
 `ShoppingState` re-ranks an already-fetched product list against a stated
