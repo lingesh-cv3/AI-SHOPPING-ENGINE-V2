@@ -167,9 +167,13 @@ visibly reflects past purchases/keeps/returns.
 `ShoppingState` re-ranks an already-fetched product list against a stated
 mission (live-verified flipping the top-ranked product as priorities
 change), but multi-item, cross-category basket building in one turn (e.g.
-shoes + socks + hydration for a marathon) is unbuilt on V1; V2's basket
-proposal work covers part of this and needs reconciling against the
-roadmap outcome specifically.
+shoes + socks + hydration for a marathon) is unbuilt on V1. V2's mission-item
+tracking and basket proposal flow cover part of this and had three
+real-conversation bugs (named-item add reporting, real-cart duplicate
+awareness, partial multi-name matching) fixed and verified — see
+Completed.md — but the roadmap outcome itself (building a full cross-
+category basket in one turn from a single mission statement) is still not a
+complete feature.
 
 ### AI Store Diagnosis (Merchant) — 0% as a shipped feature
 `business_diagnosis()` (deterministic, evidence-gated, correlation-only)

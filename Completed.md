@@ -54,6 +54,36 @@ partial, unverified, or unbuilt.
   shortlisting with a real reason per item; a discovery-vs-cart-action
   routing bug (a plain restatement misclassified as cart intent) is fixed
   structurally, not by a phrase list.
+- **Three mission/cart-sync bugs found in one real conversation, root-caused
+  and fixed** (`engine/shopper_v2/missions.py`,
+  `intent_resolution.py`/`MissionItemIntent`): (1) naming an already-tracked
+  item to add it ("add Energy Gel Box") produced a bare "Noted." with
+  nothing added — the named-candidate branch narrowed the item but never
+  reported or acted on it; fixed by reporting it and by adding a new
+  `add_now: bool` field to `MissionItemIntent` so a named reference can add
+  the item's real top candidate through the same risk-gated
+  `ActionType.ADD_TO_CART` path (`fulfillment.start_fulfillment`) every
+  other add already uses. (2) basket-propose re-proposed a mission item's
+  top candidate with no awareness of the shopper's real cart (populated via
+  a different path, e.g. direct accept-flow), sometimes proposing a wrong
+  or duplicate product for an already-fulfilled need — fixed by fetching
+  the real cart once before proposing and skipping any item whose real cart
+  lines already share a significant word with the item's own label,
+  reported as a new `already_in_cart` outcome. (3) multi-name partial
+  references ("include the socks and energy gel box") failed because
+  `resolve_named_subset` required each product's full catalog title as an
+  exact substring; widened to accept a title's distinctive words, but only
+  when a word is exclusive to one shown candidate, so two similar products
+  sharing a word can't both resolve from an ambiguous match. All three
+  verified live end-to-end together in one real conversation (no DB/state
+  seeding): a mission item added directly, two partial names resolved
+  together in one basket-propose turn, and the already-fulfilled item
+  correctly excluded from later proposals.
+  `tests/shopper_v2/test_phase7_missions.py`: 25/25 checks pass.
+  `healthcheck.py`: 115 passed on a cooldown rerun (an earlier same-session
+  rerun without cooldown showed 8 failures, all in payment-recovery code
+  this diff never touched — confirmed as Groq throttle flakiness from heavy
+  live testing, not a regression).
 - **V1's reply-before-data patch** (`ReasoningService.synthesize()`) is
   implemented and live-verified for `COMPARE_PRODUCTS`/`RECOMMEND_PRODUCTS`
   on both merchants, but is tracked in PROGRESS.md pending a passing
