@@ -25,9 +25,12 @@ import { BusinessInsights } from "./BusinessInsights";
 import { PlatformCapabilities } from "./PlatformCapabilities";
 import { StoreSettings } from "./StoreSettings";
 import { TasksPanel } from "./TasksPanel";
+import { MerchantApprovals } from "./MerchantApprovals";
+import { startApprovalPolling, useApprovalTotal } from "./merchantApprovalsStore";
 
 type SectionId =
   | "overview"
+  | "approvals"
   | "sales"
   | "orders"
   | "products"
@@ -51,6 +54,7 @@ interface NavGroup {
 
 const NAV: NavGroup[] = [
   { label: "Merchant", items: [{ id: "overview", label: "Overview" }] },
+  { label: "Decisions", items: [{ id: "approvals", label: "Approvals" }] },
   {
     label: "Business",
     items: [
@@ -148,6 +152,16 @@ export function MerchantConsole() {
     refresh();
   }, [refresh, signedIn]);
 
+  // The approvals count is kept live on every Merchant screen, not only the
+  // Approvals page: a decision nobody is told about expires, and the shopper
+  // waiting on it is told nobody came. One count, read from one store, is also
+  // what Overview, Payments & Checkout and the Copilot banner show.
+  useEffect(() => {
+    if (!signedIn) return;
+    return startApprovalPolling();
+  }, [signedIn]);
+  const approvalsWaiting = useApprovalTotal();
+
   async function setMode(mode: string) {
     if (!policy) return;
     setPolicy(
@@ -219,6 +233,15 @@ export function MerchantConsole() {
                 onClick={() => setSection(item.id)}
               >
                 {item.label}
+                {item.id === "approvals" && approvalsWaiting !== null && approvalsWaiting > 0 && (
+                  <span
+                    className="nav-badge"
+                    aria-label={`${approvalsWaiting} waiting`}
+                    data-testid="approvals-badge"
+                  >
+                    {approvalsWaiting}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -227,6 +250,7 @@ export function MerchantConsole() {
 
       <main className="merchant-content">
         {section === "overview" && <Overview onNavigate={(s) => setSection(s as SectionId)} />}
+        {section === "approvals" && <MerchantApprovals />}
         {section === "sales" && (
           <MerchantReport onNavigate={(s) => setSection(s as SectionId)} />
         )}

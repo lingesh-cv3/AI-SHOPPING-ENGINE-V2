@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { console_api, RECOVERY_ACTIONS } from "./api";
+import { console_api } from "./api";
+import { useApprovalTotal } from "./merchantApprovalsStore";
 import { Copilot } from "./Copilot";
 
 /** A handful of real questions the data can actually answer, shown as
@@ -25,19 +26,11 @@ export function MerchantCopilot({
 }: {
   onNavigate: (section: string) => void;
 }) {
-  // A merchant asking the copilot "what's out of stock" was told, with
-  // nothing to do about it from that screen - the read-only-twin gap
-  // CLAUDE.md names against the value bar (PROGRESS.md, "CV3 Merchant
-  // Copilot"). The payments/recovery slice of that gap already has a real
-  // action attached elsewhere (PaymentsPanel, approve/reject through the
-  // risk gate) - what was still missing was the copilot ever pointing a
-  // merchant there. Reads the identical queue PaymentsPanel itself reads,
-  // filtered by the identical RECOVERY_ACTIONS set, so this can never
-  // disagree with what that panel shows or claim a count PaymentsPanel
-  // itself would not act on.
-  const [pendingRecoveryCount, setPendingRecoveryCount] = useState<
-    number | null
-  >(null);
+  // Every decision waiting on the merchant - not only payment recovery - counted
+  // from the same store as the nav badge and the Approvals page, so this banner can
+  // never disagree with them. Null is "not known yet", which shows no banner rather
+  // than claiming nothing is waiting.
+  const approvalsWaiting = useApprovalTotal();
   // The second (catalogue/inventory/unmet-demand) slice of the same
   // read-only-twin gap - closed by a real, persisted MerchantTask record
   // rather than a fake inventory-write action (see
@@ -49,19 +42,6 @@ export function MerchantCopilot({
 
   useEffect(() => {
     let cancelled = false;
-    console_api
-      .queue()
-      .then((q) => {
-        if (cancelled) return;
-        const count = q.approvals.filter(
-          (a) => a.financial && RECOVERY_ACTIONS.has(a.action_type),
-        ).length;
-        setPendingRecoveryCount(count);
-      })
-      .catch(() => {
-        // No count is honest here - "0" would claim nothing is waiting,
-        // which is a different and stronger claim than "couldn't check".
-      });
     console_api
       .tasks("OPEN")
       .then((r) => {
@@ -75,14 +55,14 @@ export function MerchantCopilot({
   }, []);
 
   const banners = [
-    pendingRecoveryCount
+    approvalsWaiting
       ? {
           text:
-            pendingRecoveryCount === 1
-              ? "1 payment recovery case is waiting for your approval."
-              : `${pendingRecoveryCount} payment recovery cases are waiting for your approval.`,
-          buttonLabel: "Review in Payments & Checkout",
-          onClick: () => onNavigate("payments"),
+            approvalsWaiting === 1
+              ? "1 decision is waiting for your approval."
+              : `${approvalsWaiting} decisions are waiting for your approval.`,
+          buttonLabel: "Review Approvals",
+          onClick: () => onNavigate("approvals"),
         }
       : null,
     openTaskCount

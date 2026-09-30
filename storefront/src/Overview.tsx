@@ -1,3 +1,4 @@
+import { useApprovalTotal } from "./merchantApprovalsStore";
 import { useEffect, useState } from "react";
 import {
   api,
@@ -60,7 +61,9 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
   const [series, setSeries] = useState<SalesSeries | null>(null);
   const [products, setProducts] = useState<Performance | null>(null);
   const [demand, setDemand] = useState<UnmetDemand | null>(null);
-  const [pendingRecovery, setPendingRecovery] = useState<number>(0);
+  // One count of decisions waiting on the merchant, from the same store as the nav
+  // badge and the Approvals page. Null means not known yet - never shown as 0.
+  const approvalsWaiting = useApprovalTotal();
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [merchantName, setMerchantName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,10 +97,9 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
       console_api.salesSeries(days).catch(() => null),
       console_api.productPerformance(days, 5).catch(() => null),
       console_api.unmetDemand(days, 5).catch(() => null),
-      console_api.queue().catch(() => null),
       console_api.capabilities().catch(() => null),
     ])
-      .then(([r, c, conv, t, s, p, d, q, cp]) => {
+      .then(([r, c, conv, t, s, p, d, cp]) => {
         if (cancelled) return;
         setReport(r);
         setCatalog(c);
@@ -107,16 +109,6 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
         setProducts(p);
         setDemand(d);
         setCaps(cp);
-        if (q) {
-          const recoveryActions = new Set([
-            "RETRY_PAYMENT",
-            "OFFER_ALTERNATE_PAYMENT",
-            "SPLIT_PAYMENT",
-          ]);
-          setPendingRecovery(
-            q.approvals.filter((a) => recoveryActions.has(a.action_type)).length,
-          );
-        }
       })
       .catch((e) => {
         if (!cancelled) {
@@ -181,8 +173,8 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
       section: "recovery",
       ...(!report.supports_payment_recovery
         ? { status: "unsupported" as Status, detail: "Not supported on this platform" }
-        : pendingRecovery > 0
-          ? { status: "attention" as Status, detail: `${pendingRecovery} pending your approval` }
+        : approvalsWaiting !== null && approvalsWaiting > 0
+          ? { status: "attention" as Status, detail: `${approvalsWaiting} decision${approvalsWaiting === 1 ? "" : "s"} pending your approval` }
           : { status: "healthy" as Status, detail: `${report.recovery_count} recovered so far` }),
     },
     {
@@ -200,18 +192,11 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
   const anyAttention = health.some((h) => h.status === "attention");
 
   const attention: { label: string; detail: string; section: string }[] = [];
-  if (report.waiting_for_you > 0) {
+  if (approvalsWaiting !== null && approvalsWaiting > 0) {
     attention.push({
-      label: `${report.waiting_for_you} case${report.waiting_for_you === 1 ? "" : "s"} waiting on you`,
-      detail: "A person needs to decide something before the shopper can move on.",
-      section: "ai-commerce",
-    });
-  }
-  if (pendingRecovery > 0) {
-    attention.push({
-      label: `${pendingRecovery} payment ${pendingRecovery === 1 ? "recovery" : "recoveries"} pending your approval`,
-      detail: "A declined payment can be recovered, but only you can approve it.",
-      section: "payments",
+      label: `${approvalsWaiting} decision${approvalsWaiting === 1 ? "" : "s"} waiting on you`,
+      detail: "The engine is holding these until you approve or reject them. Each expires if nobody acts.",
+      section: "approvals",
     });
   }
   if (catalog && !catalog.reachable) {
