@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from shared.models import CaseState
 
@@ -402,6 +402,154 @@ async def pending_approvals(connection_id: str, *, limit: int = 50) -> list[dict
                 }
             )
         return rows
+
+
+def _waiting_now(connection_id: str, now: datetime) -> tuple:
+    """One merchant's "waiting on a person right now", as a query condition.
+
+    Not expired is part of the condition, in SQL, so a count and a page can never
+    disagree - `pending_approvals` above filters expiry after its limit, which lets
+    expired-but-unswept rows use up a page and hides live ones behind them.
+    """
+    return (
+        Approval.connection_id == connection_id,
+        Approval.state == "PENDING",
+        or_(Approval.expires_at.is_(None), Approval.expires_at >= now),
+    )
+
+
+async def pending_approvals_page(
+    connection_id: str, *, limit: int = 50, offset: int = 0
+) -> tuple[list[dict], int]:
+    """One merchant's pending approvals, a page at a time, with the true total.
+
+    The merchant's own queue. Returns (rows, total): `total` counts every live
+    pending approval for this merchant, not the page, so a consumer can tell when
+    there is more than it was handed rather than silently showing the oldest few.
+
+    Oldest first, with the approval id as a tie-break so pages never repeat or skip
+    a row. Every field `pending_approvals` returns is here unchanged, plus the two
+    clocks the operations queue already carries (`waiting_minutes`, `minutes_left`).
+    """
+    now = datetime.now(UTC)
+    condition = _waiting_now(connection_id, now)
+
+    async with session_scope() as db:
+        total = await db.scalar(
+            select(func.count(Approval.approval_id)).where(*condition)
+        )
+        result = await db.execute(
+            select(Approval, Case)
+            .join(Case, Case.case_id == Approval.case_id)
+            .where(*condition)
+            .order_by(Approval.requested_at.asc(), Approval.approval_id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+
+        rows = []
+        for approval, case in result.all():
+            requested = _aware(approval.requested_at)
+            expires = _aware(approval.expires_at)
+            rows.append(
+                {
+                    "approval_id": approval.approval_id,
+                    "case_id": case.case_id,
+                    "action_type": approval.action_type,
+                    "risk_rule": approval.risk_rule,
+                    "requested_at": requested.isoformat(),
+                    "waiting_minutes": int((now - requested).total_seconds() / 60),
+                    "expires_at": expires.isoformat() if expires else None,
+                    "minutes_left": (
+                        max(0, int((expires - now).total_seconds() / 60))
+                        if expires
+                        else None
+                    ),
+                    "friction_type": case.friction_type,
+                    "diagnosis": case.diagnosis,
+                    "evidence": case.evidence,
+                    "used_model": case.used_model,
+                    "shopper_reply": case.shopper_reply,
+                    "model_reply": case.model_reply,
+                    "selection_reason": case.selection_reason,
+                    "rejected": case.rejected,
+                    "financial": case.financial,
+                    "order_id": case.order_id,
+                    "query": case.query,
+                }
+            )
+    return rows, total or 0
+
+
+async def decided_page(
+    connection_id: str, *, limit: int = 40, offset: int = 0
+) -> tuple[list[dict], int]:
+    """One merchant's decided approvals, newest first, a page at a time.
+
+    The merchant's own history: what they (or nobody) decided, and what came of
+    it. Includes expiries - nobody decided those, which is the kind worth being
+    able to count - and `decided_by == "expired"` says so. `final_state` is what
+    actually happened after the decision, which is allowed to disagree with it: an
+    approval can be right and still fail once it reaches the platform.
+
+    Returns (rows, total). Approvals still PENDING are never here, including one
+    that has run out of time but has not been swept yet.
+    """
+    condition = (
+        Approval.connection_id == connection_id,
+        Approval.state != "PENDING",
+    )
+
+    async with session_scope() as db:
+        total = await db.scalar(
+            select(func.count(Approval.approval_id)).where(*condition)
+        )
+        result = await db.execute(
+            select(Approval, Case)
+            .join(Case, Case.case_id == Approval.case_id)
+            .where(*condition)
+            .order_by(Approval.decided_at.desc(), Approval.approval_id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        pairs = list(result.all())
+
+        case_ids = [case.case_id for _, case in pairs]
+        outcomes = {}
+        if case_ids:
+            found = await db.execute(
+                select(Outcome).where(Outcome.case_id.in_(case_ids))
+            )
+            outcomes = {o.case_id: o for o in found.scalars()}
+
+    rows = []
+    for approval, case in pairs:
+        outcome = outcomes.get(case.case_id)
+        requested = _aware(approval.requested_at)
+        decided = _aware(approval.decided_at)
+        rows.append(
+            {
+                "approval_id": approval.approval_id,
+                "case_id": case.case_id,
+                "state": approval.state,
+                "action_type": approval.action_type,
+                "risk_rule": approval.risk_rule,
+                "requested_at": requested.isoformat() if requested else None,
+                "decided_at": decided.isoformat() if decided else None,
+                "decided_by": approval.decided_by,
+                "note": approval.note,
+                "friction_type": case.friction_type,
+                "diagnosis": case.diagnosis,
+                "financial": case.financial,
+                "order_id": case.order_id,
+                "resolved": outcome.resolved if outcome else None,
+                "final_state": outcome.final_state if outcome else case.state,
+                "revenue": outcome.revenue_recovered_amount if outcome else None,
+                "currency": outcome.revenue_recovered_currency if outcome else None,
+            }
+        )
+    return rows, total or 0
+
 
 async def decide_approval(
     connection_id: str,
@@ -2275,10 +2423,13 @@ async def ops_stats(connection_ids: list[str]) -> dict:
             if a.expires_at is None or _aware(a.expires_at) >= now
         ]
 
+        # Decisions a person made. An expiry also sets decided_at and leaves the
+        # state non-PENDING, but nobody decided it - counting it here reported
+        # timeouts as work done today.
         settled_today = await db.scalar(
             select(func.count(Approval.approval_id)).where(
                 Approval.connection_id.in_(connection_ids),
-                Approval.state != "PENDING",
+                Approval.state.in_(("APPROVED", "REJECTED")),
                 Approval.decided_at >= midnight,
             )
         )

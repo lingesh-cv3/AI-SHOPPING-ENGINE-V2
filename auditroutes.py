@@ -63,6 +63,7 @@ K = keys()
 PK_DEMO = K.get("CV3_PUBLISHABLE_CONN_DEMO")
 PK_KETTLE = K.get("CV3_PUBLISHABLE_CONN_KETTLE")
 SK_DEMO = K.get("CV3_SECRET_CONN_DEMO")
+SK_KETTLE = K.get("CV3_SECRET_CONN_KETTLE")
 OPERATOR = K.get("CV3_OPERATOR_KEY")
 
 
@@ -159,7 +160,34 @@ PROBES = [
     ("ops queue", "GET", "/api/ops/queue", OPERATOR, SK_DEMO, None),
     ("ops history", "GET", "/api/ops/history", OPERATOR, SK_DEMO, None),
     ("ops stats", "GET", "/api/ops/stats", OPERATOR, SK_DEMO, None),
+    ("ops handovers", "GET", "/api/ops/handovers", OPERATOR, SK_DEMO, None),
+    # A case id that does not exist: the operator's call answers changed=False
+    # and writes nothing, so this probes the lock without touching real work.
+    (
+        "ops handover close",
+        "POST",
+        "/api/ops/handovers/conn_demo/case_audit_probe",
+        OPERATOR,
+        SK_DEMO,
+        {"handled_by": "audit-probe"},
+    ),
+    # No "right key" on purpose: an accepted call reaches the model provider, and
+    # an audit that waits on one cannot be run when the provider is busy. Only the
+    # refusals are probed - which is the half that matters for a lock.
+    ("ops copilot", "POST", "/api/ops/copilot", None, SK_DEMO, {"question": "audit probe"}),
     ("expiry sweep", "POST", "/api/admin/expire", OPERATOR, SK_DEMO, None),
+    # Merchant-to-merchant isolation on the approval routes. The entries above for
+    # /api/approvals pass no "wrong key", so they prove a key is required but not
+    # that it must be the right merchant's. Kettle's own key, against Kettle's
+    # path, with Northfield's key as the stranger. The decide probe uses an
+    # approval id that does not exist: the owner gets a 404 and nothing changes.
+    ("approval queue (cross-merchant)", "GET", "/api/approvals/conn_kettle",
+     SK_KETTLE, SK_DEMO, None),
+    ("approval history", "GET", "/api/approvals/conn_demo/history", SK_DEMO, None, None),
+    ("approval history (cross-merchant)", "GET", "/api/approvals/conn_kettle/history",
+     SK_KETTLE, SK_DEMO, None),
+    ("approval decide (cross-merchant)", "POST", "/api/approvals/conn_kettle/apr_audit_probe",
+     SK_KETTLE, SK_DEMO, {"approved": False, "decided_by": "audit-probe"}),
     # Reads a transcript rather than sending a message. Same router, same guard,
     # and no model call - an audit that waits on a provider is one that cannot be
     # run when the provider is busy, which is exactly when somebody might want to

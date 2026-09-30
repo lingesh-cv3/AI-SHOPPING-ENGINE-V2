@@ -36,6 +36,7 @@ from shared.models import (
     risk_properties_for,
 )
 
+from . import approval_view
 from .auth import any_key, belongs_to, merchant_scoped, operator
 from .deps import DEV_MERCHANT_NAME, MERCHANT_NAMES, engine
 from .schemas import (
@@ -518,19 +519,60 @@ async def simulate(
 # ---------------------------------------------------------------------------
 
 
+#: The most rows one approvals page may return. A caller asking for more is given
+#: this many and told the true total, never silently a different number.
+_APPROVAL_PAGE_MAX = 200
+
+
 @app.get(f"{API}/approvals/{{connection_id}}")
 async def list_approvals(
-    connection_id: str, _=Depends(merchant_scoped())
+    connection_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    _=Depends(merchant_scoped()),
 ) -> dict:
-    """What a person needs to decide, oldest first.
+    """What a merchant needs to decide, oldest first.
 
     Each entry carries the full reasoning that produced it - the diagnosis, the
     evidence, what the AI wanted to say and what the shopper was actually told. A
     queue that shows only an action name asks a person to approve something they
     cannot evaluate.
+
+    `total` is every live pending approval for this merchant, not the page, so a
+    consumer knows when it has been handed only part of the queue. Each entry also
+    says whether approving it can actually run anything (`executable`) - a few
+    action types can reach this queue and then do nothing, and saying so beats
+    offering a button that cannot work. See approval_view.
     """
     _adapter(connection_id)
-    return {"approvals": await db.pending_approvals(connection_id)}
+    limit = min(max(1, limit), _APPROVAL_PAGE_MAX)
+    offset = max(0, offset)
+    rows, total = await db.pending_approvals_page(
+        connection_id, limit=limit, offset=offset
+    )
+    for row in rows:
+        row["executable"] = approval_view.executability(row["action_type"])
+    return {"approvals": rows, "total": total, "limit": limit, "offset": offset}
+
+
+@app.get(f"{API}/approvals/{{connection_id}}/history")
+async def approval_history(
+    connection_id: str,
+    limit: int = 40,
+    offset: int = 0,
+    _=Depends(merchant_scoped()),
+) -> dict:
+    """What has already been decided for this merchant, and what came of it.
+
+    Newest first, with a true `total`. Includes approvals that ran out of time,
+    marked `decided_by == "expired"`: nobody decided those, and they are sales the
+    engine could not save, which a merchant is entitled to count.
+    """
+    _adapter(connection_id)
+    limit = min(max(1, limit), _APPROVAL_PAGE_MAX)
+    offset = max(0, offset)
+    rows, total = await db.decided_page(connection_id, limit=limit, offset=offset)
+    return {"decisions": rows, "total": total, "limit": limit, "offset": offset}
 
 
 @app.post(f"{API}/approvals/{{connection_id}}/{{approval_id}}")
