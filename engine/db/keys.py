@@ -7,14 +7,25 @@ material, and that is worth being able to point at.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
 from .models import ApiKey
 from .session import session_scope
+
+logger = logging.getLogger(__name__)
+
+#: How often a key's "last used" time is rewritten. Recording it on every request
+#: made every authenticated call a database write, and under SQLite's single
+#: writer a burst of concurrent requests (a console loading a dozen panels) made
+#: some of those writes fail with "database is locked" - which used to surface as
+#: a refusal of a perfectly good key. A minute is as fine-grained as "which keys
+#: are live" needs.
+LAST_USED_GRANULARITY = timedelta(minutes=1)
 
 #: The prefix tells you what a key is at a glance, which matters when somebody
 #: pastes one into a bug report and needs to know how urgently to rotate it.
@@ -98,17 +109,44 @@ async def resolve(key: str) -> ApiKey | None:
         )
         candidates = list(rows.scalars())
 
-        wanted = _hash(key)
-        for row in candidates:
-            if row.key_hash == wanted:
-                if row.revoked_at is not None:
-                    return None
-                # Recorded so an operator can see which keys are live. Best effort:
-                # a failed write here must not fail the request.
-                row.last_used_at = datetime.now(UTC)
-                return row
+    wanted = _hash(key)
+    for row in candidates:
+        if row.key_hash == wanted:
+            if row.revoked_at is not None:
+                return None
+            # Outside the lookup, after it has already committed, and swallowed on
+            # failure. This used to be written inside the same transaction as the
+            # read, so a locked database failed the whole resolution and the caller
+            # read that as "not a valid key" - a 401 for a correct key.
+            await _note_use(row)
+            return row
 
     return None
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+async def _note_use(row: ApiKey) -> None:
+    """Record that a key was just used. Best effort, and at most once a minute.
+
+    Recorded so an operator can see which keys are live. A failure here is logged
+    and ignored: it must never decide whether a request is authenticated.
+    """
+    now = datetime.now(UTC)
+    last = _aware(row.last_used_at)
+    if last is not None and now - last < LAST_USED_GRANULARITY:
+        return
+    try:
+        async with session_scope() as db:
+            stored = await db.get(ApiKey, row.key_id)
+            if stored is not None:
+                stored.last_used_at = now
+    except Exception:  # noqa: BLE001
+        logger.warning("could not record use of key %s", row.key_id, exc_info=True)
 
 
 async def list_keys(connection_id: str | None = None) -> list[dict]:
