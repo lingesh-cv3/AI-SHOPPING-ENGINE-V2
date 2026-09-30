@@ -46,7 +46,9 @@ createRoot(document.getElementById("root")!).render(
         <Route path="/:merchant/signin" element={<SignInPage />} />
         <Route path="/:merchant/signup" element={<SignInPage creating />} />
         <Route path="/:merchant/merchant" element={<MerchantPage />} />
-        <Route path="/:merchant/operations" element={<OperationsPage />} />
+        {/* Operations spans every merchant, so it has no merchant in its address.
+            An old /kettle/operations bookmark goes to the one real page. */}
+        <Route path="/:merchant/operations" element={<Navigate to="/operations" replace />} />
 
         <Route path="/signin" element={<SignInPage />} />
         <Route path="/signup" element={<SignInPage creating />} />

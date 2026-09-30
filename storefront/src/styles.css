@@ -4210,3 +4210,197 @@ select.card-picker {
   cursor: pointer;
   padding: 0;
 }
+
+/* ---- CV3 Operations (additive) ----------------------------------------- */
+
+/* CV3's own tokens. Operations spans every merchant, so it wears neither
+   merchant's palette (see useOpsTheme). Same token names the shared components
+   read, so panels, stats and the copilot render unchanged. */
+[data-theme="cv3-ops"] {
+  --ink: #171a1f;
+  --ink-2: #3c434c;
+  --ink-3: #6a727c;
+  --paper: #f1f2f4;
+  --surface: #ffffff;
+  --line: #dde0e4;
+  --hero: #1a1d21;
+  --hero-ink: #f2f3f4;
+  --hero-ink-2: #a3aab3;
+
+  --accent: #2b4f9e;
+  --accent-soft: #e8edf8;
+  --accent-ink: #ffffff;
+
+  --friction: #a8471a;
+  --friction-soft: #fbeee6;
+  --ok: #1b6b4c;
+  --ok-soft: #e7f2ed;
+
+  --display: "Public Sans", system-ui, sans-serif;
+  --display-weight: 700;
+  --display-tracking: -0.01em;
+  --display-transform: none;
+
+  --radius: 4px;
+  --radius-card: 4px;
+}
+
+.ops-page .pagehead.ops {
+  align-items: center;
+}
+
+.ops-signout {
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: transparent;
+  color: inherit;
+  font-size: 12.5px;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.ops-signout:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ops-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.ops-refresh {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ops-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.ops-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+
+.ops-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.ops-row-label {
+  font-weight: 600;
+}
+
+.ops-row-note {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  margin-top: 2px;
+}
+
+.ops-row-value {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  text-align: right;
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+
+.ops-row-value .num {
+  font-size: var(--step-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.ops-sub {
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+
+.ops-unavailable,
+.ops-loading {
+  font-size: 13px;
+  color: var(--ink-3);
+  font-family: var(--body);
+}
+
+.ops-stale {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.ops-table-wrap {
+  overflow-x: auto;
+}
+
+.ops-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.ops-table th {
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ops-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ops-table td.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.ops-footnotes .note {
+  margin: 8px 0 0;
+}
+
+.ops-health-line {
+  margin: 16px 0 0;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.ops-coverage {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.ops-coverage-note {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  .ops-coverage {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ops-scope-note {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--friction);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 13px;
+  color: var(--ink-2);
+}

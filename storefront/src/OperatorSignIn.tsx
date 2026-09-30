@@ -36,9 +36,9 @@ export function OperatorSignIn({ onSignedIn }: { onSignedIn: () => void }) {
   return (
     <div className="signin">
       <div className="eyebrow">CV3 operations</div>
-      <h2 className="signin-title">Sign in to see the queue</h2>
+      <h2 className="signin-title">Sign in to CV3 Operations</h2>
       <p className="signin-note">
-        This queue spans every client, so it needs the CV3 operator key rather than
+        This console spans every client, so it needs the CV3 operator key rather than
         a merchant one. It is not stored in the app &mdash; the storefront and this
         console share code, so a key built in would be readable by any shopper.
       </p>
