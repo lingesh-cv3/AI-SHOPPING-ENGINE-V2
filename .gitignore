@@ -65,3 +65,9 @@ list*.py
 # false-substitution/false-decline/state-transition/tenant-isolation checks
 # a spec explicitly requires to persist as the permanent regression suite.
 !tests/shopper_v2/*.py
+
+# Operations's permanent regression suite (repository semantics, auth and tenant
+# isolation, merchant approval APIs, key resolution). Tracked despite matching
+# test*.py above for the same reason as the Shopper V2 suite: these are checks
+# that must keep passing, not one-off scratch.
+!tests/ops/*.py
