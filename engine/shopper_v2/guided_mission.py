@@ -39,17 +39,28 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
 from engine.db import shopping_state as shopping_state_store
 from engine.execution import events as shopper_events
 
+from . import basket_budget
 from .evidence import build_evidence
 from .retrieval import retrieve
 from .state import MissionItem, ShoppingStateV2
 
 logger = logging.getLogger(__name__)
+
+#: The basket-budget record of the LAST reply built this turn (`basket_budget.BudgetView.trace()`), read by the graph into
+#: `TurnTrace.basket_budget`. A contextvar so concurrent turns never see each other's (same pattern as `fulfillment.ADDED_THIS_TURN`).
+BUDGET_TRACE: ContextVar[dict | None] = ContextVar("guided_budget_trace", default=None)
+
+
+def _note_budget(view: "basket_budget.BudgetView | None") -> None:
+    BUDGET_TRACE.set(view.trace() if view is not None and view.estimate.verdict != "none" else None)
+
 
 _MAX_STAGES = 6
 _SHOWN_PER_STAGE = 4
@@ -103,6 +114,9 @@ class StageSpec:
 class MissionSpec:
     stages: list[StageSpec]
     activity: str | None = None
+    #: ONE shared total across every stage, when the shopper stated one ("total budget 8000", "...energy under 5000").
+    total_budget: Decimal | None = None
+    budget_currency: str | None = None
 
 
 def parse_mission(message: str) -> MissionSpec | None:
@@ -112,6 +126,12 @@ def parse_mission(message: str) -> MissionSpec | None:
     phrase makes the whole message "not a mission", so ordinary discovery is
     never hijacked."""
     text = " ".join((message or "").split())
+    if not text:
+        return None
+    # A trailing budget clause ("...energy under 5000", "..., total budget 8000") is the basket budget, cut BEFORE the stages are
+    # split so it can never become a stage ("energy under", "total budget"). A mid-sentence "shoes under 5000 and socks" is
+    # left alone (it is a per-item cap, handled as before).
+    text, total_budget, budget_currency = basket_budget.strip_budget_clause(text, trailing_only=True)
     if not text:
         return None
     m = _WANT.search(text)
@@ -142,7 +162,8 @@ def parse_mission(message: str) -> MissionSpec | None:
             labels.append(label)
     if len(labels) < 2:
         return None
-    return MissionSpec(stages=[StageSpec(label=l) for l in labels], activity=activity)
+    return MissionSpec(stages=[StageSpec(label=l) for l in labels], activity=activity,
+                       total_budget=total_budget, budget_currency=budget_currency)
 
 
 # --------------------------------------------------------------------------
@@ -173,6 +194,9 @@ class StageResult:
     candidate_titles: list[str] = field(default_factory=list)
     sold_out_titles: list[str] = field(default_factory=list)
     unavailable: bool = False
+    #: prices aligned to `candidate_ids` (None = no price) and the one currency they share (None = disagree / none priced)
+    candidate_prices: list = field(default_factory=list)
+    price_currency: str | None = None
 
 
 async def stage_candidates(
@@ -210,9 +234,11 @@ async def stage_candidates(
         buyable = [p for p in buyable if p.product_id not in avoid] + \
                   [p for p in buyable if p.product_id in avoid]
     buyable = buyable[:_KEPT_PER_STAGE]
+    prices, currency = basket_budget.price_record(buyable)
     return StageResult(
         label=label, candidate_ids=[p.product_id for p in buyable],
         candidate_titles=[p.title for p in buyable], sold_out_titles=sold_out[:3],
+        candidate_prices=prices, price_currency=currency,
     )
 
 
@@ -266,6 +292,87 @@ async def _fetch(adapter, ids: list[str]) -> list:
 def _options_text(label: str, products: list) -> str:
     lines = [f"{p.title} ({_money(p.price)})" for p in products]
     return f"{label}: " + "; ".join(lines)
+
+
+# --------------------------------------------------------------------------
+# Basket budget: one shared total, read from state; every figure from the REAL cart and fresh reads.
+# --------------------------------------------------------------------------
+
+def items_budget(items: list[MissionItem]) -> tuple[Decimal | None, str | None]:
+    """The mission's ONE shared total, carried on its guided stages (never the session-wide `budget_amount`: see `MissionItem`)."""
+    for item in items:
+        if item.guided and item.total_budget not in (None, ""):
+            try:
+                value = Decimal(str(item.total_budget))
+            except InvalidOperation:
+                continue
+            return (value if value > 0 else None), (item.total_budget_currency or None)
+    return None, None
+
+
+def _set_total(items: list[MissionItem], amount: Decimal | None, currency: str | None) -> None:
+    for item in items:
+        if item.guided:
+            item.total_budget = str(amount) if amount is not None else None
+            item.total_budget_currency = currency if amount is not None else None
+
+
+async def _record_budget_event(state: ShoppingStateV2, event_type: str, detail: dict) -> None:
+    """Best-effort persisted measurement (`events.basket_budget_outcomes`); a failure here never touches the turn."""
+    try:
+        await shopper_events.record(
+            connection_id=state.connection_id, session_id=state.session_id, event_type=event_type, detail=detail,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("guided_mission: could not record %s", event_type, exc_info=True)
+
+
+async def _maybe_record_outcome(state: ShoppingStateV2, cart, items: list[MissionItem]) -> None:
+    """Once, at the moment the LAST open stage closes: how the REAL cart ended against the shared budget."""
+    budget, currency = items_budget(items)
+    if budget is None or any(i.guided and i.stage == "pending" for i in items):
+        return
+    guided = [i for i in items if i.guided]
+    within = None
+    committed = None
+    if cart is not None:
+        line_cur = {str(ln.line_total.currency) for ln in cart.lines}
+        if len(line_cur) <= 1 and (currency is None or not line_cur or currency in line_cur):
+            committed = sum((Decimal(str(ln.line_total.amount)) for ln in cart.lines), Decimal(0))
+            within = committed <= budget
+    added = [i for i in guided if i.stage == "added"]
+    await _record_budget_event(state, shopper_events.EventType.BASKET_BUDGET_OUTCOME, {
+        "budget": str(budget), "currency": currency, "committed": str(committed) if committed is not None else None,
+        "within_budget": within, "stages_added": len(added), "stages_skipped": sum(1 for i in guided if i.stage == "skipped"),
+        "added_from_alternatives": sum(1 for i in added if i.added_product_id in set(i.offered_alternative_ids)),
+    })
+
+
+async def _read_cart(adapter, cart_id: str | None):
+    """`(cart, state)` with state "none" (no cart yet: a known empty), "ok", or "unreadable" (never treated as empty)."""
+    if not cart_id:
+        return None, "none"
+    cart = await _cart_or_none(adapter, cart_id)
+    return cart, ("ok" if cart is not None else "unreadable")
+
+
+def _visible_candidates(item: MissionItem, exclude: set[str]) -> list[str]:
+    """The stage's shown options: its candidates minus anything already in the real cart or chosen for another stage."""
+    return [c for c in item.candidates if c not in exclude][:_SHOWN_PER_STAGE]
+
+
+async def _budget_view(adapter, state: ShoppingStateV2, items: list[MissionItem], cart, cart_state: str,
+                       current: MissionItem | None, shown: list | None) -> "basket_budget.BudgetView":
+    budget, currency = items_budget(items)
+    try:
+        view = await basket_budget.build_budget_view(
+            adapter, budget=budget, budget_currency=currency, items=items, cart=cart, cart_state=cart_state,
+            current=current, shown_products=shown,
+        )
+    except Exception:  # noqa: BLE001 - a money view never breaks a mission turn
+        logger.warning("guided_mission: budget view failed", exc_info=True)
+        view = basket_budget.BudgetView(estimate=basket_budget.BasketEstimate())
+    return view
 
 
 # --------------------------------------------------------------------------
@@ -338,25 +445,63 @@ async def _confirmed_lines(adapter, cart, items: list[MissionItem]) -> list[str]
 
 async def _stage_prompt(
     adapter, item: MissionItem, *, lead: str = "Next up:", list_options: bool = True,
+    view: "basket_budget.BudgetView | None" = None, products: list | None = None,
 ) -> tuple[str, list]:
-    products = await _fetch(adapter, item.candidates[:_SHOWN_PER_STAGE])
+    exclude = view.exclude_ids if view is not None else set()
+    shown_ids = _visible_candidates(item, exclude)
+    if products is None:
+        products = await _fetch(adapter, shown_ids)
+    if not products and item.candidates and not shown_ids:
+        return (f"{lead} {item.label}. Everything that fit is already in your cart or chosen for another stage - "
+                "say skip to leave this one out."), []
     if not products:
         return f"I couldn't load options for {item.label} just now - try again in a moment.", []
     how = (
         "Tap Add on the one you want, or tell me which and I'll add it (you choose the size "
         "first if it has one). Say skip to leave this one out."
     )
+    money = ""
+    if view is not None:
+        parts = [basket_budget.verdict_text(view.estimate), view.alternatives_text, view.compat_text]
+        money = " ".join(x for x in parts if x)
+        money = f" {money}" if money else ""
     if not list_options:
-        return f"{lead} {item.label}. {how}", products
+        return f"{lead} {item.label}.{money} {how}", products
     names = "; ".join(f"{p.title} ({_money(p.price)})" for p in products)
     extra = f" Sold out right now: {', '.join(item.sold_out_titles)}." if item.sold_out_titles else ""
-    return f"{lead} {item.label}. In stock: {names}.{extra} {how}", products
+    return f"{lead} {item.label}. In stock: {names}.{extra}{money} {how}", products
+
+
+async def _prompt_with_budget(
+    adapter, state: ShoppingStateV2, items: list[MissionItem], cart, cart_state: str, item: MissionItem, *,
+    lead: str = "Next up:", list_options: bool = True,
+) -> tuple[str, list, "basket_budget.BudgetView"]:
+    """A stage prompt that also tells the shopper what is left, whether the whole list fits and which options still fit.
+    Alternatives come back as extra cards (read-only suggestions): the shopper adds one the usual way."""
+    exclude = basket_budget.committed_ids(cart, items)
+    shown = await _fetch(adapter, _visible_candidates(item, exclude))
+    view = await _budget_view(adapter, state, items, cart, cart_state, item, shown)
+    fresh = [p.product_id for p in view.alternatives if p.product_id not in item.offered_alternative_ids]
+    if fresh:
+        item.offered_alternative_ids = list(item.offered_alternative_ids) + fresh
+        try:
+            await shopping_state_store.merge(state.session_id, state.connection_id,
+                                             mission_items=[i.model_dump(mode="json") for i in items])
+        except Exception:  # noqa: BLE001 - remembering an offer is best-effort
+            logger.warning("guided_mission: could not persist offered alternatives", exc_info=True)
+    text, products = await _stage_prompt(adapter, item, lead=lead, list_options=list_options, view=view, products=shown)
+    cards = list(products)
+    for alt in view.alternatives:
+        if all(alt.product_id != c.product_id for c in cards):
+            cards.append(alt)
+    _note_budget(view)
+    return text, cards, view
 
 
 _LEAD_FIRST = "Let's start with"
 
 
-async def _summary(adapter, cart, items: list[MissionItem]) -> str:
+async def _summary(adapter, cart, items: list[MissionItem], state: ShoppingStateV2 | None = None) -> str:
     done = [i for i in items if i.guided]
     lines = await _confirmed_lines(adapter, cart, done)
     skipped = [i.label for i in done if i.stage == "skipped"]
@@ -371,6 +516,19 @@ async def _summary(adapter, cart, items: list[MissionItem]) -> str:
     if cart is not None and cart.lines:
         total = cart.grand_total or cart.subtotal
         parts.append(f"Cart total: {total} for {cart.item_count} item{'s' if cart.item_count != 1 else ''}.")
+    budget, currency = items_budget(items)
+    if budget is not None and cart is not None:
+        lines_cur = {str(ln.line_total.currency) for ln in cart.lines}
+        if len(lines_cur) <= 1 and (currency is None or not lines_cur or currency in lines_cur):
+            committed = sum((Decimal(str(ln.line_total.amount)) for ln in cart.lines), Decimal(0))
+            cur = currency or (next(iter(lines_cur)) if lines_cur else None)
+            diff = budget - committed
+            how = (f"{basket_budget.money_text(abs(diff), cur)} under" if diff >= 0 else f"{basket_budget.money_text(abs(diff), cur)} over")
+            note = f"Against your {basket_budget.money_text(budget, cur)} budget the items come to {how} (line totals, before delivery and tax)."
+            grand = getattr(cart, "grand_total", None)
+            if grand is not None and Decimal(str(grand.amount)) > budget and str(grand.currency) == (cur or str(grand.currency)):
+                note += f" With delivery and tax the cart total is {grand}, which is over your budget."
+            parts.append(note)
     parts.append("Nothing left to choose - say checkout whenever you're ready.")
     return " ".join(parts)
 
@@ -382,6 +540,8 @@ class GuidedTurn:
     state: ShoppingStateV2 | None = None
     #: product ids that are "in view" after this turn (current stage's options).
     view_ids: list[str] = field(default_factory=list)
+    #: `BudgetView.trace()` of this reply, when a shared budget is in play (read into `TurnTrace.basket_budget`).
+    budget_trace: dict | None = None
 
 
 async def _advance_text(adapter, cart, state: ShoppingStateV2, items: list[MissionItem],
@@ -390,10 +550,15 @@ async def _advance_text(adapter, cart, state: ShoppingStateV2, items: list[Missi
     options - or the closing summary when nothing is left."""
     confirmed = await _confirmed_lines(adapter, cart, newly)
     head = ("Confirmed in your cart: " + "; ".join(confirmed) + ".") if confirmed else ""
+    cart_state = "ok" if cart is not None else "unreadable"
     nxt = current_stage(items)
     if nxt is None:
-        return (f"{head} {await _summary(adapter, cart, items)}").strip(), []
-    prompt, products = await _stage_prompt(adapter, nxt)
+        return (f"{head} {await _summary(adapter, cart, items, state)}").strip(), []
+    prompt, products, view = await _prompt_with_budget(adapter, state, items, cart, cart_state, nxt)
+    est = view.estimate
+    if est.verdict != "none" and est.budget is not None and est.committed is not None and est.committed > est.budget:
+        head = (f"{head} This brings you to {basket_budget.money_text(est.committed, est.currency)} - "
+                f"{basket_budget.money_text(est.committed - est.budget, est.currency)} over your budget.").strip()
     return f"{head} {prompt}".strip(), products
 
 
@@ -418,6 +583,19 @@ async def start(
     ]
     if all(r.unavailable for r in results):
         return None
+    # One product is offered in ONE stage: a product that is a candidate of two stages ("socks" and "running socks") stays in
+    # the first stage that has it. A stage is never emptied by this - if every candidate was already claimed it keeps its own.
+    claimed: set[str] = set()
+    duplicates_removed = 0
+    for r in results:
+        ids = list(r.candidate_ids)
+        keep = [i for i, pid in enumerate(ids) if pid not in claimed]
+        if keep and len(keep) < len(ids):
+            duplicates_removed += len(ids) - len(keep)
+            r.candidate_ids = [ids[i] for i in keep]
+            r.candidate_titles = [r.candidate_titles[i] for i in keep]
+            r.candidate_prices = [r.candidate_prices[i] for i in keep] if r.candidate_prices else []
+        claimed |= set(r.candidate_ids)
     items: list[MissionItem] = []
     for r in results:
         label = r.label
@@ -432,8 +610,19 @@ async def start(
             guided=True, stage="pending" if r.candidate_ids else "unavailable",
             status="exploring" if r.candidate_ids else "done",
             sold_out_titles=r.sold_out_titles,
+            candidate_prices=list(r.candidate_prices), price_currency=r.price_currency,
         ))
-    return await _present_plan(adapter, items, cart_id, state)
+    if spec.total_budget is not None:
+        _set_total(items, spec.total_budget, spec.budget_currency)
+    turn = await _present_plan(adapter, items, cart_id, state)
+    if turn.budget_trace is not None:
+        turn.budget_trace["duplicates_filtered"] = duplicates_removed
+    if spec.total_budget is not None:
+        await _record_budget_event(state, shopper_events.EventType.BASKET_BUDGET_SET, {
+            "budget": str(spec.total_budget), "currency": spec.budget_currency,
+            "verdict": (turn.budget_trace or {}).get("verdict"), "source": "mission_start",
+        })
+    return turn
 
 
 async def adopt(
@@ -449,6 +638,7 @@ async def adopt(
         item.sold_out_titles = [p.title for p in products if not _in_stock(p)][:3]
         item.candidates = [p.product_id for p in buyable][:_KEPT_PER_STAGE]
         item.candidate_titles = [p.title for p in buyable][:_KEPT_PER_STAGE]
+        item.candidate_prices, item.price_currency = basket_budget.price_record(buyable[:_KEPT_PER_STAGE])
         item.guided = True
         item.stage = "pending" if item.candidates else "unavailable"
         item.status = "exploring" if item.candidates else "done"
@@ -461,7 +651,7 @@ async def _present_plan(
     """Persists the stages and writes the up-front plan: every stage's real
     in-stock options, stages that cannot be offered (and why), anything already
     in the cart, then the first open stage's call to action."""
-    cart = await _cart_or_none(adapter, cart_id)
+    cart, cart_state = await _read_cart(adapter, cart_id)
     sync_items_with_cart(items, cart)
     new_state = await _persist(state, items)
 
@@ -484,14 +674,23 @@ async def _present_plan(
         "What's in stock right now - " + " | ".join(plan_lines) + "."
     )
     nxt = current_stage(items)
+    budget_trace = None
     if nxt is None:
-        reply = f"{plan} {await _summary(adapter, cart, items)}"
+        reply = f"{plan} {await _summary(adapter, cart, items, new_state)}"
         products: list = []
     else:
-        prompt, _ = await _stage_prompt(adapter, nxt, lead=_LEAD_FIRST, list_options=False)
+        BUDGET_TRACE.set(None)
+        prompt, cards, view = await _prompt_with_budget(
+            adapter, new_state, items, cart, cart_state, nxt, lead=_LEAD_FIRST, list_options=False,
+        )
         reply = f"{plan} {prompt}"
-        products = shown_products
-    return GuidedTurn(reply=reply, products=products, state=new_state, view_ids=view_product_ids(new_state))
+        products = list(shown_products)
+        for alt in view.alternatives:
+            if all(alt.product_id != c.product_id for c in products):
+                products.append(alt)
+        budget_trace = BUDGET_TRACE.get()
+    return GuidedTurn(reply=reply, products=products, state=new_state, view_ids=view_product_ids(new_state),
+                      budget_trace=budget_trace)
 
 
 def _title_mentions(title: str, activity: str) -> bool:
@@ -527,6 +726,11 @@ def _stage_named(message: str, items: list[MissionItem]) -> MissionItem | None:
 
 
 def _parse_budget(message: str) -> Decimal | None:
+    """The amount in a budget clause. One shared reader (`basket_budget`) so a stage cap, a total and a mission start all
+    read the same words the same way."""
+    value = basket_budget.parse_budget(message)
+    if value is not None:
+        return value
     m = _BUDGET.search(message)
     if not m:
         return None
@@ -561,6 +765,14 @@ def classify_command(message: str, state: ShoppingStateV2) -> str | None:
         stage_words = {w for i in guided for w in re.findall(r"[a-z]+", i.label.lower())}
         if rest & {"rest", "others", "other", "remaining"} or (rest & stage_words and rest <= (stage_words | {"and", "the", "then", "also"})):
             return "next"
+    if active and not re.search(r"\b(?:show|find|search|compare|add)\b", text, re.I):
+        if basket_budget.is_clear_phrase(text):
+            return "clear_budget"
+        named = _stage_named(text, guided)
+        if basket_budget.is_total_phrase(text) and (
+            named is None or re.search(r"\b(?:total|overall|altogether|in all)\b", text, re.I)
+        ):
+            return "total_budget"
     if active and _parse_budget(text) is not None and not re.search(r"\b(?:show|find|search|compare|add)\b", text, re.I):
         return "budget"
     return None
@@ -571,7 +783,8 @@ async def handle_command(
     memory_facts: list[dict] | None,
 ) -> GuidedTurn | None:
     items = [i.model_copy(deep=True) for i in state.mission_items]
-    cart = await _cart_or_none(adapter, cart_id)
+    BUDGET_TRACE.set(None)
+    cart, cart_state = await _read_cart(adapter, cart_id)
     newly = sync_items_with_cart(items, cart)
     guided = [i for i in items if i.guided]
     cur = current_stage(items)
@@ -588,11 +801,12 @@ async def handle_command(
         if cur is None:
             return None
         new_state = await _persist(state, items)
-        prompt, products = await _stage_prompt(
-            adapter, cur, lead="I'll take these one stage at a time so each choice is yours. Right now:",
+        prompt, products, _view = await _prompt_with_budget(
+            adapter, state, items, cart, cart_state, cur,
+            lead="I'll take these one stage at a time so each choice is yours. Right now:",
         )
         return GuidedTurn(reply=prefix + prompt, products=products, state=new_state,
-                          view_ids=view_product_ids(new_state))
+                          view_ids=view_product_ids(new_state), budget_trace=BUDGET_TRACE.get())
 
     if command == "skip":
         target = _stage_named(message, guided) or cur
@@ -607,12 +821,13 @@ async def handle_command(
         new_state = await _persist(state, items)
         nxt = current_stage(items)
         if nxt is None:
-            text = f"Skipped {target.label}. {await _summary(adapter, cart, items)}"
+            await _maybe_record_outcome(state, cart, items)
+            text = f"Skipped {target.label}. {await _summary(adapter, cart, items, state)}"
             return GuidedTurn(reply=prefix + text, state=new_state, view_ids=[])
-        prompt, products = await _stage_prompt(adapter, nxt)
+        prompt, products, _view = await _prompt_with_budget(adapter, state, items, cart, cart_state, nxt)
         return GuidedTurn(
             reply=f"{prefix}Skipped {target.label}. {prompt}", products=products,
-            state=new_state, view_ids=view_product_ids(new_state),
+            state=new_state, view_ids=view_product_ids(new_state), budget_trace=BUDGET_TRACE.get(),
         )
 
     if command == "budget":
@@ -640,24 +855,57 @@ async def handle_command(
         target.candidates = res.candidate_ids
         target.candidate_titles = res.candidate_titles
         target.sold_out_titles = res.sold_out_titles
+        target.candidate_prices = list(res.candidate_prices)
+        target.price_currency = res.price_currency
         target.constraints = [c for c in target.constraints if "under" not in c.lower()] + [f"under {budget}"]
         new_state = await _persist(state, items)
-        prompt, products = await _stage_prompt(
-            adapter, target, lead=f"Updated for a budget under {budget} -",
+        prompt, products, _view = await _prompt_with_budget(
+            adapter, state, items, cart, cart_state, target, lead=f"Updated for a budget under {budget} -",
         )
+        hint = "" if items_budget(items)[0] is not None else (
+            " That caps this one item - say \"total budget N\" to cap the whole list.")
         return GuidedTurn(
-            reply=prefix + prompt, products=products, state=new_state,
-            view_ids=view_product_ids(new_state),
+            reply=prefix + prompt + hint, products=products, state=new_state,
+            view_ids=view_product_ids(new_state), budget_trace=BUDGET_TRACE.get(),
         )
+
+    if command == "total_budget":
+        amount = _parse_budget(message)
+        if amount is None:
+            return None
+        _clean, _amt, currency = basket_budget.strip_budget_clause(message)
+        _set_total(items, amount, currency)
+        new_state = await _persist(state, items)
+        await _record_budget_event(state, shopper_events.EventType.BASKET_BUDGET_SET, {
+            "budget": str(amount), "currency": currency, "source": "command",
+        })
+        head = f"{prefix}Total budget for the whole list: {basket_budget.money_text(amount, currency)}."
+        if cur is None:
+            return GuidedTurn(reply=f"{head} {await _summary(adapter, cart, items, state)}", state=new_state, view_ids=[])
+        prompt, products, _view = await _prompt_with_budget(adapter, new_state, items, cart, cart_state, cur,
+                                                            lead="Where we are:")
+        return GuidedTurn(reply=f"{head} {prompt}", products=products, state=new_state,
+                          view_ids=view_product_ids(new_state), budget_trace=BUDGET_TRACE.get())
+
+    if command == "clear_budget":
+        _set_total(items, None, None)
+        new_state = await _persist(state, items)
+        head = f"{prefix}Okay - no overall budget now."
+        if cur is None:
+            return GuidedTurn(reply=f"{head} {await _summary(adapter, cart, items, state)}", state=new_state, view_ids=[])
+        prompt, products, _view = await _prompt_with_budget(adapter, new_state, items, cart, cart_state, cur,
+                                                            lead="Where we are:")
+        return GuidedTurn(reply=f"{head} {prompt}", products=products, state=new_state,
+                          view_ids=view_product_ids(new_state))
 
     # "next" / status: re-present the open stage, or the summary when finished.
     new_state = await _persist(state, items)
     if cur is None:
-        return GuidedTurn(reply=prefix + await _summary(adapter, cart, items), state=new_state, view_ids=[])
+        return GuidedTurn(reply=prefix + await _summary(adapter, cart, items, state), state=new_state, view_ids=[])
     lead = "Still to do:" if any(i.stage != "pending" for i in guided) else _LEAD_FIRST
-    prompt, products = await _stage_prompt(adapter, cur, lead=lead)
+    prompt, products, _view = await _prompt_with_budget(adapter, state, items, cart, cart_state, cur, lead=lead)
     return GuidedTurn(reply=prefix + prompt, products=products, state=new_state,
-                      view_ids=view_product_ids(new_state))
+                      view_ids=view_product_ids(new_state), budget_trace=BUDGET_TRACE.get())
 
 
 # --------------------------------------------------------------------------
@@ -688,5 +936,7 @@ async def advance_from_cart(
         session_id, connection_id, mission_items=[i.model_dump(mode="json") for i in items],
     )
     state = ShoppingStateV2(session_id=session_id, connection_id=connection_id, mission_items=items)
+    BUDGET_TRACE.set(None)
+    await _maybe_record_outcome(state, cart, items)
     text, products = await _advance_text(adapter, cart, state, items, newly)
     return text, products

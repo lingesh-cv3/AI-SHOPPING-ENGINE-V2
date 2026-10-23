@@ -85,6 +85,10 @@ class TurnTrace:
     #: Store-level discovery ("what do you have?"): the merchant's real categories offered as tappable
     #: choices, and why there were none ("empty"/"unavailable"). See `store_discovery.py`.
     category_choices: list[str] | None = None
+    #: Basket-level budget of a guided-mission reply (`basket_budget.BudgetView.trace()`): budget, currency, committed,
+    #: remaining, verdict, unknown_stages, alternatives_offered_ids, compat_pairs, duplicates_filtered. Log-only like the rest
+    #: of the trace (measurable by reading the structured log line and by the tests; not a stored table).
+    basket_budget: dict | None = None
     store_discovery: str | None = None
 
     response_used_model: bool | None = None
@@ -134,6 +138,7 @@ class TurnTrace:
             "query_normalization": self.query_normalization,
             "category_choices": list(self.category_choices) if self.category_choices else [],
             "store_discovery": self.store_discovery,
+            "basket_budget": self.basket_budget,
             "response_used_model": self.response_used_model,
             "model_calls": self.model_calls,
             "stage_timings_s": dict(self.stage_timings_s),

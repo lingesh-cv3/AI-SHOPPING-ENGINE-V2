@@ -105,6 +105,22 @@ class MissionItem(BaseModel):
     stage: Literal["pending", "added", "skipped", "unavailable"] = "pending"
     added_product_id: str | None = None
     sold_out_titles: list[str] = Field(default_factory=list)
+    #: Basket-level budget (`basket_budget.py`): the price (as a decimal string, or None when the product has no price) of each
+    #: entry of `candidates`, same order, captured where the candidates were already fetched, plus the ONE currency they share
+    #: (None when they disagree or none is priced). They only feed the "does the whole list fit" ESTIMATE; anything the
+    #: shopper is invited to buy is re-fetched live, and the add itself is re-checked by `accept_cart_proposal_core`.
+    #: Additive: stored under the existing `mission_items` JSON column, no migration, old rows load with the defaults.
+    candidate_prices: list[str | None] = Field(default_factory=list)
+    price_currency: str | None = None
+    #: The shopper's ONE shared total for the whole guided mission, carried on every guided stage (JSON, additive). Deliberately NOT
+    #: the session-wide `budget_amount` column: that field has other readers (a per-product price cap in mission ranking, the cart
+    #: budget-reduction suggestion, a per-search budget the discovery path fills), so a basket total written there would silently
+    #: filter single products elsewhere, and a per-search "under 3000" would be misread as a basket total here.
+    total_budget: str | None = None
+    total_budget_currency: str | None = None
+    #: Alternatives (cheaper in-stock options from this stage) offered to the shopper so far; lets the closing outcome event say whether
+    #: an added product came from one.
+    offered_alternative_ids: list[str] = Field(default_factory=list)
 
 
 class FulfillmentItem(BaseModel):

@@ -17,10 +17,13 @@ partial, unverified, or unbuilt.
   adapter) is the authoritative path for every mutating action on both
   Shopper V1 and Shopper V2.
 - **The payment ledger** (`db.idempotency`), keyed on cart id alone at
-  creation, guarantees a paid cart cannot be charged twice on a different
-  card, a reissued cart id cannot inherit a stale paid status, and a paid
-  cart cannot be mutated afterward — enforced on both the REST cart routes
-  and the chat/tap execution path.
+  creation, guarantees a SETTLED paid cart cannot be charged twice on a
+  different card, a reissued cart id cannot inherit a stale paid status, and
+  a paid cart cannot be mutated afterward — enforced on both the REST cart
+  routes and the chat/tap execution path. It does NOT protect a charge whose
+  result is lost to a timeout or 5xx: the row is released and a different
+  card is charged again (reproduced; unresolved release blocker, see
+  PROGRESS.md). Checkout and payment are not production-ready.
 - **Cross-tenant and cross-shopper isolation**, enforced by an httpOnly
   visitor cookie and an ownership table (`db.owners`), checked on every
   cart/session/order route on both V1 and V2.
@@ -78,6 +81,14 @@ partial, unverified, or unbuilt.
   missing; an unknown capitalised name ("Zephyr Cloud Boot") is reported even
   when it shares words with real products (model-free tests with negative
   controls; these two later changes are not live-verified).
+- **Basket-level budget for guided missions**: "I want running shoes, socks and energy gel, total budget 6000" (also "...under 5000",
+  "...for 8000 rupees in all") starts a mission with ONE shared total instead of a bogus stage; every stage prompt says what is left
+  (recomputed from the real cart), whether the whole list fits (fits / tight / over / unknown - "fits" only when every open stage is
+  priced in one currency and the cart was readable), offers up to three cheaper in-stock options from the stage's own candidates as
+  cards (live-checked; adding one is the existing typed or tapped add, so a sized shoe still asks its size first), and avoids offering
+  anything already in the cart or chosen for another stage. Persisted measure: `basket_budget_set` / `basket_budget_outcome` events and
+  `events.basket_budget_outcomes`. Verified model-free (11 scripts, real Northfield and Kettle through the graph, 40,000-product
+  structural check, platform-down and tenant cases) with independent invariant and value reviews; limits are listed in PROGRESS.md.
 - **V2 missions and basket proposals**: a stated goal drives multi-item
   shortlisting with a real reason per item; a discovery-vs-cart-action
   routing bug (a plain restatement misclassified as cart intent) is fixed

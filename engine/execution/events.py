@@ -70,6 +70,12 @@ class EventType:
     #: Per-item PROPOSAL_CREATED events (above) still fire once per real
     #: proposal; this one event marks the basket-level attempt itself.
     BASKET_PROPOSED = "basket_proposed"
+    #: A guided mission got ONE shared total budget (the shopper's own words) - see engine/shopper_v2/basket_budget.py. Detail: budget,
+    #: currency, verdict (fits|tight|over|unknown) at that moment.
+    BASKET_BUDGET_SET = "basket_budget_set"
+    #: A budgeted guided mission finished (every stage added, skipped or unavailable). Detail: budget, currency, committed (REAL cart
+    #: line totals), within_budget, stages added/skipped, added_from_alternatives. This is what `basket_budget_outcomes` reads.
+    BASKET_BUDGET_OUTCOME = "basket_budget_outcome"
 
 
 async def record(
@@ -321,3 +327,39 @@ async def record_many(
                     detail={},
                 )
             )
+
+
+async def basket_budget_outcomes(connection_id: str, days: int = 30) -> dict:
+    """The figure the basket-budget feature moves (CLAUDE.md value bar): of the guided missions that were given a total budget, how many
+    finished and how many of those ended with the REAL cart at or under that budget, and how many added products came from an offered
+    cheaper alternative. Counted per session, so a budget that is changed mid-mission is still one mission.
+
+    `rate` is None (never a confident 0%) when no budgeted mission has finished. Same standing caveat as the other aggregates here:
+    instrumentation, not business evidence, until there is a real sample.
+    """
+    since = datetime.now(UTC) - timedelta(days=days)
+    async with session_scope() as db:
+        rows = (
+            await db.execute(
+                select(ShopperEvent.session_id, ShopperEvent.event_type, ShopperEvent.detail).where(
+                    ShopperEvent.connection_id == connection_id,
+                    ShopperEvent.event_type.in_([EventType.BASKET_BUDGET_SET, EventType.BASKET_BUDGET_OUTCOME]),
+                    ShopperEvent.created_at >= since,
+                )
+            )
+        ).all()
+    budgeted = {r.session_id for r in rows if r.event_type == EventType.BASKET_BUDGET_SET}
+    finished: dict[str, dict] = {}
+    for r in rows:
+        if r.event_type == EventType.BASKET_BUDGET_OUTCOME:
+            finished[r.session_id] = r.detail or {}
+    within = sum(1 for d in finished.values() if d.get("within_budget") is True)
+    unknown = sum(1 for d in finished.values() if d.get("within_budget") is None)
+    return {
+        "budgeted_missions": len(budgeted),
+        "finished": len(finished),
+        "within_budget": within,
+        "outcome_unknown": unknown,
+        "added_from_alternatives": sum(int(d.get("added_from_alternatives") or 0) for d in finished.values()),
+        "rate": (within / (len(finished) - unknown)) if (len(finished) - unknown) > 0 else None,
+    }

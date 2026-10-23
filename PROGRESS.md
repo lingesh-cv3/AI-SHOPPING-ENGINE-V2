@@ -25,6 +25,25 @@ counted as unfinished implementation work.
 
 ## Current Focus
 
+### Payment safety — UNRESOLVED RELEASE BLOCKER (checkout and payment are NOT production-ready)
+- REPRODUCED (isolated local sample merchant, disposable database copy, fake cards, no provider or network egress): when a pay call
+  ends in a timeout, a 5xx or an abandoned request, the engine releases the cart-level ledger row (`db.idempotency.release_payment`)
+  and tells the shopper "Nothing has been charged" although the platform had recorded the charge. Paying again with a DIFFERENT card
+  is a new platform key, so the platform took a second payment: two confirmed purchases for one basket on the chat route, the REST
+  checkout route, and after an abandoned request. The same card is safe (the platform replays the key), but the first message is
+  still false.
+- Cause (confirmed in code): `engine/api/chat.py` /pay and `engine/api/shop.py` checkout treat every `CommerceError` as "nothing was
+  attempted"; the platform key is per card while the ledger row is per cart; there is no unknown-outcome state; a timed-out money
+  action in `execution/service.py` is recorded as plain failure.
+- NOT FIXED. No payment change is in any commit. Proposed fix: an explicit unknown-outcome ledger state; release only on errors that
+  prove nothing happened; refuse further attempts on that basket until reconciled by evidence (an order lookup the platform interface
+  does not have yet, else a human); try/finally around the pay routes; store the error code. It touches `db/idempotency.py`,
+  `api/chat.py`, `api/shop.py`, `execution/service.py` and the adapter interface, and needs its own spec and invariant-guard review.
+  The reproduction harness, evidence and regression-test plan are kept OUTSIDE the repo in `D:\CV3\payment_repro\` (FINDINGS.md).
+- Limits of the evidence: demo platform only (an in-memory merchant keyed by idempotency key; real platforms may differ); a stuck
+  `IN_FLIGHT` row was not reproduced (the handler keeps running after a client disconnect); the Kettle `RETRY_PAYMENT` path was not
+  reproduced. `PAYMENT_SAFETY_INVESTIGATION.md` still describes this as code-read only and should be updated with the above.
+
 ### Shopper V2 — the only shopper routing — ~90% complete
 - `/api/v2/chat` (`engine/shopper_v2/`, routed via `engine/api/chat_v2.py`)
   is the ONLY shopper path the real storefront calls today —
@@ -74,10 +93,24 @@ counted as unfinished implementation work.
   tests only); a missing name made only of words the shop uses ("Cloud Boot")
   still falls back to ordinary search; a typed partial name for a product not
   in view asks "which one?" until the full name is given; checkout, tapped-card
-  and payment-recovery browser flows were not exercised. Payment safety:
-  `PAYMENT_SAFETY_INVESTIGATION.md` remains OPEN (code-read only, not
-  reproduced); the Step 25 diff does not touch the ledger, pay routes,
-  execution or risk.
+  and payment-recovery browser flows were not exercised. Payment safety is an
+  unresolved release blocker (next section); the Shopper changes here do not
+  touch the ledger, pay routes, execution or risk.
+- Basket-level budget for guided missions — implemented and verified model-free; NOT signed off. One shared total across every stage
+  (`engine/shopper_v2/basket_budget.py`, extending `guided_mission.py`): stored on the mission's own stages (not the session-wide
+  `budget_amount`, which mission ranking reads as a per-product cap), what is left is recomputed from the REAL cart, an honest
+  fits/tight/over/unknown verdict, up to three cheaper in-stock alternatives from the stage's own candidates (live-checked, returned as
+  cards; adding still goes through the existing add path), a three-valued compatibility line, and cross-stage duplicate avoidance. It
+  also fixed a real defect: a trailing budget clause used to become a stage ("energy under", "total budget"). Measured by two persisted
+  events and `events.basket_budget_outcomes` (budgeted missions, finished, within budget, added-from-alternatives; None, not 0%, with no
+  data) — no merchant report or dashboard reads it yet. Evidence: 11 new test scripts (147 checks), each shown failing on the pre-change
+  code; real graph on Northfield and Kettle; an independent invariant review (SAFE; its one honesty finding fixed) and a value audit (VALUABLE, its three
+  required fixes done). No model is in this path, so there is no live-model gap. Open or limited: claims are "among the options I found" (<=12
+  candidates per stage, stored prices from plan time; offered items are live-checked and the add re-checks price and stock); totals
+  are line totals before delivery and tax; variant price ranges ignored; an open size question is answered before a budget command;
+  "incompatible" is unreachable (no declared-incompatible data exists) so compatibility lines only ever say confirmed or unknown; a
+  mid-sentence "shoes under 5000 and socks" stays a per-item cap; ~40k SKUs is a structural check only; the Kettle "coffee" stage is
+  reported out of stock by the existing mission retrieval (pre-existing, not part of this feature); payment code untouched.
 - Remaining: no ops-console consumer of V2's event types; real-volume
   condition for V2 retrieval is a structural code check (bounded queries,
   no unbounded-scan pattern), not an empirical 40k-SKU test;

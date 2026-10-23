@@ -1108,6 +1108,7 @@ async def node_guided_turn(state: ShopperTurnState) -> dict:
             verified_ids=turn.view_ids, target_topic_id=mission_topic.topic_id,
         )
     trace.capability = "mission"
+    trace.basket_budget = turn.budget_trace
     trace.response_used_model = False
     trace.finish()
     result = TurnResultV2(
@@ -1457,6 +1458,7 @@ def _active_topic_id(state: "ShopperTurnState") -> str | None:
 async def node_mission(state: ShopperTurnState) -> dict:
     trace = state["trace"]
     fulfillment.ADDED_THIS_TURN.set([])
+    guided_mission.BUDGET_TRACE.set(None)
     (
         mission_reply, mission_products, mission_state, mission_handled, mission_proposal_ids,
     ) = await run_mission_turn(
@@ -1481,6 +1483,7 @@ async def node_mission(state: ShopperTurnState) -> dict:
         return {}
     new_state = mission_state
     trace.capability = "mission"
+    trace.basket_budget = guided_mission.BUDGET_TRACE.get()
     evidence = TurnEvidence(query=None, products=[], no_match_reason=None)
     trace.response_used_model = False
     await _record_event(
@@ -4961,6 +4964,9 @@ async def run_turn_via_graph(
             result, reply=f"{result.reply} {text}".strip(),
             products=next_products or result.products,
         )
+        _bb = guided_mission.BUDGET_TRACE.get()
+        if _bb is not None and isinstance(result.trace, dict):
+            result = _dataclass_replace(result, trace={**result.trace, "basket_budget": _bb})
         # The next stage's options are now what the shopper is looking at:
         # record them so "the first one" / "add the Cloudstep" resolve there.
         end_state = final_state.get("new_state")
