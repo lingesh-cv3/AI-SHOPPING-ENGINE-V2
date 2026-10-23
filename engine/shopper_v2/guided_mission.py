@@ -46,7 +46,7 @@ from decimal import Decimal, InvalidOperation
 from engine.db import shopping_state as shopping_state_store
 from engine.execution import events as shopper_events
 
-from . import basket_budget
+from . import basket_budget, mission_complements
 from .evidence import build_evidence
 from .retrieval import retrieve
 from .state import MissionItem, ShoppingStateV2
@@ -60,6 +60,15 @@ BUDGET_TRACE: ContextVar[dict | None] = ContextVar("guided_budget_trace", defaul
 
 def _note_budget(view: "basket_budget.BudgetView | None") -> None:
     BUDGET_TRACE.set(view.trace() if view is not None and view.estimate.verdict != "none" else None)
+
+
+#: What the complete-the-set view offered on the LAST reply built this turn (`mission_complements.ComplementView.trace`), read by the graph
+#: into `TurnTrace.complete_set`. Separate from BUDGET_TRACE because it must exist for a mission with no budget too.
+COMPLETE_TRACE: ContextVar[dict | None] = ContextVar("guided_complete_trace", default=None)
+
+
+def _note_complete(view: "mission_complements.ComplementView | None") -> None:
+    COMPLETE_TRACE.set(dict(view.trace) if view is not None else None)
 
 
 _MAX_STAGES = 6
@@ -348,6 +357,31 @@ async def _maybe_record_outcome(state: ShoppingStateV2, cart, items: list[Missio
     })
 
 
+async def _maybe_record_complete_set(adapter, state: ShoppingStateV2, cart, items: list[MissionItem]) -> None:
+    """Once, when the LAST open stage closes (with or without a budget): how many merchant-declared pairs the REAL cart really holds and how
+    many announced add-ons ended up in it. Best-effort; never touches the turn."""
+    guided = [i for i in items if i.guided]
+    if not guided or any(i.stage == "pending" for i in guided):
+        return
+    try:
+        pairs = await mission_complements.count_confirmed_pairs(adapter, cart)
+    except Exception:  # noqa: BLE001
+        pairs = 0
+    cart_ids = {ln.product_id for ln in cart.lines} if cart is not None else set()
+    announced = {raw.split(":")[0] for i in guided for raw in i.offered_complement_ids}
+    budget, currency = items_budget(items)
+    within = None
+    if budget is not None and cart is not None:
+        line_cur = {str(ln.line_total.currency) for ln in cart.lines}
+        if len(line_cur) <= 1 and (currency is None or not line_cur or currency in line_cur):
+            within = sum((Decimal(str(ln.line_total.amount)) for ln in cart.lines), Decimal(0)) <= budget
+    await _record_budget_event(state, shopper_events.EventType.COMPLETE_SET_OUTCOME, {
+        "confirmed_pairs_in_cart": pairs, "extras_offered": len(announced), "extras_in_cart": len(announced & cart_ids),
+        "stages_added": sum(1 for i in guided if i.stage == "added"), "stages_skipped": sum(1 for i in guided if i.stage == "skipped"),
+        "within_budget": within,
+    })
+
+
 async def _read_cart(adapter, cart_id: str | None):
     """`(cart, state)` with state "none" (no cart yet: a known empty), "ok", or "unreadable" (never treated as empty)."""
     if not cart_id:
@@ -445,7 +479,7 @@ async def _confirmed_lines(adapter, cart, items: list[MissionItem]) -> list[str]
 
 async def _stage_prompt(
     adapter, item: MissionItem, *, lead: str = "Next up:", list_options: bool = True,
-    view: "basket_budget.BudgetView | None" = None, products: list | None = None,
+    view: "basket_budget.BudgetView | None" = None, products: list | None = None, complements: str = "",
 ) -> tuple[str, list]:
     exclude = view.exclude_ids if view is not None else set()
     shown_ids = _visible_candidates(item, exclude)
@@ -460,11 +494,13 @@ async def _stage_prompt(
         "Tap Add on the one you want, or tell me which and I'll add it (you choose the size "
         "first if it has one). Say skip to leave this one out."
     )
-    money = ""
+    parts: list[str] = []
     if view is not None:
         parts = [basket_budget.verdict_text(view.estimate), view.alternatives_text, view.compat_text]
-        money = " ".join(x for x in parts if x)
-        money = f" {money}" if money else ""
+    if complements:
+        parts.append(complements)
+    money = " ".join(x for x in parts if x)
+    money = f" {money}" if money else ""
     if not list_options:
         return f"{lead} {item.label}.{money} {how}", products
     names = "; ".join(f"{p.title} ({_money(p.price)})" for p in products)
@@ -472,9 +508,40 @@ async def _stage_prompt(
     return f"{lead} {item.label}. In stock: {names}.{extra}{money} {how}", products
 
 
+def _offered_complement_ids(items: list[MissionItem], *, summary: bool) -> set[str]:
+    """Add-ons already announced: bare ids (right after an add) or `<id>:summary` (repeated once in the closing summary)."""
+    ids: set[str] = set()
+    for item in items:
+        if not item.guided:
+            continue
+        for raw in item.offered_complement_ids:
+            if summary:
+                if raw.endswith(":summary"):
+                    ids.add(raw[: -len(":summary")])
+            elif not raw.endswith(":summary"):
+                ids.add(raw)
+    return ids
+
+
+async def _announce_complements(state: ShoppingStateV2, items: list[MissionItem], view, *, where: str) -> None:
+    """Remember (persisted with the stages) and record that these add-ons were shown, so each is announced at most once per place."""
+    suffix = ":summary" if where == "summary" else ""
+    new = [f"{p.product_id}{suffix}" for p in view.extras]
+    for item in items:
+        if item.guided:
+            item.offered_complement_ids = list(item.offered_complement_ids) + [n for n in new if n not in item.offered_complement_ids]
+    try:
+        await shopping_state_store.merge(state.session_id, state.connection_id, mission_items=[i.model_dump(mode="json") for i in items])
+    except Exception:  # noqa: BLE001 - remembering an announcement is best-effort
+        logger.warning("guided_mission: could not persist announced add-ons", exc_info=True)
+    await _record_budget_event(state, shopper_events.EventType.COMPLEMENT_OFFERED, {
+        "where": where, "offered_ids": [p.product_id for p in view.extras], "anchors": list(view.trace.get("anchors", [])),
+    })
+
+
 async def _prompt_with_budget(
     adapter, state: ShoppingStateV2, items: list[MissionItem], cart, cart_state: str, item: MissionItem, *,
-    lead: str = "Next up:", list_options: bool = True,
+    lead: str = "Next up:", list_options: bool = True, announce_extras: bool = False, priority_ids: list[str] | None = None,
 ) -> tuple[str, list, "basket_budget.BudgetView"]:
     """A stage prompt that also tells the shopper what is left, whether the whole list fits and which options still fit.
     Alternatives come back as extra cards (read-only suggestions): the shopper adds one the usual way."""
@@ -489,19 +556,31 @@ async def _prompt_with_budget(
                                              mission_items=[i.model_dump(mode="json") for i in items])
         except Exception:  # noqa: BLE001 - remembering an offer is best-effort
             logger.warning("guided_mission: could not persist offered alternatives", exc_info=True)
-    text, products = await _stage_prompt(adapter, item, lead=lead, list_options=list_options, view=view, products=shown)
+    cview = await mission_complements.build_complement_view(
+        adapter, items=items, cart=cart, cart_state=cart_state, est=view.estimate, exclude_ids=view.exclude_ids,
+        offered_ids=_offered_complement_ids(items, summary=False) if announce_extras else set(), current=item, shown=shown,
+        alternatives=view.alternatives, priority_ids=priority_ids, include_extras=announce_extras,
+    )
+    if cview.extras:
+        await _announce_complements(state, items, cview, where="after_add")
+    text, products = await _stage_prompt(adapter, item, lead=lead, list_options=list_options, view=view, products=shown,
+                                         complements=cview.prompt_text())
     cards = list(products)
     for alt in view.alternatives:
         if all(alt.product_id != c.product_id for c in cards):
             cards.append(alt)
+    for extra in cview.extras:
+        if all(extra.product_id != c.product_id for c in cards):
+            cards.append(extra)
     _note_budget(view)
+    _note_complete(cview)
     return text, cards, view
 
 
 _LEAD_FIRST = "Let's start with"
 
 
-async def _summary(adapter, cart, items: list[MissionItem], state: ShoppingStateV2 | None = None) -> str:
+async def _summary(adapter, cart, items: list[MissionItem], state: ShoppingStateV2 | None = None, extra: str = "") -> str:
     done = [i for i in items if i.guided]
     lines = await _confirmed_lines(adapter, cart, done)
     skipped = [i.label for i in done if i.stage == "skipped"]
@@ -529,8 +608,27 @@ async def _summary(adapter, cart, items: list[MissionItem], state: ShoppingState
             if grand is not None and Decimal(str(grand.amount)) > budget and str(grand.currency) == (cur or str(grand.currency)):
                 note += f" With delivery and tax the cart total is {grand}, which is over your budget."
             parts.append(note)
+    if extra:
+        parts.append(extra)
     parts.append("Nothing left to choose - say checkout whenever you're ready.")
     return " ".join(parts)
+
+
+async def _closing(adapter, cart, items: list[MissionItem], state: ShoppingStateV2) -> tuple[str, list]:
+    """The closing summary plus what the merchant lists as going with the final cart: the confirmed pairs, still-unadded extras (cards,
+    at most once here), or one honest sentence when nothing is declared. Silent when the cart is empty or unreadable."""
+    cart_state = "ok" if cart is not None else "none"
+    budget, currency = items_budget(items)
+    est = basket_budget.estimate(budget=budget, budget_currency=currency, cart=cart, cart_state=cart_state, items=items)
+    cview = await mission_complements.build_complement_view(
+        adapter, items=items, cart=cart, cart_state=cart_state, est=est, exclude_ids=basket_budget.committed_ids(cart, items),
+        offered_ids=_offered_complement_ids(items, summary=True), include_extras=True, closing=True,
+    )
+    paragraph = " ".join(x for x in (cview.closing_text, cview.extras_text) if x)
+    if cview.extras:
+        await _announce_complements(state, items, cview, where="summary")
+    _note_complete(cview)
+    return await _summary(adapter, cart, items, state, extra=paragraph), list(cview.extras)
 
 
 @dataclass
@@ -553,8 +651,12 @@ async def _advance_text(adapter, cart, state: ShoppingStateV2, items: list[Missi
     cart_state = "ok" if cart is not None else "unreadable"
     nxt = current_stage(items)
     if nxt is None:
-        return (f"{head} {await _summary(adapter, cart, items, state)}").strip(), []
-    prompt, products, view = await _prompt_with_budget(adapter, state, items, cart, cart_state, nxt)
+        ctext, ccards = await _closing(adapter, cart, items, state)
+        return f"{head} {ctext}".strip(), ccards
+    prompt, products, view = await _prompt_with_budget(
+        adapter, state, items, cart, cart_state, nxt, announce_extras=True,
+        priority_ids=[i.added_product_id for i in newly if i.added_product_id],
+    )
     est = view.estimate
     if est.verdict != "none" and est.budget is not None and est.committed is not None and est.committed > est.budget:
         head = (f"{head} This brings you to {basket_budget.money_text(est.committed, est.currency)} - "
@@ -676,8 +778,9 @@ async def _present_plan(
     nxt = current_stage(items)
     budget_trace = None
     if nxt is None:
-        reply = f"{plan} {await _summary(adapter, cart, items, new_state)}"
-        products: list = []
+        ctext, ccards = await _closing(adapter, cart, items, new_state)
+        reply = f"{plan} {ctext}"
+        products: list = list(ccards)
     else:
         BUDGET_TRACE.set(None)
         prompt, cards, view = await _prompt_with_budget(
@@ -784,6 +887,7 @@ async def handle_command(
 ) -> GuidedTurn | None:
     items = [i.model_copy(deep=True) for i in state.mission_items]
     BUDGET_TRACE.set(None)
+    COMPLETE_TRACE.set(None)
     cart, cart_state = await _read_cart(adapter, cart_id)
     newly = sync_items_with_cart(items, cart)
     guided = [i for i in items if i.guided]
@@ -822,8 +926,10 @@ async def handle_command(
         nxt = current_stage(items)
         if nxt is None:
             await _maybe_record_outcome(state, cart, items)
-            text = f"Skipped {target.label}. {await _summary(adapter, cart, items, state)}"
-            return GuidedTurn(reply=prefix + text, state=new_state, view_ids=[])
+            ctext, ccards = await _closing(adapter, cart, items, state)
+            await _maybe_record_complete_set(adapter, state, cart, items)
+            text = f"Skipped {target.label}. {ctext}"
+            return GuidedTurn(reply=prefix + text, products=ccards, state=new_state, view_ids=[])
         prompt, products, _view = await _prompt_with_budget(adapter, state, items, cart, cart_state, nxt)
         return GuidedTurn(
             reply=f"{prefix}Skipped {target.label}. {prompt}", products=products,
@@ -881,7 +987,8 @@ async def handle_command(
         })
         head = f"{prefix}Total budget for the whole list: {basket_budget.money_text(amount, currency)}."
         if cur is None:
-            return GuidedTurn(reply=f"{head} {await _summary(adapter, cart, items, state)}", state=new_state, view_ids=[])
+            ctext, ccards = await _closing(adapter, cart, items, state)
+            return GuidedTurn(reply=f"{head} {ctext}", products=ccards, state=new_state, view_ids=[])
         prompt, products, _view = await _prompt_with_budget(adapter, new_state, items, cart, cart_state, cur,
                                                             lead="Where we are:")
         return GuidedTurn(reply=f"{head} {prompt}", products=products, state=new_state,
@@ -892,7 +999,8 @@ async def handle_command(
         new_state = await _persist(state, items)
         head = f"{prefix}Okay - no overall budget now."
         if cur is None:
-            return GuidedTurn(reply=f"{head} {await _summary(adapter, cart, items, state)}", state=new_state, view_ids=[])
+            ctext, ccards = await _closing(adapter, cart, items, state)
+            return GuidedTurn(reply=f"{head} {ctext}", products=ccards, state=new_state, view_ids=[])
         prompt, products, _view = await _prompt_with_budget(adapter, new_state, items, cart, cart_state, cur,
                                                             lead="Where we are:")
         return GuidedTurn(reply=f"{head} {prompt}", products=products, state=new_state,
@@ -901,7 +1009,8 @@ async def handle_command(
     # "next" / status: re-present the open stage, or the summary when finished.
     new_state = await _persist(state, items)
     if cur is None:
-        return GuidedTurn(reply=prefix + await _summary(adapter, cart, items, state), state=new_state, view_ids=[])
+        ctext, ccards = await _closing(adapter, cart, items, state)
+        return GuidedTurn(reply=prefix + ctext, products=ccards, state=new_state, view_ids=[])
     lead = "Still to do:" if any(i.stage != "pending" for i in guided) else _LEAD_FIRST
     prompt, products, _view = await _prompt_with_budget(adapter, state, items, cart, cart_state, cur, lead=lead)
     return GuidedTurn(reply=prefix + prompt, products=products, state=new_state,
@@ -937,6 +1046,8 @@ async def advance_from_cart(
     )
     state = ShoppingStateV2(session_id=session_id, connection_id=connection_id, mission_items=items)
     BUDGET_TRACE.set(None)
+    COMPLETE_TRACE.set(None)
     await _maybe_record_outcome(state, cart, items)
     text, products = await _advance_text(adapter, cart, state, items, newly)
+    await _maybe_record_complete_set(adapter, state, cart, items)
     return text, products

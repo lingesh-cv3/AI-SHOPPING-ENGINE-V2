@@ -121,6 +121,10 @@ class MissionItem(BaseModel):
     #: Alternatives (cheaper in-stock options from this stage) offered to the shopper so far; lets the closing outcome event say whether
     #: an added product came from one.
     offered_alternative_ids: list[str] = Field(default_factory=list)
+    #: Merchant-declared add-ons already ANNOUNCED to the shopper (`mission_complements.py`), carried on every guided stage like
+    #: `total_budget`: a bare id = announced right after an add, `<id>:summary` = repeated once in the closing summary, so an extra is
+    #: announced at most once in each place (JSON, additive, no migration).
+    offered_complement_ids: list[str] = Field(default_factory=list)
 
 
 class FulfillmentItem(BaseModel):

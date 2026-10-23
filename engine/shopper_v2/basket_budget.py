@@ -299,6 +299,8 @@ def compat_line(counts: dict[str, int]) -> str:
     if counts["compatible"] == 0:
         return ("Compatibility with what's in your cart isn't confirmed either way for these options - "
                 "that's missing data, not a sign of a problem.")
+    if counts["unknown"] == 0:
+        return f"The merchant confirms {counts['compatible']} of these options work with what's in your cart."
     return (f"The merchant confirms {counts['compatible']} of these options work with what's in your cart; "
             f"the other {counts['unknown']} aren't confirmed either way (missing data, not a problem).")
 

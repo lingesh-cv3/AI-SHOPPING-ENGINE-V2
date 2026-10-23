@@ -89,6 +89,15 @@ partial, unverified, or unbuilt.
   anything already in the cart or chosen for another stage. Persisted measure: `basket_budget_set` / `basket_budget_outcome` events and
   `events.basket_budget_outcomes`. Verified model-free (11 scripts, real Northfield and Kettle through the graph, 40,000-product
   structural check, platform-down and tenant cases) with independent invariant and value reviews; limits are listed in PROGRESS.md.
+- **Cross-stage compatibility and complete-the-set for guided missions**: once a product is really in the cart, the mission names which
+  on-screen options the merchant LISTS as going with it, notes declared pairs between options of two open stages, and announces
+  merchant-declared add-ons as optional extras (cards, at most two, once after an add and once in the summary) with their live price and
+  their effect on the shared budget. Evidence is only the merchant's declared `compatible_with`; nothing is inferred from category or title,
+  "incompatible" is never shown, and a platform with no declarations gets one honest sentence. Read-only: adding an extra is the existing
+  typed or tapped add through `fulfillment.start_fulfillment`. Verified model-free (11 scripts incl. real Northfield and Kettle through the
+  graph, 40,000-product structural check, platform-down, tenant and zero-data cases), in a browser (5-test spec, no payment requests), with
+  an independent invariant review; persisted measure `events.complete_set_outcomes`. Limits and the unverified real-client data question are
+  in PROGRESS.md.
 - **V2 missions and basket proposals**: a stated goal drives multi-item
   shortlisting with a real reason per item; a discovery-vs-cart-action
   routing bug (a plain restatement misclassified as cart intent) is fixed

@@ -89,6 +89,9 @@ class TurnTrace:
     #: remaining, verdict, unknown_stages, alternatives_offered_ids, compat_pairs, duplicates_filtered. Log-only like the rest
     #: of the trace (measurable by reading the structured log line and by the tests; not a stored table).
     basket_budget: dict | None = None
+    #: What the merchant-declared compatibility / complete-the-set view offered this turn, and why it stayed silent when it did
+    #: (`mission_complements.build_complement_view` trace). Log-only like the rest of the trace.
+    complete_set: dict | None = None
     store_discovery: str | None = None
 
     response_used_model: bool | None = None
@@ -139,6 +142,7 @@ class TurnTrace:
             "category_choices": list(self.category_choices) if self.category_choices else [],
             "store_discovery": self.store_discovery,
             "basket_budget": self.basket_budget,
+            "complete_set": self.complete_set,
             "response_used_model": self.response_used_model,
             "model_calls": self.model_calls,
             "stage_timings_s": dict(self.stage_timings_s),

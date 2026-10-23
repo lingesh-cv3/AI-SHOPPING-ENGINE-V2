@@ -76,6 +76,12 @@ class EventType:
     #: A budgeted guided mission finished (every stage added, skipped or unavailable). Detail: budget, currency, committed (REAL cart
     #: line totals), within_budget, stages added/skipped, added_from_alternatives. This is what `basket_budget_outcomes` reads.
     BASKET_BUDGET_OUTCOME = "basket_budget_outcome"
+    #: A merchant-declared add-on ("optional extra, not on your list") was shown as a card in a guided mission - see
+    #: engine/shopper_v2/mission_complements.py. Detail: where (after_add | summary), offered_ids, anchors.
+    COMPLEMENT_OFFERED = "complement_offered"
+    #: A guided mission finished (with or without a budget). Detail: confirmed_pairs_in_cart (merchant-declared pairs among the REAL
+    #: cart lines), extras_offered, extras_in_cart, stages_added/skipped, within_budget when a budget existed.
+    COMPLETE_SET_OUTCOME = "complete_set_outcome"
 
 
 async def record(
@@ -362,4 +368,38 @@ async def basket_budget_outcomes(connection_id: str, days: int = 30) -> dict:
         "outcome_unknown": unknown,
         "added_from_alternatives": sum(int(d.get("added_from_alternatives") or 0) for d in finished.values()),
         "rate": (within / (len(finished) - unknown)) if (len(finished) - unknown) > 0 else None,
+    }
+
+
+async def complete_set_outcomes(connection_id: str, days: int = 30) -> dict:
+    """The figure the cross-stage compatibility / complete-the-set feature moves: of the guided missions that finished, how many ended with
+    at least one merchant-declared pair among the REAL cart lines, and how many offered add-ons were really in the cart at close.
+    `rate` is None (never a confident 0%) when no mission has finished. Counted per session. Instrumentation, not business evidence,
+    until there is a real sample; read together with `basket_budget_outcomes` (taking extras can move `within_budget`).
+    """
+    since = datetime.now(UTC) - timedelta(days=days)
+    async with session_scope() as db:
+        rows = (
+            await db.execute(
+                select(ShopperEvent.session_id, ShopperEvent.event_type, ShopperEvent.detail).where(
+                    ShopperEvent.connection_id == connection_id,
+                    ShopperEvent.event_type.in_([EventType.COMPLEMENT_OFFERED, EventType.COMPLETE_SET_OUTCOME]),
+                    ShopperEvent.created_at >= since,
+                )
+            )
+        ).all()
+    offered_ids: set[str] = set()
+    finished: dict[str, dict] = {}
+    for r in rows:
+        if r.event_type == EventType.COMPLEMENT_OFFERED:
+            offered_ids |= {f"{r.session_id}:{i}" for i in ((r.detail or {}).get("offered_ids") or [])}
+        elif r.event_type == EventType.COMPLETE_SET_OUTCOME:
+            finished[r.session_id] = r.detail or {}
+    with_pair = sum(1 for d in finished.values() if int(d.get("confirmed_pairs_in_cart") or 0) > 0)
+    return {
+        "finished": len(finished),
+        "with_confirmed_pair": with_pair,
+        "extras_offered": len(offered_ids),
+        "extras_in_cart_at_close": sum(int(d.get("extras_in_cart") or 0) for d in finished.values()),
+        "rate": (with_pair / len(finished)) if finished else None,
     }

@@ -111,6 +111,25 @@ counted as unfinished implementation work.
   "incompatible" is unreachable (no declared-incompatible data exists) so compatibility lines only ever say confirmed or unknown; a
   mid-sentence "shoes under 5000 and socks" stays a per-item cap; ~40k SKUs is a structural check only; the Kettle "coffee" stage is
   reported out of stock by the existing mission retrieval (pre-existing, not part of this feature); payment code untouched.
+- Cross-stage compatibility + complete-the-set for guided missions — implemented and verified model-free and in a browser; NOT signed off.
+  New read-only `engine/shopper_v2/mission_complements.py` (imports only `engine/execution/product_relations`), wired into the guided
+  mission. The ONLY evidence is the merchant's declared `compatible_with` list (either direction): category, title words and search
+  similarity are never evidence, and "incompatible" is never shown to a shopper. With something really in the cart it names the declared
+  pair among the options on screen ("the merchant lists X as going with your Y"), notes a declared pair between options of two open stages
+  (even with an empty cart), and announces merchant-declared add-ons as clearly labelled optional extras (cards, at most two): right after
+  an add and once in the closing summary, each at most once, with their live price and what they do to the shared budget ("remaining goes
+  from A to B", or "would leave too little for the rest"); an extra never changes the fits/tight/over verdict, is never an option of any
+  stage on the shopper's list (a substitute for a stage they closed is not an extra), and is never offered when it is in the cart, sold out
+  (variant-aware), unfetchable, or - with a budget in play - unpriced or priced in another currency. The cards are never re-ordered. Adding
+  one is the existing typed or tapped add (a sized add-on asks its size first; a repeat add is refused). Measured by `complement_offered` /
+  `complete_set_outcome` events and `events.complete_set_outcomes` (per connection; None, not 0%, with no data; no merchant report reads it
+  yet). Evidence: 11 new test scripts (133 checks), each shown failing on the pre-change code, including real Northfield and Kettle through
+  the graph and a 40,000-product structural check; a 5-test Playwright spec of the complete journey with zero payment requests; an
+  independent invariant review (SAFE). Open or limited: `compatible_with` is one list for "works with" and "goes with", so the wording is
+  "the merchant lists X as going with Y", never a technical-fit guarantee, and how real clients populate it is unverified; an add-on's
+  sentence uses the product-level price (the real add re-checks the chosen variant); a platform that declares nothing gets one honest
+  sentence and no extras; a stage option the stage retrieval did not return becomes an extra, not a stage item; ~40k SKUs is structural only;
+  no live-model path exists here. Checkout and payment are untouched and remain blocked by the payment-safety release blocker above.
 - Remaining: no ops-console consumer of V2's event types; real-volume
   condition for V2 retrieval is a structural code check (bounded queries,
   no unbounded-scan pattern), not an empirical 40k-SKU test;
