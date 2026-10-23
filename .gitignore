@@ -35,10 +35,10 @@ env/
 
 start.txt
 
-patch*
+/patch*
 .env.keys
 
-fix*
+/fix*
 
 # One-off diagnostic scripts. Each existed to answer a single question - print me
 # these lines, tell me what that route returns - and answered it. Keeping them
@@ -46,19 +46,32 @@ fix*
 #
 # The tools that stay are named: healthcheck, fuzz, auditroutes, demo_reset,
 # mint_keys, testshopper. Anything matching below is scratch.
-show*.py
-find*.py
-check*.py
-test*.py
-fix*.py
-add*.py
-wire*.py
-patch*.py
-rm*.py
-what*.py
-list*.py
+# Anchored to the repo root and scripts/ so they cannot hide real source elsewhere
+# (engine/shopper_v2/add_command.py, checkout.py, adapters/*/add_*.py ...).
+/show*.py
+/find*.py
+/check*.py
+/test*.py
+/fix*.py
+/add*.py
+/wire*.py
+/patch*.py
+/rm*.py
+/what*.py
+/list*.py
+/scripts/show*.py
+/scripts/find*.py
+/scripts/check*.py
+/scripts/test*.py
+/scripts/fix*.py
+/scripts/add*.py
+/scripts/wire*.py
+/scripts/patch*.py
+/scripts/rm*.py
+/scripts/what*.py
+/scripts/list*.py
 
-!testshopper.py
+!/testshopper.py
 
 # Shopper V2's permanent regression suite - deliberately tracked despite
 # matching test*.py above. Not one-off scratch: these are the Stage 1
@@ -71,8 +84,3 @@ list*.py
 # test*.py above for the same reason as the Shopper V2 suite: these are checks
 # that must keep passing, not one-off scratch.
 !tests/ops/*.py
-
-# Shopper V2 engine modules whose names match the scratch patterns above (add*.py, check*.py)
-# but are imported by engine/shopper_v2/graph.py, fulfillment.py and missions.py.
-!engine/shopper_v2/add_command.py
-!engine/shopper_v2/checkout.py

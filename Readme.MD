@@ -526,10 +526,14 @@ scripts should be pytest.
 
 ## Development
 
+Run these from the project root, as modules, so `engine`, `adapters` and `shared`
+import (they live in `scripts/`; a bare `python scripts/verify_risk.py` would not
+find them). None of them touches the database.
+
 ```bash
-python verify_risk.py        # risk gate, no servers needed
-python verify_adapter.py     # adapter against the REST demo store
-python verify_decision.py    # decision and risk together
+python -m scripts.verify_risk        # risk gate, no servers needed
+python -m scripts.verify_adapter     # adapter against the REST demo store (needs the sample merchant on 8001; it creates carts there)
+python -m scripts.verify_decision    # decision and risk together (needs the sample merchant on 8001)
 ```
 
 Four import rules hold the architecture together:
