@@ -187,6 +187,29 @@ def _stems(words) -> set[str]:
     return {vocabulary._stem(w) for w in words}
 
 
+def _has_unknown_proper_name(part: str, words: list[str], corrections: dict, message: str, vocab, pool=None) -> bool:
+    """Does this part contain a capitalised word the shop has never used, even after spelling correction?
+
+    "Zephyr Cloud Boot": "Cloud" and "Boot" are words the shop uses, so the part is not wholly unknown, but "Zephyr" is a
+    capitalised name no product, category or variant carries - the shopper named something that is not here. Only a
+    capitalised word counts (a lowercase unknown word is usually an ordinary modifier: "cheap socks", "warm hat"), and
+    never the very first word of the message (sentence-initial capitals prove nothing). A spelling correction to a real
+    catalogue word ("Trailblazr") makes the word known."""
+    first = (message or "").strip().split(" ")[0] if (message or "").strip() else ""
+    content = set(words)
+    for tok in re.findall(r"[A-Za-z0-9']+", part):
+        if not tok[0].isupper() or tok == first or tok in corrections:
+            continue
+        low = tok.lower()
+        if low in content and vocabulary._stem(low) not in vocab.all_stems:
+            # A brand held only in a product's attributes or description is not missing: look at everything the
+            # searched products carry, not just their titles.
+            if any(low in str(getattr(p, "model_dump", lambda: p)()).lower() for p in (pool or {}).values()):
+                continue
+            return True
+    return False
+
+
 async def resolve_named_products(*, adapter, message: str, vocab) -> NamedProducts | None:
     """The real products a multi-part request names, or `None` when it is not that shape (one part, or nothing named
     precisely enough). Triggers only when it is safe: at least two parts resolve to a single product each, or one
@@ -212,11 +235,13 @@ async def resolve_named_products(*, adapter, message: str, vocab) -> NamedProduc
         if not words:
             continue
         known_to_shop = [w for w in words if vocabulary._stem(w) in vocab.all_stems]
-        if not known_to_shop:
-            missing.append(" ".join(_segment_words(part)))
-            continue
+        # The shop vocabulary is built from a bounded sample of the catalogue, so a word missing from it proves nothing
+        # at real volume (a 40k-SKU shop): a part is only reported missing after the catalogue itself, searched with a
+        # bounded query, has no product that covers it.
+        all_unknown = not known_to_shop
         pool: dict[str, object] = {}
-        for query in [" ".join(words)] + [w for w in words if len(w) >= 4 and len(words) > 1]:
+        queries = [" ".join(words)] if all_unknown else [" ".join(words)] + [w for w in words if len(w) >= 4 and len(words) > 1]
+        for query in queries:
             try:
                 result = await retrieve(adapter, query, limit=20)
             except Exception:  # noqa: BLE001 - never raise into the turn
@@ -235,6 +260,8 @@ async def resolve_named_products(*, adapter, message: str, vocab) -> NamedProduc
             if covering[0].product_id not in seen:
                 seen.add(covering[0].product_id)
                 resolved.append(covering[0])
+        elif not covering and (all_unknown or _has_unknown_proper_name(part, words, corrections, message, vocab, pool)):
+            missing.append(" ".join(_segment_words(part)))
         else:
             ambiguous.append(" ".join(words))
     if len(resolved) >= 2 or (len(resolved) == 1 and missing and not ambiguous):

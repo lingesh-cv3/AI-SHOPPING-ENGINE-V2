@@ -46,30 +46,38 @@ counted as unfinished implementation work.
   continuity, payment recovery, missions, basket proposals, trade-off
   re-ranking, cart status and clear-cart — all routed through the
   unmodified Decision Engine → Risk Gate → execution → adapter pipeline.
-- Shopper closeout (Step 25) — NOT signed off for production. Fixed and
-  verified: cross-session cart persistence, store-level category discovery,
-  explicit typed add (direct only when product and variant are unambiguous,
-  otherwise asks), multi-product discovery incl. a missing name. Verified on
-  the final code: 64 model-free scripts / 1197 checks, `fuzz.py` 1200
-  assertions, route audit clean, 34 shopper browser specs, `tsc`/build clean,
-  lint 6 errors (unchanged baseline). Live model (OpenAI gpt-4o-mini, 46 of
-  the authorized 80 requests, one pass each): every authorized scenario
-  passed after one routing fix (two named products no longer fall into
-  "which other product?"). Single run per scenario — repeat rates are
-  UNMEASURED; ~40k-SKU volume is a structural check only; department browse
-  on platforms without `list_departments` is untested on a real platform;
-  a named part sharing words with the catalogue ("Cloud Boot") falls back
-  to ordinary search instead of being reported missing; checkout, tapped-card
-  and payment-recovery browser flows were not rerun; the one-product-in-view
-  guard's pipeline-level test passes without the guard (covered by unit
-  tests only). OPEN, Priority 1 (independent invariant re-review, BLOCKED):
-  `reference_is_ambiguous` still lets a model-chosen product execute when
-  (A) the message shares only a generic title word with it ("add the coffee"
-  with two coffees in view), (B) plural or positional words ("and", "them",
-  "the last one") are present, since the model's picks are not checked
-  against the message; and the add classifier misses a trailing-"?" advice
-  question ("do you recommend I buy it?"), "you think I should add it?" and
-  single-quoted text. Not yet fixed.
+- Shopper closeout (Steps 25 + follow-up) — NOT signed off for production.
+  Fixed and verified model-free: cross-session cart persistence; store-level
+  category discovery; explicit typed add; multi-product discovery. The add
+  guard (`add_command.reference_is_ambiguous`, called from
+  `graph.node_cart_action`) now CHECKS the model's pick against the shopper's
+  words: a title word no other product in view shares, a catalogue-confirmed
+  full name for a pick that is not in view, a real ordinal / last / cheapest
+  that the pick satisfies, or a group word that equals exactly the on-screen
+  set; otherwise it asks. Opinion, hypothetical and "?"-less advice phrasings
+  never add. Missing names are reported only after a bounded catalogue search
+  finds no covering product (the shop vocabulary is a 100-product sample, so a
+  word missing from it proves nothing); an unknown capitalised word
+  ("Zephyr Cloud Boot") counts as a missing name unless a searched product
+  carries it anywhere. Pipeline-level tests fail when the guard is disabled.
+  Three independent invariant reviews found no invariant 1-7 / idempotency
+  violation; the policy gaps they found (A-E) were fixed and the final review
+  was SAFE. Latest run: 64 model-free scripts / 1,263 checks, `fuzz.py` 1,200
+  assertions, route audit clean, model-free HTTP walkthrough 7/7, 34 shopper
+  browser specs, `tsc`/build clean, lint 6 errors (unchanged baseline).
+  Live model (OpenAI gpt-4o-mini, 46 of the authorized 80 requests, one pass
+  per scenario) passed after the earlier routing fix; the guard and
+  missing-name changes since then are NOT live-verified (no new request budget
+  was authorized). Still unproven or open: repeat live rates; ~40k-SKU volume
+  (bounded queries, a 100-product vocabulary sample, no empirical test);
+  department browse on a platform without `list_departments` (controlled-fake
+  tests only); a missing name made only of words the shop uses ("Cloud Boot")
+  still falls back to ordinary search; a typed partial name for a product not
+  in view asks "which one?" until the full name is given; checkout, tapped-card
+  and payment-recovery browser flows were not exercised. Payment safety:
+  `PAYMENT_SAFETY_INVESTIGATION.md` remains OPEN (code-read only, not
+  reproduced); the Step 25 diff does not touch the ledger, pay routes,
+  execution or risk.
 - Remaining: no ops-console consumer of V2's event types; real-volume
   condition for V2 retrieval is a structural code check (bounded queries,
   no unbounded-scan pattern), not an empirical 40k-SKU test;

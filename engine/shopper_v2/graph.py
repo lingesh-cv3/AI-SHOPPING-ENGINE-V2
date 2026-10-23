@@ -3604,21 +3604,45 @@ async def node_cart_action(state: ShopperTurnState) -> dict:
     if explicit_add and not add_ids and hinted_product_id:
         add_ids = [hinted_product_id]
     if explicit_add and add_ids:
-        # Policy (Step 25): the model's pick among several products in view is a guess, never an authorization.
-        in_view: list[str] = []
-        for _ids in ((context.last_rendered.product_ids if context and context.last_rendered else []),
-                     (context.active_topic.product_ids if context and context.active_topic else [])):
-            in_view += [i for i in _ids if i not in in_view]
+        # Policy (Step 25): the model's pick is a guess, never an authorization - it is checked against the shopper's own
+        # words. `screen` is what is on display (positions and "both"/"all of them" refer to it); `in_view` is everything
+        # "it" could mean (the screen plus the active topic).
+        screen = list(context.last_rendered.product_ids) if context and context.last_rendered else []
+        if not screen and context and context.active_topic:
+            screen = list(context.active_topic.product_ids)
+        in_view: list[str] = list(screen)
+        if context and context.active_topic:
+            in_view += [i for i in context.active_topic.product_ids if i not in in_view]
         try:
             _view_products = await _fetch_products(state["adapter"], set(in_view) | set(add_ids))
         except Exception:  # noqa: BLE001 - an unreadable catalogue means ask, never guess
             logger.warning("shopper_v2: could not read products before an explicit add", exc_info=True)
             _view_products = []
-        _by_id = {p.product_id: p.title for p in _view_products}
-        if not _view_products or reference_is_ambiguous(
-                state["message"], [_by_id.get(i, "") for i in add_ids], len(in_view),
-                chosen_is_sole_view=(len(in_view) == 1 and list(add_ids) == in_view)):
-            options = [_by_id[i] for i in (in_view or add_ids) if i in _by_id][:5]
+        _by_id = {p.product_id: p for p in _view_products}
+
+        def _item(pid):
+            prod = _by_id.get(pid)
+            price = prod.price.amount if prod is not None and prod.price is not None else None
+            return (pid, prod.title if prod is not None else "", price)
+
+        # A pick that is not in view is accepted only if the catalogue, asked with the shopper's own words, names
+        # exactly that product.
+        _verified: set[str] = set()
+        for _pid in add_ids:
+            if _pid in _by_id and _pid not in in_view:
+                try:
+                    _hit = await named_product.resolve_named_add(
+                        adapter=state["adapter"], message=state["message"], view_products=[], allow_fuzzy=False)
+                except Exception:  # noqa: BLE001
+                    _hit = None
+                if _hit is not None and _hit.product_id == _pid:
+                    _verified.add(_pid)
+        # Every product the shopper could mean must be readable; a silently shrunken view would make "it" look unique.
+        _readable = all(i in _by_id for i in add_ids) and all(i in _by_id for i in in_view)
+        if not _readable or reference_is_ambiguous(
+                state["message"], [_item(i) for i in add_ids], [_item(i) for i in screen],
+                [_item(i) for i in in_view], frozenset(_verified)):
+            options = [_by_id[i].title for i in (in_view or add_ids) if i in _by_id][:5]
             listing = (" " + ", ".join(options) + ".") if options else ""
             trace.response_used_model = False
             trace.finish()

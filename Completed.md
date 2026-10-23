@@ -52,10 +52,12 @@ partial, unverified, or unbuilt.
   or typed "yes" on a proposal, or an explicit typed add command
   (`add_command.py`) whose product and variant are unambiguous — both end in
   `accept_cart_proposal_core` (live stock/price re-check, atomic claim). An
-  bare "it" with several products in view, or a missing size asks first;
-  clear questions, negations, deferrals, double-quoted text and vague
-  agreement never add. Known remaining bypasses of the ambiguity guard are
-  listed in PROGRESS.md (not yet closed).
+  "it", "the coffee" (a word every product in view shares), "all of them" with
+  a hidden topic behind it, or a missing size asks first; questions (with or
+  without "?"), negations, deferrals, hypotheticals, quoted text and vague
+  agreement never add. The model's pick is checked against the shopper's own
+  words; pipeline tests fail if the guard is disabled. Verified model-free;
+  the final guard was not re-run live (see PROGRESS.md).
   Verified model-free (`test_explicit_add_executes.py`) and live (gpt-4o-mini:
   named add executes, sized product asks, ambiguous/hedged messages add
   nothing).
@@ -70,7 +72,12 @@ partial, unverified, or unbuilt.
 - **Multi-product discovery**: two or three products named in one message are
   each resolved and shown, with a plainly absent one reported rather than
   invented — including when the model routes the message to the compare
-  answer (live-verified; `test_step25_named_multi_routed.py`).
+  answer (live-verified; `test_step25_named_multi_routed.py`). A name is
+  reported missing only after a bounded catalogue search finds nothing, so a
+  real product outside the 100-product vocabulary sample is never called
+  missing; an unknown capitalised name ("Zephyr Cloud Boot") is reported even
+  when it shares words with real products (model-free tests with negative
+  controls; these two later changes are not live-verified).
 - **V2 missions and basket proposals**: a stated goal drives multi-item
   shortlisting with a real reason per item; a discovery-vs-cart-action
   routing bug (a plain restatement misclassified as cart intent) is fixed

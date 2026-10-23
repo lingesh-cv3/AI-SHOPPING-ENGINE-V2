@@ -296,48 +296,138 @@ async def review_checks(eng):
     check("no raw error text", "bookkeeping" not in r.reply and "RuntimeError" not in r.reply, r.reply[:200])
 
 
+def _claim(**kw):
+    base = {"capability": "discover", "context_action": "continue", "question_type": "retrieve",
+            "reference_scope": "none", "reference_kind": "none", "conversational_repair": "none",
+            "cart_operation": "none", "rationale": "scripted"}
+    base.update(kw)
+    return base
+
+
+class ScriptedModel:
+    """Interpretation calls pop the next scripted claim; every other model call is unavailable."""
+
+    def __init__(self):
+        self.queue = []
+
+    async def complete(self, *, system, messages, tools=None, force_tool=False):
+        from engine.reasoning.llm import LLMResult, LLMUnavailable
+
+        name = tools[0]["function"]["name"] if tools else None
+        if name == "interpret_conversation" and self.queue:
+            return LLMResult(text=None, model="scripted",
+                             tool_calls=[{"name": "interpret_conversation", "arguments": self.queue.pop(0)}])
+        raise LLMUnavailable("scripted: nothing queued")
+
+
 async def ambiguity_checks(eng):
-    from types import SimpleNamespace
+    from engine.reasoning import ReasoningService
+    from engine.shopper_v2.add_command import classify_add_message, reference_is_ambiguous
+    from engine.shopper_v2.graph import run_turn_via_graph
 
-    from engine.shopper_v2 import graph
-    from engine.shopper_v2.add_command import reference_is_ambiguous
+    A = ("P1001", "Trailblazer Running Shoe", 8999)
+    B = ("P1009", "Starter Road Running Shoe", 4999)
+    C = ("P1010", "Cloudstep Max Cushion Running Shoe", 12999)
+    K1, K2 = ("K1", "Kettle Blend Coffee", 500), ("K2", "Ethiopia Coffee", 700)
+    amb = reference_is_ambiguous
 
-    print("\n17. Ambiguity policy (pure): a guess among several products never authorizes an add")
-    two = ["Trailblazer Running Shoe", "Cloudfoam Trail Runner"]
-    check("bare 'add it' with 3 in view is ambiguous", reference_is_ambiguous("add it", ["Trailblazer Running Shoe"], 3))
-    check("the only product in view is not ambiguous", not reference_is_ambiguous("add it", ["Trailblazer Running Shoe"], 1, True))
-    check("a pick that is NOT the only product in view and is not named is ambiguous",
-          reference_is_ambiguous("add the socks", ["Trailblazer Running Shoe"], 1, False))
-    check("nothing in view and a bare 'add it' is ambiguous", reference_is_ambiguous("add it", ["Trailblazer Running Shoe"], 0, False))
-    check("naming the product is not ambiguous", not reference_is_ambiguous("add the Trailblazer", ["Trailblazer Running Shoe"], 3))
-    check("a positional pointer is not ambiguous", not reference_is_ambiguous("add the second one", ["Cloudfoam Trail Runner"], 3))
-    check("'add both' is not ambiguous", not reference_is_ambiguous("add both", two, 2))
-    check("two ids from a bare 'add it' is ambiguous", reference_is_ambiguous("add it", two, 2))
+    print("\n17. Ambiguity policy (pure): the model's pick is checked against the shopper's words")
+    check("bare 'add it' with two in view asks", amb("add it", [A], [A, B]))
+    check("generic title words ('running shoe') do not identify a pick", amb("add the running shoe", [A], [A, B]))
+    check("a distinguishing word names it", not amb("add the Trailblazer", [A], [A, B]))
+    check("'the coffee' with two coffees in view asks", amb("add the coffee", [K1], [K1, K2]))
+    check("'the Kettle coffee' names it", not amb("add the Kettle coffee", [K1], [K1, K2]))
+    check("the only product in view needs no name", not amb("add it", [A], [A]))
+    check("a pick that is not in view and not named asks", amb("add it", [A], [B]))
+    check("'the second one' - pick IS second", not amb("add the second one", [B], [A, B]))
+    check("'the second one' - model picked the first: asks", amb("add the second one", [A], [A, B]))
+    check("'the first one' - pick IS first", not amb("add the first one", [A], [A, B]))
+    check("'the first one' - model picked the second: asks", amb("add the first one", [B], [A, B]))
+    check("'the last one' - pick IS last", not amb("add the last one", [C], [A, B, C]))
+    check("'the last one' - model picked another: asks", amb("add the last one", [A], [A, B, C]))
+    check("'the cheapest' - pick IS cheapest", not amb("add the cheapest", [B], [A, B, C]))
+    check("'the cheapest' - model picked another: asks", amb("add the cheapest", [A], [A, B, C]))
+    check("'the cheaper one' cannot be verified: asks", amb("add the cheaper one", [B], [A, B]))
+    check("'both' - pick is exactly the two in view", not amb("add both", [A, B], [A, B]))
+    check("'both' with three in view asks", amb("add both", [A, B], [A, B, C]))
+    check("'them' with three in view and a two-product pick asks", amb("add them", [A, B], [A, B, C]))
+    check("'all of them' - pick is the whole view", not amb("add all of them", [A, B, C], [A, B, C]))
+    check("'the first two' - pick IS the first two", not amb("add the first two", [A, B], [A, B, C]))
+    check("'the first two' - model picked others: asks", amb("add the first two", [B, C], [A, B, C]))
+    check("'and' alone does not waive the check", amb("add the shoes and I'll check out", [A, B], [A, B, C]))
+    check("two products each named", not amb("add the Trailblazer and the Starter Road", [A, B], [A, B, C]))
+    check("nothing chosen asks", amb("add it", [], [A, B]))
+    S3, D, E = ("S3", "Merino Wool Sock", 300), ("P1011", "Featherline Speed Running Shoe", 9999), ("P1012", "Highridge Trail Shoe", 7999)
+    check("a pick NOT in view is not 'named' by a shared title word ('socks')", amb("add the socks", [S3], [A, B], [A, B], frozenset()))
+    check("...unless the catalogue itself confirmed that exact product", not amb("add the Merino Wool Sock", [S3], [A, B], [A, B], frozenset({"S3"})))
+    check("an empty view and a generic word asks", amb("add the coffee", [K1], [], [], frozenset()))
+    check("'all of them' means what is ON SCREEN, not the hidden active topic",
+          amb("add all of them", [A, B, C, D, E], [A, B, C], [A, B, C, D, E]))
+    check("'all of them' with the pick equal to the screen is fine", not amb("add all of them", [A, B, C], [A, B, C], [A, B, C, D, E]))
+    check("'add 2 of the trail shoes' is a quantity, not 'both products'", amb("add 2 of the trail shoes", [A, B], [A, B]))
+    check("'the top rated one' is not a position", amb("add the top rated one", [A], [A, B]))
 
-    print("\n18. Ambiguity policy (pipeline): a model pick of one product among several must ask, not add")
-    s = await Shopper(eng).start()
-    shown = await s.say("show me running shoes")
-    ids = [p.product_id for p in (shown.products or [])]
-    if len(ids) < 2:
-        check("setup: at least two products shown", False, ids)
-        return
-    orig_interpret, orig_verify = graph.interpret_turn, graph.verify
+    print("\n17b. Classifier: advice and quotation never execute")
+    for msg in ("do you recommend I buy the Trailblazer?", "you think I should add it?", "any reason to buy the Trailblazer",
+                "the button says 'add to cart'", "add it?", "is it worth buying the Trailblazer"):
+        check(f"not a command: {msg!r}", classify_add_message(msg) != "command", classify_add_message(msg))
+    for msg in ("would you buy the Trailblazer", "do you want me to add the Trailblazer", "would you add it to my cart",
+                "tell me how to add it to my cart", "explain why I should buy it"):
+        check(f"a question without a '?' is not a command: {msg!r}", classify_add_message(msg) != "command", classify_add_message(msg))
+    for msg in ("would you buy it?", "would you add this?", "tell me what happens when I add it", "after I add it, do I get a receipt?",
+                "can you add it?"):
+        check(f"not a command (opinion / hypothetical / bare request-as-question): {msg!r}", classify_add_message(msg) != "command", classify_add_message(msg))
+    for msg in ("can you add it to my cart?", "could you please add it", "add the Trailblazer", "I'll add it, it's fine", "please buy the socks"):
+        check(f"still a command: {msg!r}", classify_add_message(msg) == "command", classify_add_message(msg))
 
-    async def fake_interpret(**kw):
-        return SimpleNamespace()
+    print("\n18. Ambiguity policy (pipeline): scripted model picks resolve through the real graph")
+    model = ScriptedModel()
+    ad = eng.registry.adapter_for("conn_demo")
 
-    def fake_verify(claim, context, products, message):
-        return SimpleNamespace(cart_operation="add", needs_clarification=False,
-                               resolved_reference=SimpleNamespace(product_ids=[ids[0]]))
+    async def session():
+        cart = (await ad.create_cart()).cart_id
+        sid = f"amb_{uuid.uuid4().hex[:8]}"
 
-    graph.interpret_turn, graph.verify = fake_interpret, fake_verify
-    try:
-        r = await s.say("add it to the cart")
-    finally:
-        graph.interpret_turn, graph.verify = orig_interpret, orig_verify
-    check("nothing was added to the cart", await s.lines() == [], await s.lines())
-    check("the shopper is asked which one", "which" in r.reply.lower(), r.reply[:200])
-    check("no proposal is left pending", await s.pending() == [], await s.pending())
+        async def say(message, claim=None, variant=None):
+            if claim is not None:
+                model.queue.append(claim)
+            return await run_turn_via_graph(
+                reasoning=ReasoningService(model), adapter=ad, session_id=sid, connection_id="conn_demo", message=message,
+                cart_id=cart, decision=eng.decision, gate=eng.gate, execution=eng.execution, selected_variant_id=variant)
+
+        async def lines():
+            return [(ln.product_id, ln.quantity) for ln in (await ad.get_cart(cart)).lines]
+        return say, lines
+
+    say, lines = await session()
+    shown = await say("show me running shoes", _claim(context_action="push"))
+    check("setup: several shoes in view", len(shown.products or []) >= 2, [p.title for p in (shown.products or [])])
+    r = await say("add the running shoe", _claim(capability="cart_action", cart_operation="add", reference_scope="last_rendered",
+                                                  reference_kind="ordinal", reference_positions=[1]))
+    check("generic words + a model pick: asks which one", "which one" in r.reply.lower(), r.reply[:160])
+    check("it did not go on to ask a size for the model's pick", "size" not in r.reply.lower(), r.reply[:160])
+    check("nothing added, nothing pending", await lines() == [])
+    r = await say("add the Trailblazer Running Shoe", _claim(capability="cart_action", cart_operation="add",
+                                                              reference_scope="last_rendered", reference_kind="ordinal",
+                                                              reference_positions=[1]))
+    check("when the shopper names the product the guard lets it through (to its size question)",
+          "size" in r.reply.lower() and "which one" not in r.reply.lower(), r.reply[:160])
+    check("a sized product is still not added before the size is chosen", await lines() == [])
+    r = await say("should I add the Trailblazer Running Shoe?", _claim(capability="cart_action", cart_operation="add",
+                                                                         reference_scope="last_rendered", reference_kind="ordinal",
+                                                                         reference_positions=[1]))
+    check("a question never adds, whatever the model claims", await lines() == [], await lines())
+    r = await say("what if I added the Trailblazer Running Shoe", _claim(capability="cart_action", cart_operation="add",
+                                                                           reference_scope="last_rendered", reference_kind="ordinal",
+                                                                           reference_positions=[1]))
+    check("a hypothetical never adds", await lines() == [], await lines())
+    r = await say("add it", _claim(capability="cart_action", cart_operation="add", reference_scope="last_rendered",
+                                    reference_kind="ordinal", reference_positions=[1]))
+    check("bare 'add it' with several shoes in view asks", "which one" in r.reply.lower() and await lines() == [], r.reply[:160])
+    r = await say("add the second one", _claim(capability="cart_action", cart_operation="add", reference_scope="last_rendered",
+                                                reference_kind="ordinal", reference_positions=[1]))
+    check("'the second one' but the model picked the first: asks, adds nothing", "which one" in r.reply.lower() and await lines() == [],
+          r.reply[:160])
 
 
 async def main():

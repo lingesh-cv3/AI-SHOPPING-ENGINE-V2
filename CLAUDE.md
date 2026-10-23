@@ -112,7 +112,11 @@ verb — add/buy/purchase/put-in-cart — that is not a question, negation,
 conditional, deferral or quotation) that executes directly **only when the
 product and any required variant are unambiguous**. If the product, the
 reference ("it"/"that one"), the size/variant or the target could resolve more
-than one way, V2 asks a clarification before mutating; a sized product is not
+than one way, V2 asks a clarification before mutating — the model's pick is
+never trusted on its own: `add_command.reference_is_ambiguous` checks it
+against the shopper's own words (a distinguishing title word, a
+catalogue-confirmed full name, a satisfied ordinal/price rank, or a group word
+equal to the on-screen set). A sized product is not
 added until the shopper chooses the size. Questions, negations, hypotheticals,
 quoted text and vague agreement ("sounds good", "I'll take it") never mutate.
 Discovery and recommendations are read-only. Payment is separate and always

@@ -169,6 +169,78 @@ async def checks(eng):
           r.trace.get("capability") == "mission", r.trace.get("capability"))
 
 
+async def overlap_checks(eng):
+    print("\n11. A missing name that shares words with the catalogue (Step 25, Priority 2)")
+    r = await Shopper(eng).say("Show me the Trailblazer Running Shoe and the Zephyr Cloud Boot")
+    check("the real product is shown, nothing substituted", titles(r) == [TB], titles(r))
+    check("the unknown name is reported plainly", "couldn't find" in r.reply.lower() and "zephyr" in r.reply.lower(), r.reply[:200])
+    r = await Shopper(eng).say("Show me the Zephyr Cloud Boot and the Trailblazer Running Shoe")
+    check("same when the missing name comes first", titles(r) == [TB] and "zephyr" in r.reply.lower(), (titles(r), r.reply[:160]))
+    r = await Shopper(eng).say("Show me the Trailblazer Running Shoe, the Starter Road Running Shoe and the Zephyr Cloud Boot")
+    check("two found + one overlapping-name missing: both shown, gap reported",
+          titles(r) == [TB, SR] and "zephyr" in r.reply.lower(), (titles(r), r.reply[:160]))
+
+    print("\n12. Nothing legitimate regresses")
+    r = await Shopper(eng).say("Show me the Trailblazr Running Shoe and the Starter Road Running Shoe")
+    check("a spelling variant still resolves (the corrected word is not 'unknown')", titles(r) == [TB, SR], titles(r))
+    r = await Shopper(eng).say("Show me the Trailblazer Running Shoe and the Starter Road Running Shoe")
+    check("exact names unchanged", titles(r) == [TB, SR], titles(r))
+    r = await Shopper(eng).say("Show me the Trailblazer Running Shoe and cheap socks")
+    check("a lowercase modifier ('cheap') is not treated as a missing product name",
+          "couldn't find" not in r.reply.lower(), r.reply[:200])
+    r = await Shopper(eng).say("Cheap socks and the Trailblazer Running Shoe")
+    check("a sentence-initial capital proves nothing", "couldn't find" not in r.reply.lower(), r.reply[:200])
+    r = await Shopper(eng).say("Show me trail shoes and socks")
+    check("a category request is still a category request", len(titles(r)) > 1 and "couldn't find" not in r.reply.lower(), titles(r))
+
+    print("\n13. Known limitation (documented, not hidden): a name made ONLY of words the shop uses")
+    r = await Shopper(eng).say("Show me the Trailblazer Running Shoe and the Cloud Boot")
+    check("it degrades to the ordinary search without error or invented claims", "Traceback" not in r.reply and titles(r) != [],
+          (titles(r), r.reply[:160]))
+
+
+class SampledCatalogue:
+    """Stands in for a catalogue far bigger than the vocabulary sample: the empty-query browse the vocabulary is built
+    from returns only the first few products; any real query still reaches the whole catalogue."""
+
+    def __init__(self, real, sample_size=5):
+        self._real, self._n = real, sample_size
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    async def search_products(self, query, *a, **kw):
+        result = await self._real.search_products(query, *a, **kw)
+        if not (query or "").strip() and not kw.get("dept"):
+            products = list(getattr(result, "products", result) or [])[: self._n]
+            try:
+                return result.model_copy(update={"products": products})
+            except AttributeError:
+                return products
+        return result
+
+
+async def volume_checks(eng):
+    from engine.shopper_v2 import vocabulary
+
+    print("\n14. Large catalogue: a product outside the vocabulary sample is never reported 'couldn't find'")
+    vocabulary._CACHE.pop("conn_demo", None)
+    s = Shopper(eng)
+    s.ad = SampledCatalogue(s.ad)
+    try:
+        r = await s.say("Show me the Trailblazer Running Shoe and the Performance Socks Three Pack")
+        check("both real products found although 'socks' is not in the sampled vocabulary", titles(r) == [TB, SOCKS], titles(r))
+        check("no false 'couldn't find'", "couldn't find" not in r.reply.lower(), r.reply[:200])
+        r = await s.say("Show me the Trailblazer Running Shoe and sleeves")
+        check("an unsampled word with SEVERAL real products behind it is never reported as missing",
+              "couldn't find" not in r.reply.lower(), r.reply[:200])
+        r = await s.say("Show me the Trailblazer Running Shoe and the Zorblax Hoverboard")
+        check("a genuinely absent name is still reported after the catalogue search", titles(r) == [TB] and "zorblax" in r.reply.lower(),
+              (titles(r), r.reply[:160]))
+    finally:
+        vocabulary._CACHE.pop("conn_demo", None)
+
+
 async def main():
     from engine.api.deps import build_engine
     from engine.db import create_schema, dispose
@@ -178,6 +250,8 @@ async def main():
     eng = build_engine()
     try:
         await checks(eng)
+        await overlap_checks(eng)
+        await volume_checks(eng)
     finally:
         await eng.close()
         await dispose()
