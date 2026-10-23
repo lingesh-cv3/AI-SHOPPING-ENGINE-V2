@@ -4404,3 +4404,97 @@ select.card-picker {
   font-size: 13px;
   color: var(--ink-2);
 }
+
+/* ---- Shopper follow-ups (additive) -------------------------------------- */
+
+.appr-link {
+  align-self: flex-start;
+  margin-top: 10px;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+.fu-detail {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+}
+
+.fu-contact {
+  margin: 4px 0 0;
+  font-weight: 600;
+}
+
+.fu-turns {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13.5px;
+}
+
+.fu-turn {
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+}
+
+.fu-turn.shopper {
+  border-left-color: var(--accent);
+}
+
+.fu-speaker {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.fu-note {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.fu-counter {
+  margin-top: 2px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.fu-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13.5px;
+}
+
+/* The shared ".rejectbox input" rule stretches every input full width; a checkbox must not. */
+.fu-confirm input {
+  width: auto;
+  flex: none;
+  padding: 0;
+  margin: 0;
+}
+
+.fu-sep {
+  margin: 0 0.55em;
+  color: var(--ink-3);
+}

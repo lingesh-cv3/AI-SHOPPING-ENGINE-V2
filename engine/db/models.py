@@ -868,6 +868,49 @@ class ShoppingState(Base):
     #: above. V1 never reads or writes this column.
     fulfillment_queue: Mapped[list] = mapped_column(JSON, default=list)
 
+    #: Shopper V2 only (see engine/shopper_v2/state.py::Topic) - the Focus
+    #: Stack, the single authoritative "what's currently in view, and what
+    #: was in view before that, recoverable" model, replacing
+    #: `active_products`/`recent_product_groups`/`mission_items` as V2's own
+    #: read source for reference resolution (those three columns remain,
+    #: unchanged, as V1's own read/write surface and as this column's
+    #: migration safety net - see state.py::Topic's own docstring for the
+    #: full architecture). Replaced wholesale each time it changes, same
+    #: reasoning as `mission_items`/`fulfillment_queue` above - a stack's
+    #: shape (which topic is active, which are paused, in what order) is a
+    #: single fact about the whole structure, never something meaningful to
+    #: patch field-by-field at the row level. V1 never reads or writes this
+    #: column.
+    focus_stack: Mapped[list] = mapped_column(JSON, default=list)
+
+    #: Rev. 2 architecture (2026-09) - `state.py::LastRendered`'s own
+    #: docstring. A single object (or null), not a list - "what's on
+    #: screen right now" has exactly one value at a time, unlike
+    #: `focus_stack`'s multi-topic shape. Replaced wholesale each time it
+    #: changes. V1 never reads or writes this column.
+    last_rendered: Mapped[dict | None] = mapped_column(JSON, default=None, nullable=True)
+
+    #: Rev. 2 architecture (2026-09) - a question-shaped turn
+    #: (relationship/recommendation/compound_comparison/explanation) that
+    #: could not be fully resolved this turn, kept so a correction on the
+    #: NEXT turn can be replayed against the ORIGINAL question instead of
+    #: being treated as a brand-new, unrelated statement. Cleared as soon
+    #: as it's used or superseded. `None` when nothing is pending.
+    pending_question: Mapped[dict | None] = mapped_column(JSON, default=None, nullable=True)
+
+    #: Production architecture (2026-09), Phase 2 - see
+    #: `engine/shopper_v2/state.py::ShoppingStateV2.preference_domains`'s
+    #: own docstring. Maps each stated preference/priority VALUE to the
+    #: domain it was stated under - additive, replaced wholesale each time
+    #: it changes, same reasoning as `focus_stack` above.
+    preference_domains: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    #: Production architecture (2026-09), Phase 2 - a tombstone list of
+    #: explicitly-cancelled preference values, so a cancelled preference is
+    #: never silently re-applied from replayed history. See
+    #: `ShoppingStateV2.cancelled_preferences`'s own docstring.
+    cancelled_preferences: Mapped[list] = mapped_column(JSON, default=list)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )

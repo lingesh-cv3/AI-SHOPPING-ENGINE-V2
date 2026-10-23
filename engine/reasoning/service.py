@@ -44,6 +44,7 @@ from .prompts import (
     SYSTEM_PROMPT,
     _BEST_MATCH_SYSTEM_PROMPT,
     _CART_REFERENCE_SYSTEM_PROMPT,
+    _INTERPRETATION_SYSTEM_PROMPT,
     _MISSION_REFERENCE_SYSTEM_PROMPT,
     _RELEVANCE_SYSTEM_PROMPT,
     _SYNTHESIS_SYSTEM_PROMPT,
@@ -52,6 +53,8 @@ from .prompts import (
     best_match_tool,
     cart_reference_prompt,
     cart_reference_tool,
+    interpretation_prompt,
+    interpretation_tool,
     mission_reference_prompt,
     mission_reference_tool,
     propose_tool,
@@ -197,6 +200,159 @@ class Synthesis:
     #: the way an unset optional field previously was (see `synthesis_tool()`'s
     #: docstring for the bypass this closes).
     personalizes: bool | None = None
+
+
+@dataclass
+class DurableFactCandidate:
+    """One durable-fact claim from `ReasoningService.interpret()` - free
+    text, deliberately never constrained to a fixed key taxonomy at THIS
+    layer (see Rev. 2 architecture spec §7.3: understanding stays open-
+    vocabulary; only storage normalization, downstream, is controlled).
+    Never written to `ShopperMemoryFact` directly from here - the caller
+    normalizes/validates first."""
+
+    subject: str
+    statement: str
+    confidence: float = 1.0
+
+
+@dataclass
+class InterpretationResult:
+    """The result of `ReasoningService.interpret()` - the Rev. 2
+    architecture's genuine-interpretation call (see that spec, and
+    `_INTERPRETATION_SYSTEM_PROMPT`'s own docstring for why this is not a
+    bigger classifier). Every field is a CHECKABLE CLAIM, never trusted or
+    acted on directly: `engine/shopper_v2/verification.py` resolves
+    `reference_*`/`context_target_label` against real, already-verified
+    data before anything downstream sees a real product id or a real
+    topic id. No field here can reach the Decision Engine or Risk Gate
+    directly - the same narrow-capability guarantee `CartReferenceIntent`
+    already carries.
+
+    `rationale` is for a human reviewing a trace ONLY - no code anywhere
+    in this codebase may branch on its text."""
+
+    capability: str = "unknown"
+    context_action: str = "continue"  # "continue" | "push" | "resume" | "ambiguous"
+    context_target_label: str | None = None
+    new_topic_label: str | None = None
+    reference_scope: str = "none"  # "last_rendered" | "active_topic" | "paused_topic" | "named" | "none"
+    reference_kind: str = "none"  # "ordinal" | "superlative" | "comparative_pair" | "all" | "named" | "none"
+    reference_positions: list[int] = field(default_factory=list)
+    #: The real product characteristic named, in the shopper's OWN words
+    #: ("price", "cheaper", "weight", "battery life", anything) - NOT
+    #: restricted to a fixed enum. `engine/shopper_v2/attributes.py`
+    #: deterministically checks whether this maps to a real, populated
+    #: field on the actual products in scope; when it doesn't, the turn
+    #: degrades honestly rather than silently substituting a different
+    #: attribute or inventing a value. Never trusted as ground truth by
+    #: itself - a checkable claim like every other field here.
+    reference_attribute: str | None = None
+    reference_direction: str | None = None  # "max" | "min" | None
+    reference_names: list[str] = field(default_factory=list)
+    cart_operation: str = "none"  # "add" | "remove" | "set_quantity" | "clear" | "none"
+    durable_fact_candidates: list[DurableFactCandidate] = field(default_factory=list)
+    conversational_repair: str = "none"  # "correction" | "cancellation" | "pause" | "continuation" | "confirmation" | "none"
+    clarify_if_uncertain: bool = False
+    #: The SEMANTIC OPERATION the shopper wants performed - this is what
+    #: decides the SHAPE of the reply (a relationship statement, an
+    #: explanation, a single recommendation, ...), independent of which
+    #: capability/domain module happens to supply the grounded data.
+    #: "retrieve" (show/browse - today's default), "relationship"
+    #: (compare exactly two resolved things and state which wins and by
+    #: how much - "which is cheaper", "which is better rated"),
+    #: "explanation" (why was the current/referenced product or set
+    #: selected - "why this", "why did you pick that"), "recommendation"
+    #: (one grounded winner + a real reason, usually under a stated
+    #: constraint - "what's the best one under 5000"), "compound_comparison"
+    #: (resolve TWO independent superlatives - by potentially DIFFERENT
+    #: attributes - then relate the two results - "compare the cheapest
+    #: and the lightest"), "alternatives" (more/different real options
+    #: beyond what's already shown - "what else do you have"),
+    #: "attribute_refinement" (re-rank/filter the CURRENTLY active set by
+    #: a newly stated real preference - "something lightweight", "I want
+    #: something cheaper"), "state_change" (a correction/cancellation/
+    #: continuation about the shopper's OWN prior statement or a pending
+    #: question - never a product question itself).
+    question_type: str = "retrieve"
+    #: Populated only for "relationship"/"compound_comparison" - the
+    #: SECOND thing to resolve and relate to the primary reference above.
+    #: Mirrors the primary reference fields exactly; resolved by the SAME
+    #: deterministic `verification.py` machinery, just called for a
+    #: second, independent scope/attribute. `None` for every other
+    #: question_type.
+    secondary_reference: "SecondaryReference | None" = None
+    rationale: str = ""
+
+    # Production architecture (2026-09), Phase 1 reconciliation: this call
+    # is now THE single authoritative interpretation per turn - these two
+    # fields are the former `Reasoning.message_intent`/`.shopping_state`
+    # (Stage 1's own `propose_actions` output), added here rather than kept
+    # on a second, independent call. See `_INTERPRETATION_SYSTEM_PROMPT`'s
+    # own "8. STATE UPDATE" section and `interpretation_tool()`'s
+    # `shopping_state` property - copied field-for-field from
+    # `propose_tool()`'s own, separately-hardened schema, not reinvented.
+    #: "shopping" or "conversational" - superseded in practice by
+    #: `capability == "conversational"` (the richer, already-existing
+    #: signal), kept only so `capability.py::route()`'s existing signature
+    #: (which still takes this as a distinct argument) needs no change.
+    message_intent: str | None = None
+    #: The raw shopping_state delta dict, same shape `Reasoning.
+    #: shopping_state` always was - `engine/shopper_v2/understanding.py`
+    #: parses this into a typed `StateDelta`, reusing its own existing
+    #: parsing code unchanged, just fed from this call instead of
+    #: `reason()`.
+    shopping_state: dict | None = None
+    #: The real provider model name that answered this call, for tracing -
+    #: mirrors `Reasoning.model_name`'s own purpose.
+    model_name: str | None = None
+    #: Production architecture (2026-09), Phase 5: compound turns. A
+    #: SECOND, genuinely different action the same message also asks for -
+    #: `None` for the overwhelmingly common single-operation turn. See
+    #: `SecondaryOperation`'s own docstring; resolved/executed by
+    #: `engine/shopper_v2/graph.py::node_discovery` using an intra-turn
+    #: handle (THIS turn's own just-verified results), never persisted
+    #: `ConversationContext` between operations.
+    secondary_operation: "SecondaryOperation | None" = None
+    #: Real store category names the model selected (from the list it was
+    #: shown) as plausibly containing what a non-category search word
+    #: means. A CLAIM only - `pipeline.py` re-validates every name against
+    #: the merchant's real taxonomy before using any of it.
+    catalog_categories: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecondaryReference:
+    """The second half of a "relationship"/"compound_comparison" question
+    - see `InterpretationResult.secondary_reference`'s own docstring.
+    Every field means exactly what the identically-named field on
+    `InterpretationResult` means; kept as a separate, smaller type rather
+    than reusing the whole `InterpretationResult` shape, since only the
+    reference-resolution fields are ever meaningful here."""
+
+    reference_scope: str = "none"
+    context_target_label: str | None = None
+    reference_kind: str = "none"
+    reference_positions: list[int] = field(default_factory=list)
+    reference_attribute: str | None = None
+    reference_direction: str | None = None
+    reference_names: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecondaryOperation:
+    """Production architecture (2026-09), Phase 5 - compound turns. A
+    SECOND, genuinely different action a turn's message also asks for,
+    to run AFTER the primary capability/reference above resolves, using
+    an INTRA-TURN handle to its real results (never a second, persisted
+    `ConversationContext` read - see `node_discovery`'s own docstring on
+    why intermediate context is never written between operations).
+    Deliberately narrow: only `capability in ("compare", "recommendation")`
+    - the two concretely-needed compound shapes - never a third,
+    independent capability guess layered on top of the primary one."""
+
+    capability: str  # "compare" | "recommendation"
+    reference_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -723,6 +879,232 @@ class ReasoningService:
             position=position,
             named_hint=named_hint,
             quantity=quantity,
+        )
+
+    async def interpret(
+        self,
+        *,
+        message: str,
+        history: list[str] | None = None,
+        durable_facts: list[dict] | None = None,
+        active_topic_label: str | None = None,
+        active_topic_products: list[dict] | None = None,
+        paused_topics: list[dict] | None = None,
+        last_rendered_products: list[dict] | None = None,
+        cart_lines: list[dict] | None = None,
+        mission_summary: str | None = None,
+        current_shopping_state: dict | None = None,
+        store_categories: list[str] | None = None,
+        spelling_hint: str | None = None,
+    ) -> InterpretationResult | None:
+        """Rev. 2 architecture's genuine-interpretation call - see
+        `_INTERPRETATION_SYSTEM_PROMPT`'s own docstring for the full
+        argument on why this reasons over real, grounded data rather than
+        classifying a bare sentence. Returns `None` (not a guess) when the
+        model is unavailable, throttled, or fails to call the tool - the
+        caller (`engine/shopper_v2/interpretation.py`) must treat `None`
+        the same as "could not interpret this turn," the identical
+        degrade-honestly discipline every other bounded judgment call in
+        this file already uses. Every field of the result is a checkable
+        CLAIM only - `engine/shopper_v2/verification.py` resolves it
+        against real data before anything acts on it; this method itself
+        never touches a product id, a variant, or the Risk Gate."""
+        if self._client is None:
+            return None
+        prompt = interpretation_prompt(
+            message=message,
+            history=history,
+            durable_facts=durable_facts,
+            active_topic_label=active_topic_label,
+            active_topic_products=active_topic_products or [],
+            paused_topics=paused_topics or [],
+            last_rendered_products=last_rendered_products or [],
+            cart_lines=cart_lines,
+            mission_summary=mission_summary,
+            current_shopping_state=current_shopping_state,
+            store_categories=store_categories,
+            spelling_hint=spelling_hint,
+        )
+        try:
+            result = await self._client.complete(
+                system=_INTERPRETATION_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[interpretation_tool()],
+                force_tool=True,
+            )
+        except LLMUnavailable as exc:
+            logger.info("interpretation unavailable, degrading: %s", exc)
+            return None
+        call = next(
+            (c for c in result.tool_calls if c["name"] == "interpret_conversation"),
+            None,
+        )
+        if call is None:
+            return None
+        args = call["arguments"] if isinstance(call.get("arguments"), dict) else {}
+
+        capability = args.get("capability")
+        if not isinstance(capability, str) or not capability:
+            capability = "unknown"
+        context_action = args.get("context_action")
+        if context_action not in ("continue", "push", "resume", "ambiguous"):
+            context_action = "continue"
+        context_target_label = args.get("context_target_label")
+        context_target_label = (
+            context_target_label if isinstance(context_target_label, str) and context_target_label.strip() else None
+        )
+        new_topic_label = args.get("new_topic_label")
+        new_topic_label = new_topic_label if isinstance(new_topic_label, str) and new_topic_label.strip() else None
+
+        reference_scope = args.get("reference_scope")
+        if reference_scope not in ("last_rendered", "active_topic", "paused_topic", "cart", "named", "none"):
+            reference_scope = "none"
+        reference_kind = args.get("reference_kind")
+        if reference_kind not in ("ordinal", "superlative", "comparative_pair", "all", "named", "none"):
+            reference_kind = "none"
+        reference_positions_raw = args.get("reference_positions")
+        reference_positions = (
+            [p for p in reference_positions_raw if isinstance(p, int)]
+            if isinstance(reference_positions_raw, list) else []
+        )
+        reference_attribute = args.get("reference_attribute")
+        reference_attribute = (
+            reference_attribute.strip().lower()
+            if isinstance(reference_attribute, str) and reference_attribute.strip() else None
+        )
+        reference_direction = args.get("reference_direction")
+        reference_direction = reference_direction if reference_direction in ("max", "min") else None
+        reference_names_raw = args.get("reference_names")
+        reference_names = (
+            [n for n in reference_names_raw if isinstance(n, str) and n.strip()]
+            if isinstance(reference_names_raw, list) else []
+        )
+
+        question_type = args.get("question_type")
+        if question_type not in (
+            "retrieve", "relationship", "explanation", "recommendation",
+            "compound_comparison", "alternatives", "attribute_refinement", "state_change",
+        ):
+            question_type = "retrieve"
+        secondary_reference = None
+        raw_secondary = args.get("secondary_reference")
+        if isinstance(raw_secondary, dict):
+            sec_scope = raw_secondary.get("reference_scope")
+            if sec_scope not in ("last_rendered", "active_topic", "paused_topic", "cart", "named", "none"):
+                sec_scope = "none"
+            sec_label = raw_secondary.get("context_target_label")
+            sec_label = sec_label if isinstance(sec_label, str) and sec_label.strip() else None
+            sec_kind = raw_secondary.get("reference_kind")
+            if sec_kind not in ("ordinal", "superlative", "comparative_pair", "all", "named", "none"):
+                sec_kind = "none"
+            sec_positions_raw = raw_secondary.get("reference_positions")
+            sec_positions = (
+                [p for p in sec_positions_raw if isinstance(p, int)]
+                if isinstance(sec_positions_raw, list) else []
+            )
+            sec_attribute = raw_secondary.get("reference_attribute")
+            sec_attribute = (
+                sec_attribute.strip().lower()
+                if isinstance(sec_attribute, str) and sec_attribute.strip() else None
+            )
+            sec_direction = raw_secondary.get("reference_direction")
+            sec_direction = sec_direction if sec_direction in ("max", "min") else None
+            sec_names_raw = raw_secondary.get("reference_names")
+            sec_names = (
+                [n for n in sec_names_raw if isinstance(n, str) and n.strip()]
+                if isinstance(sec_names_raw, list) else []
+            )
+            secondary_reference = SecondaryReference(
+                reference_scope=sec_scope, context_target_label=sec_label,
+                reference_kind=sec_kind, reference_positions=sec_positions,
+                reference_attribute=sec_attribute, reference_direction=sec_direction,
+                reference_names=sec_names,
+            )
+
+        cart_operation = args.get("cart_operation")
+        if cart_operation not in ("add", "remove", "set_quantity", "clear", "none"):
+            cart_operation = "none"
+
+        durable_fact_candidates: list[DurableFactCandidate] = []
+        raw_facts = args.get("durable_fact_candidates")
+        if isinstance(raw_facts, list):
+            for raw_fact in raw_facts:
+                if not isinstance(raw_fact, dict):
+                    continue
+                subject = raw_fact.get("subject")
+                statement = raw_fact.get("statement")
+                if not (isinstance(subject, str) and subject.strip() and isinstance(statement, str) and statement.strip()):
+                    continue
+                confidence = raw_fact.get("confidence")
+                confidence = confidence if isinstance(confidence, (int, float)) else 1.0
+                durable_fact_candidates.append(
+                    DurableFactCandidate(subject=subject.strip(), statement=statement.strip(), confidence=float(confidence))
+                )
+
+        conversational_repair = args.get("conversational_repair")
+        if conversational_repair not in (
+            "correction", "cancellation", "pause", "continuation", "confirmation", "none",
+        ):
+            conversational_repair = "none"
+        clarify_if_uncertain = args.get("clarify_if_uncertain")
+        clarify_if_uncertain = bool(clarify_if_uncertain) if isinstance(clarify_if_uncertain, bool) else False
+        rationale = args.get("rationale")
+        rationale = rationale.strip() if isinstance(rationale, str) else ""
+
+        # Production architecture (2026-09), Phase 1 reconciliation: this
+        # call is now the single authoritative interpretation per turn -
+        # `shopping_state` is the same raw delta-dict shape `reason()`'s
+        # own output always was (parsed by `engine/shopper_v2/
+        # understanding.py`'s existing, unchanged code); `message_intent`
+        # is derived from `capability` (the richer, already-decided
+        # signal) rather than asked for a second time.
+        shopping_state = args.get("shopping_state")
+        shopping_state = shopping_state if isinstance(shopping_state, dict) else None
+        message_intent = "conversational" if capability == "conversational" else "shopping"
+
+        secondary_operation = None
+        raw_secondary_op = args.get("secondary_operation")
+        if isinstance(raw_secondary_op, dict):
+            sec_op_capability = raw_secondary_op.get("capability")
+            if sec_op_capability in ("compare", "recommendation"):
+                sec_op_names_raw = raw_secondary_op.get("reference_names")
+                sec_op_names = (
+                    [n for n in sec_op_names_raw if isinstance(n, str) and n.strip()]
+                    if isinstance(sec_op_names_raw, list) else []
+                )
+                secondary_operation = SecondaryOperation(
+                    capability=sec_op_capability, reference_names=sec_op_names,
+                )
+
+        raw_categories = args.get("catalog_categories")
+        catalog_categories = (
+            [c.strip() for c in raw_categories if isinstance(c, str) and c.strip()]
+            if isinstance(raw_categories, list) else []
+        )
+
+        return InterpretationResult(
+            capability=capability,
+            context_action=context_action,
+            context_target_label=context_target_label,
+            new_topic_label=new_topic_label,
+            reference_scope=reference_scope,
+            reference_kind=reference_kind,
+            reference_positions=reference_positions,
+            reference_attribute=reference_attribute,
+            reference_direction=reference_direction,
+            reference_names=reference_names,
+            cart_operation=cart_operation,
+            durable_fact_candidates=durable_fact_candidates,
+            conversational_repair=conversational_repair,
+            clarify_if_uncertain=clarify_if_uncertain,
+            question_type=question_type,
+            secondary_reference=secondary_reference,
+            rationale=rationale,
+            message_intent=message_intent,
+            shopping_state=shopping_state,
+            model_name=getattr(result, "model", None),
+            secondary_operation=secondary_operation,
+            catalog_categories=catalog_categories,
         )
 
     async def interpret_mission_items(

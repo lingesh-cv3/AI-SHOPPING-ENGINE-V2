@@ -17,7 +17,14 @@ Prints a JSON line: {"proposal_id": ...}
 
 import asyncio
 import json
+import os
 import sys
+
+# A fixture that writes a row must never silently write to the protected default database: `engine.db` binds
+# DATABASE_URL (default: cv3.db) the moment it is imported, so the caller has to have chosen one. The browser specs
+# pass the isolated stack's database; run by hand, set DATABASE_URL first.
+if not os.environ.get("DATABASE_URL"):
+    sys.exit("refusing to run: DATABASE_URL is not set (the engine would bind the protected default cv3.db)")
 
 sys.path.insert(0, ".")
 

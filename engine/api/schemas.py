@@ -176,3 +176,23 @@ class HandoverDone(BaseModel):
     #: honest blank - a handover closed without a note still resolves, and the
     #: shopper simply hears nothing.
     note: str | None = None
+
+
+class HandoverClose(BaseModel):
+    """A merchant closing one of their own shopper follow-ups.
+
+    There is no `handled_by`. Who closed it is taken from the key that made the
+    request, on the server - a client-supplied name in an audit trail is whatever
+    the client felt like typing.
+
+    `note` is what the shopper is told, verbatim, in their conversation. Optional
+    here for compatibility: a follow-up handled outside the conversation (a phone
+    call) still closes, and the shopper simply hears nothing. The merchant console
+    does not offer that silently - it asks for either a message or an explicit
+    confirmation that the shopper has already been contacted directly.
+
+    Limited to the length the record keeps; a longer note is refused rather than
+    quietly cut short, because the shopper would be sent a sentence nobody wrote.
+    """
+
+    note: str | None = Field(default=None, max_length=400)

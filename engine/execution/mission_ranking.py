@@ -152,6 +152,22 @@ def _matches(text: str, phrase: str) -> bool:
     return all(_stem(w) in text for w in required)
 
 
+def _domain_compatible(domain: str | None, candidate_text: str) -> bool:
+    """Production architecture (2026-09), Phase 2: True when `domain` (the
+    topic/category label a priority was stated under, or `None` when
+    unknown) shares real word-overlap with `candidate_text` (the current
+    candidate products' own real text) - or when `domain` is `None`/has no
+    real distinctive words at all, the safe default that never drops a
+    real preference on an uncertain classification. Reuses `_tokenize`,
+    never a new matching mechanism."""
+    if not domain:
+        return True
+    words = _tokenize(domain.strip().lower())
+    if not words:
+        return True
+    return any(_stem(w) in candidate_text for w in words)
+
+
 def _uncertain(text: str, phrase: str) -> bool:
     """True when `text` shows real but INCOMPLETE evidence for `phrase` -
     never confidently confirmed (`_matches` already handles that) and never
@@ -280,6 +296,28 @@ def rank_and_filter(
     shopping_state = shopping_state or {}
     priorities = [p for p in (shopping_state.get("priorities") or []) if p]
     must_haves = [m for m in (shopping_state.get("must_have") or []) if m]
+
+    # Production architecture (2026-09), Phase 2: domain-scoped preferences.
+    # A priority stated while shopping one category ("I prefer lightweight
+    # shoes") should apply when that category comes up again, but must not
+    # blindly apply to an unrelated later category ("show me T-shirts") -
+    # see `ShoppingStateV2.preference_domains`'s own docstring. Compatibility
+    # is checked deterministically against THIS call's own `products` (the
+    # real candidate set already being ranked - no new parameter needed at
+    # any call site): real word-overlap between the domain tag and what's
+    # actually being ranked means "apply it," and so does an UNKNOWN domain
+    # (no tag recorded, e.g. an older session, or a genuinely cross-domain
+    # statement) - never silently drop a real, stated priority on an
+    # uncertain classification. Only a real, confident MISMATCH (a domain
+    # tag whose words share nothing with what's being ranked at all) is
+    # excluded from scoring.
+    preference_domains = shopping_state.get("preference_domains") or {}
+    if preference_domains and priorities:
+        candidate_text = " ".join(_text_of(p) for p in products[:20])
+        priorities = [
+            pr for pr in priorities
+            if _domain_compatible(preference_domains.get(pr), candidate_text)
+        ]
 
     # The precedence rule, applied once, here: only when THIS turn's own
     # state has nothing for priorities/must-haves at all does a durable

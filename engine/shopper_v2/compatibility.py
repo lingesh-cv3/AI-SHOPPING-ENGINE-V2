@@ -21,7 +21,7 @@ from shared.models import Product
 
 from .evidence import ProductEvidence, TurnEvidence
 from .respond import _claims_a_cart_action
-from .state import ShoppingStateV2
+from .state import ShoppingStateV2, active_topic_product_ids
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +55,22 @@ def _evidence_for(ids: list[str]) -> TurnEvidence:
 
 
 async def run_compatibility_turn(
-    *, reasoning: ReasoningService, adapter, message: str, state: ShoppingStateV2
+    *,
+    reasoning: ReasoningService,
+    adapter,
+    message: str,
+    state: ShoppingStateV2,
+    anchor_ids: list[str] | None = None,
 ) -> tuple[str, TurnEvidence, list[Product], bool]:
-    ids = list(dict.fromkeys(state.active_products))[:2]
+    """`anchor_ids`, when given (Rev. 2 migration, 2026-09), is the
+    already-verified reference from `verification.py::verify()` - every
+    topic genuinely in view, not just this turn's own active one. This
+    module never re-derives "which product" from `active_topic_product_ids`
+    when the caller already resolved it; that fallback remains only for
+    when nothing was resolvable (no reference-shaped message, or the
+    unified path declined), the same "new tried first, real fallback
+    retained" precedence every other migrated capability now uses."""
+    ids = (anchor_ids if anchor_ids is not None else active_topic_product_ids(state))[:2]
     if len(ids) < 2:
         return (_NEED_TWO_REPLY, TurnEvidence(query=None, products=[]), [], False)
 
@@ -76,9 +89,15 @@ async def run_compatibility_turn(
 
 
 async def run_complementary_turn(
-    *, reasoning: ReasoningService, adapter, message: str, state: ShoppingStateV2
+    *,
+    reasoning: ReasoningService,
+    adapter,
+    message: str,
+    state: ShoppingStateV2,
+    anchor_ids: list[str] | None = None,
 ) -> tuple[str, TurnEvidence, list[Product], bool]:
-    ids = list(dict.fromkeys(state.active_products))
+    """See `run_compatibility_turn`'s own docstring on `anchor_ids`."""
+    ids = anchor_ids if anchor_ids is not None else active_topic_product_ids(state)
     if not ids:
         return (_NEED_ONE_REPLY, TurnEvidence(query=None, products=[]), [], False)
     anchor_id = ids[0]

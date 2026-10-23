@@ -71,3 +71,8 @@ list*.py
 # test*.py above for the same reason as the Shopper V2 suite: these are checks
 # that must keep passing, not one-off scratch.
 !tests/ops/*.py
+
+# Shopper V2 engine modules whose names match the scratch patterns above (add*.py, check*.py)
+# but are imported by engine/shopper_v2/graph.py, fulfillment.py and missions.py.
+!engine/shopper_v2/add_command.py
+!engine/shopper_v2/checkout.py

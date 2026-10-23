@@ -193,6 +193,13 @@ class KettleAdapter(StandardCommerceInterface, SupportsWebhooks):
             "search_kind": "keyword_words",
             "semantic_search": False,
             "searches_collection": True,
+            # What "coffee" means at this merchant: its own departments for the
+            # drink itself (beans and blends), as opposed to equipment, gifts and
+            # subscriptions. Declared here, by the connection, so the engine never
+            # branches on a merchant: a word that names the shop's whole domain is
+            # scoped to these departments, and a merchant that declares nothing
+            # (Northfield) keeps the plain whole-catalogue behaviour.
+            "domain_categories": "Single origin|Blends",
         }
         operations[Operation.RECOVER_PAYMENT].constraints = {
             # Retrying the identical method fails again, so the engine should not

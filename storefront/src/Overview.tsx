@@ -1,4 +1,5 @@
 import { useApprovalTotal } from "./merchantApprovalsStore";
+import { useFollowUpTotal } from "./merchantFollowUpsStore";
 import { useEffect, useState } from "react";
 import {
   api,
@@ -64,6 +65,8 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
   // One count of decisions waiting on the merchant, from the same store as the nav
   // badge and the Approvals page. Null means not known yet - never shown as 0.
   const approvalsWaiting = useApprovalTotal();
+  // Same idea for shoppers promised a follow-up: one count, null while unknown.
+  const followUpsWaiting = useFollowUpTotal();
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [merchantName, setMerchantName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -197,6 +200,13 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
       label: `${approvalsWaiting} decision${approvalsWaiting === 1 ? "" : "s"} waiting on you`,
       detail: "The engine is holding these until you approve or reject them. Each expires if nobody acts.",
       section: "approvals",
+    });
+  }
+  if (followUpsWaiting !== null && followUpsWaiting > 0) {
+    attention.push({
+      label: `${followUpsWaiting} shopper${followUpsWaiting === 1 ? " is" : "s are"} waiting for a follow-up`,
+      detail: "The assistant told them a person from your shop would get in touch.",
+      section: "follow-ups",
     });
   }
   if (catalog && !catalog.reachable) {

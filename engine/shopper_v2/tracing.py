@@ -69,6 +69,24 @@ class TurnTrace:
     cart_intent_checked: bool = False
     cart_intent_detected: bool | None = None
 
+    #: Production architecture (2026-09), Phase 4: whether `node_route_
+    #: capability`'s own real interpretation attempt (`interpret_turn`/
+    #: `verify()`) succeeded this turn - `None` when never attempted at
+    #: all (nothing to interpret, or gated out), `False` when attempted
+    #: and the provider was unavailable/returned nothing, `True` when it
+    #: produced a real claim. The signal `degraded_disclaimer()` (graph.py)
+    #: checks alongside `understanding_used_model` to distinguish "nothing
+    #: needed interpreting" from "tried and failed" - never a spurious
+    #: disclaimer on an ordinary, fully-deterministic turn.
+    interpretation_used_model: bool | None = None
+    #: Spelling/domain-word normalization applied to the search query this
+    #: turn, and whether the normalized or the literal search was kept.
+    query_normalization: dict | None = None
+    #: Store-level discovery ("what do you have?"): the merchant's real categories offered as tappable
+    #: choices, and why there were none ("empty"/"unavailable"). See `store_discovery.py`.
+    category_choices: list[str] | None = None
+    store_discovery: str | None = None
+
     response_used_model: bool | None = None
 
     model_calls: int = 0
@@ -112,6 +130,10 @@ class TurnTrace:
             "semantic_retrieval_verified": self.semantic_retrieval_verified,
             "cart_intent_checked": self.cart_intent_checked,
             "cart_intent_detected": self.cart_intent_detected,
+            "interpretation_used_model": self.interpretation_used_model,
+            "query_normalization": self.query_normalization,
+            "category_choices": list(self.category_choices) if self.category_choices else [],
+            "store_discovery": self.store_discovery,
             "response_used_model": self.response_used_model,
             "model_calls": self.model_calls,
             "stage_timings_s": dict(self.stage_timings_s),

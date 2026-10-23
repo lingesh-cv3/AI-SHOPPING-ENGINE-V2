@@ -86,6 +86,16 @@ class Capability(str, Enum):
     #: signal always wins even if the model additionally chatted. Never a
     #: phrase-list match; see `route`'s own docstring for the exact rule.
     CONVERSATIONAL = "conversational"
+    #: Rev. 2 architecture (2026-09) - `engine/shopper_v2/answer.py`. A
+    #: question whose SHAPE the shopper explicitly asked for (a
+    #: relationship, an explanation, a single recommendation, more
+    #: alternatives, a stated-preference re-rank) - decided by
+    #: `InterpretationResult.question_type`, a real per-turn model
+    #: judgment grounded in the actual conversation, never a fixed phrase
+    #: list. Reached only via `node_route_capability`'s own interpretation
+    #: call - never `route()`'s bare `hinted_action_type` mapping, which
+    #: has no way to know a question's shape.
+    ANSWER_QUESTION = "answer_question"
     UNKNOWN = "unknown"
 
 
@@ -171,7 +181,64 @@ _COMPARISON_WORDS = (
 _HISTORICAL_REFERENCE_WORDS = (
     "earlier", "before", "previously", "you showed", "you had shown",
     "showed me", "showed earlier", "that first one", "originally",
+    "showed above", "shown above", "listed above", "recommended above", "mentioned above",
 )
+
+#: A comparison that points at a whole group already on screen ("compare both",
+#: "compare these two", "compare both the shoes showed above") and names no
+#: second side. Closed-class markers, same discipline as the lists above:
+#: never sufficient alone - the caller still requires two or more real
+#: products actually in view.
+_COLLECTIVE_MARKERS = (
+    " both ", " these ", " those ", " them ", " the two ", " all of ",
+    " showed above", " shown above", " listed above",
+)
+_SECOND_SIDE_MARKERS = (" with ", " against ", " vs", " versus ", " to the ", " and the ", " and a ", " and an ")
+
+
+def looks_like_collective_comparison(message: str) -> bool:
+    """A comparison that selects a GROUP out of what is already in view and
+    names no second side. Besides the collective markers above, any message
+    the structural group-selector resolver reads as two or more positions
+    ("the first two", "the last three", "1 and 3", "the first and third") is
+    one - the same resolver `compare` itself uses, not a second word list.
+    Step 22 live finding: "compare the first two" after a topic switch was
+    not recognised here, so the model's unconfirmed two-sided claim (second
+    side = the paused socks topic) decided the turn."""
+    lowered = f" {message.lower().strip()} "
+    if not looks_like_comparison_request(message):
+        return False
+    if any(m in lowered for m in _SECOND_SIDE_MARKERS):
+        return False
+    if any(m in lowered for m in _COLLECTIVE_MARKERS):
+        return True
+    from .reference_resolution import resolve_group_selector
+
+    # Probed against a large nominal group: only the SHAPE of the selection
+    # matters here (is it a multi-item pick?); the real positions are
+    # re-resolved against the real view by `compare`.
+    selected = resolve_group_selector(message, 50)
+    return selected is not None and 2 <= len(selected) < 50
+
+
+_RESUME_PHRASES = (
+    " go back ", " going back ", " back to ", " return to ", " returning to ", " switch back ",
+    " come back to ", " take me back ", " back on ",
+)
+
+
+def looks_like_resume_request(message: str) -> bool:
+    """True when `message` asks to GO BACK to something discussed earlier
+    ("go back to the running shoes I saw earlier") rather than to compare or
+    point at products. Such a message carries a historical word ("earlier")
+    that would otherwise make the reference backstop route it to COMPARE and
+    answer "I don't have two products in view"; it is a topic resume, handled
+    by the Focus Stack. Closed-class phrases, never sufficient alone to decide
+    meaning - a comparison word always wins."""
+    if looks_like_comparison_request(message):
+        return False
+    lowered = f" {message.lower().strip()} "
+    return any(phrase in lowered for phrase in _RESUME_PHRASES)
 
 
 def looks_like_historical_reference(message: str) -> bool:
@@ -196,13 +263,41 @@ _RECOMMENDATION_WORDS = (
 )
 
 
+#: A message whose ONLY content is a recommendation verb plus these empty
+#: words is a bare request to pick from what is already in view ("recommend
+#: one", "recommend any one please", "pick one"). Structural, not a phrase
+#: list: a single extra content word ("recommend a waterproof trail shoe",
+#: "recommend socks") makes it a search again. Live-reproduced (Step 22,
+#: OpenAI gpt-4o-mini, 3 of 3): the model read "recommend one" after a
+#: comparison as a discovery search for the word "recommend", found nothing,
+#: and the reference backstop never fired because this detector did not
+#: recognise the message.
+_RECOMMEND_VERBS = frozenset({"recommend", "suggest", "pick", "choose", "select"})
+_RECOMMEND_EMPTY_WORDS = frozenset({
+    "one", "any", "please", "for", "me", "just", "of", "them", "these", "those", "the", "two", "both",
+    "something", "anything",
+})
+
+
+def looks_like_bare_recommendation_imperative(message: str) -> bool:
+    import re
+
+    words = re.findall(r"[a-z']+", message.lower())
+    return (
+        bool(words)
+        and any(w in _RECOMMEND_VERBS for w in words)
+        and all(w in _RECOMMEND_VERBS or w in _RECOMMEND_EMPTY_WORDS for w in words)
+    )
+
+
 def looks_like_recommendation_request(message: str) -> bool:
     """True when `message` itself contains a real, closed-class
-    recommendation-follow-up phrase - never sufficient alone; the caller
-    still requires 2+ real, already-tracked products before trusting
-    this."""
+    recommendation-follow-up phrase, or is a bare recommendation imperative
+    (a recommendation verb and nothing else of substance) - never
+    sufficient alone; the caller still requires 2+ real, already-tracked
+    products before trusting this."""
     lowered = f" {message.lower().strip()} "
-    return any(word in lowered for word in _RECOMMENDATION_WORDS)
+    return any(word in lowered for word in _RECOMMENDATION_WORDS) or looks_like_bare_recommendation_imperative(message)
 
 
 def looks_like_comparison_request(message: str) -> bool:
@@ -275,6 +370,31 @@ def looks_like_cart_intelligence_request(message: str) -> bool:
     return any(word in lowered for word in _CART_INTELLIGENCE_WORDS)
 
 
+#: Forensic gap fix (2026-09): "What is my preference now?" - a genuine
+#: question about the shopper's OWN currently-stated state (priorities/
+#: must-haves/budget), not about any product - had no shape for
+#: `question_type` to name at all, so it fell straight through to a plain
+#: literal catalog search for the sentence itself ("no_candidates").
+#: Same closed-class-word-list discipline as `_CART_INTELLIGENCE_WORDS`
+#: immediately above (a deterministic backstop, never a model call, never
+#: a second competing classifier) - this is a bare STATE echo (what did I
+#: already say), symmetric to `CART_STATUS`'s own bare cart-contents echo,
+#: never a ranking/comparison/explanation question about products.
+_PREFERENCE_STATUS_WORDS = (
+    "my preference", "my preferences", "my priorities", "what have i told you",
+    "what did i say i want", "what have i said i want", "what do you know about my",
+)
+
+
+def looks_like_preference_status_request(message: str) -> bool:
+    """True when `message` itself contains a real, closed-class "what have
+    I stated so far" phrase - a bare echo of `new_state`'s own real,
+    already-persisted fields, never a guess at wording not already
+    covered here."""
+    lowered = f" {message.lower().strip()} "
+    return any(word in lowered for word in _PREFERENCE_STATUS_WORDS)
+
+
 #: Manual-test finding: the deterministic backstops above only ever
 #: overrode `capability` when `route()`'s own single-shot classification
 #: had landed on DISCOVER or CONVERSATIONAL - the two "the model was not
@@ -313,6 +433,51 @@ SOFT_CAPABILITIES = frozenset(
 )
 
 
+#: Closed-class explicit-cart-verb vocabulary - same discipline as
+#: `_COMPARISON_WORDS`/`_HISTORICAL_REFERENCE_WORDS`/`_RECOMMENDATION_WORDS`
+#: above: a small, fixed, structurally reliable set of words that mean the
+#: same commerce-action thing regardless of what else is in the sentence.
+#: Live-reproduced gap this closes: "add both shoes and socks to my cart"
+#: contains "both" - a real `looks_like_group_or_ordinal_reference` hit -
+#: so `node_route_capability`'s own reference backstop (below) claimed
+#: `Capability.COMPARE` for it BEFORE `resolve_cart_target` (the one
+#: authoritative cart-intent check, per this module's own docstring) ever
+#: got a chance to decide otherwise; when that separate, correct check
+#: then (as it sometimes does, being its own LLM call with its own
+#: variance) declined this exact multi-category phrasing, capability was
+#: already irreversibly COMPARE, producing a dead-end "I don't have two
+#: products in view to compare yet" reply to what was unambiguously a
+#: cart-add command. This is never itself authorization for a cart
+#: mutation (only `resolve_cart_target` is, unchanged) - it only stops the
+#: reference backstop from stealing the turn away from that check, so an
+#: explicit "add"/"buy"/"purchase" command always gets to fall through to
+#: DISCOVER (never wrongly to COMPARE) if the cart check itself declines.
+#:
+#: Widened (2026-09, Phase 3/5 follow-up): originally add-only, which meant
+#: "remove"/"clear" never reached the Rev. 2 single authoritative
+#: interpretation call's own cart-resolution block (`node_route_capability`
+#: below) at all - they fell straight through to `resolve_cart_target`'s
+#: OWN, separate `interpret_cart_reference` call, a real second
+#: interpretation authority for exactly the verbs that most need the
+#: primary call's real conversational context (a bare "remove it"/"clear
+#: my cart" has no content of its own beyond the verb - the SAME context
+#: the single call already has and the separate call has to re-derive from
+#: scratch). Closed-class, symmetric with "add"/"buy"/"purchase" - still
+#: never itself authorization for a mutation; only decides which
+#: resolution path a message reaches.
+_EXPLICIT_CART_VERB_WORDS = ("add", "buy", "purchase", "remove", "clear", "empty")
+
+
+def looks_like_explicit_cart_command(message: str) -> bool:
+    """True when `message` itself contains a real, closed-class explicit
+    cart-action verb - never itself cart-intent confirmation (that stays
+    `resolve_cart_target`'s job alone); only used to withhold the
+    reference backstop's own COMPARE override so that check keeps its
+    first say."""
+    lowered = f" {message.lower().strip()} "
+    return any(f" {w} " in lowered for w in _EXPLICIT_CART_VERB_WORDS)
+
+
 def looks_like_reference(message: str) -> bool:
     """Union of every closed-class marker meaning 'point at something
     already shown or discussed' rather than naming a new search: a
@@ -339,3 +504,57 @@ def looks_like_reference(message: str) -> bool:
         # model's own SOFT guess, so it never reached COMPARE at all.
         or looks_like_comparative_pair_reference(message)
     )
+
+
+#: Deliberately broad, deliberately CHEAP - a real question mark, or a
+#: message opening with a real interrogative/state-change word. NEVER the
+#: decision about what the shopper meant (that is
+#: `InterpretationResult.question_type`'s job, a genuine per-turn model
+#: judgment) - purely a prefilter deciding whether the bounded
+#: interpretation call is worth making at all, the exact same role
+#: `looks_like_reference` already plays. False positives just cost one
+#: extra bounded call; false negatives mean a genuine question gets no
+#: interpretation attempt, which is the more expensive mistake - so this
+#: stays intentionally generous rather than a tight per-phrase list.
+_QUESTION_OPENERS = (
+    "why", "what", "which", "how", "who", "when", "where", "compare",
+    "no,", "no ", "never mind", "forget", "wait", "actually",
+)
+
+
+def looks_like_question(message: str) -> bool:
+    """True when `message` is shaped like a question or a state-change
+    utterance worth a real interpretation attempt - see this function's
+    own module-level comment on why this stays broad."""
+    stripped = message.strip().lower()
+    if not stripped:
+        return False
+    if "?" in stripped:
+        return True
+    return any(stripped.startswith(w) for w in _QUESTION_OPENERS)
+
+
+#: The correction/cancellation/pause-shaped subset of `_QUESTION_OPENERS`
+#: - deliberately narrower than that full list (excludes plain
+#: interrogatives like "why"/"what", which DO name real new questions and
+#: should push a real topic when they do). Used ONLY to decide whether
+#: `node_topic_transition` should defer creating a topic at all - never to
+#: decide what the message MEANS (that stays `question_type`/
+#: `conversational_repair`, a real per-turn model judgment). A message
+#: that starts this way is overwhelmingly about something ALREADY said,
+#: never a fresh product topic in its own right - pushing a new topic
+#: labeled with the raw correction sentence itself ("Actually I meant the
+#: shoes") is exactly the naturalness bug this exists to prevent.
+_STATE_CHANGE_OPENERS = (
+    "no,", "no ", "never mind", "forget", "wait", "actually",
+)
+
+
+def looks_like_state_change_shape(message: str) -> bool:
+    """True when `message` opens with a real, closed-class correction/
+    cancellation/pause marker - see this function's own module-level
+    comment on scope and intent. Never sufficient alone to decide
+    MEANING; only used to defer a topic push, same discipline
+    `_has_new_mission_shape` already uses for its own deferral."""
+    stripped = message.strip().lower()
+    return any(stripped.startswith(w) for w in _STATE_CHANGE_OPENERS)

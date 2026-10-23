@@ -2742,12 +2742,13 @@ async def reject_proposal(
     return {"proposal_id": proposal_id, "state": "REJECTED"}
 
 
-@router.post("/proposals/{proposal_id}/accept", response_model=ChatReply)
-async def accept_proposal(
+async def accept_cart_proposal_core(
+    *,
+    connection_id: str,
+    session_id: str,
+    cart_id: str,
     proposal_id: str,
-    req: ProposalCartRequest,
-    key=Depends(any_key),
-    who: Visitor = Depends(visitor),
+    shopper_id: str | None,
 ) -> ChatReply:
     """The shopper said yes. Only now does anything actually change - and
     only after re-checking the proposal against live data, because a
@@ -2755,19 +2756,24 @@ async def accept_proposal(
     could have sold out, its price could have moved, or the proposal could
     simply be old enough that trusting it blindly would be trusting a
     stale guess rather than a current fact.
-    """
-    belongs_to(key, req.connection_id)
-    await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
 
-    proposal = await db.cart_proposals.get(req.connection_id, proposal_id)
-    if proposal is None or proposal["cart_id"] != req.cart_id:
+    Extracted (Production architecture, Phase 3: unified PendingAction
+    confirmation) from the REST `/proposals/{id}/accept` route below so a
+    V2 conversational "yes" and a REST accept-tap execute through the
+    EXACT same re-validation/idempotency/execution logic - never a second,
+    parallel accept path. The caller is responsible for every ownership/
+    auth check (`belongs_to`/`_mine`/V2's own `require_owner`) BEFORE
+    calling this - this function assumes the cart/proposal are already
+    known to belong to the caller."""
+    proposal = await db.cart_proposals.get(connection_id, proposal_id)
+    if proposal is None or proposal["cart_id"] != cart_id:
         raise HTTPException(404, "no such proposal")
     if proposal["state"] != "PENDING":
         raise HTTPException(409, f"that proposal is already {proposal['state'].lower()}")
 
-    adapter = engine.registry.adapter_for(req.connection_id)
+    adapter = engine.registry.adapter_for(connection_id)
     if adapter is None:
-        raise HTTPException(404, f"unknown connection '{req.connection_id}'")
+        raise HTTPException(404, f"unknown connection '{connection_id}'")
 
     stale_reason = None
     if db.cart_proposals.is_stale(proposal):
@@ -2796,10 +2802,10 @@ async def accept_proposal(
             stale_reason = "the price has changed since I suggested that"
 
     if stale_reason:
-        await db.cart_proposals.set_state(req.connection_id, proposal_id, state="EXPIRED")
+        await db.cart_proposals.set_state(connection_id, proposal_id, state="EXPIRED")
         return ChatReply(
             reply=f"I can't do that one anymore - {stale_reason}. Want me to look again?",
-            session_id=req.session_id,
+            session_id=session_id,
             case_id=None,
             used_model=False,
             action_taken="PROPOSE_CART_CHANGE",
@@ -2843,13 +2849,18 @@ async def accept_proposal(
         # approval), never WHAT it does.
         parameters_by_step.append((ActionType.CLEAR_CART, {}))
 
-    await db.cart_proposals.set_state(req.connection_id, proposal_id, state="ACCEPTED")
+    # Atomic claim: only the caller that actually moves PENDING -> ACCEPTED
+    # may execute. A concurrent accept (REST tap + conversational "yes",
+    # a double tap) that lost the race sees a non-PENDING proposal here and
+    # must not run a second copy of the change.
+    if not await db.cart_proposals.claim_pending(connection_id, proposal_id, state="ACCEPTED"):
+        raise HTTPException(409, "that proposal is already decided")
     try:
         await shopper_events.record(
-            connection_id=req.connection_id,
-            session_id=req.session_id,
+            connection_id=connection_id,
+            session_id=session_id,
             event_type=shopper_events.EventType.PROPOSAL_ACCEPTED,
-            shopper_id=await who.shopper_id_for(req.connection_id),
+            shopper_id=shopper_id,
             product_id=proposal.get("product_id"),
             detail={"proposal_id": proposal_id},
         )
@@ -2863,9 +2874,9 @@ async def accept_proposal(
     needs_choice_options: list[dict] = []
     for step_type, step_params in parameters_by_step:
         executed, case_id, awaiting = await _run_trusted_cart_action(
-            connection_id=req.connection_id,
-            session_id=req.session_id,
-            cart_id=req.cart_id,
+            connection_id=connection_id,
+            session_id=session_id,
+            cart_id=cart_id,
             action_type=step_type,
             parameters=step_params,
             rationale=f"shopper accepted proposal {proposal_id}",
@@ -2905,7 +2916,7 @@ async def accept_proposal(
         "succeeded": all_succeeded,
     }
     await db.cart_proposals.set_state(
-        req.connection_id,
+        connection_id,
         proposal_id,
         # NEEDS_CHOICE is its own terminal state, distinct from FAILED: the
         # product is real and available, it simply has options the proposal
@@ -2921,11 +2932,11 @@ async def accept_proposal(
         execution_result=execution_result,
     )
     if all_succeeded:
-        executed_shopper_id = await who.shopper_id_for(req.connection_id)
+        executed_shopper_id = shopper_id
         try:
             await shopper_events.record(
-                connection_id=req.connection_id,
-                session_id=req.session_id,
+                connection_id=connection_id,
+                session_id=session_id,
                 event_type=shopper_events.EventType.PROPOSAL_EXECUTED,
                 shopper_id=executed_shopper_id,
                 product_id=proposal.get("product_id"),
@@ -2952,11 +2963,11 @@ async def accept_proposal(
                 category = next(iter(fresh.categories or []), None)
                 if category:
                     await db.memory_facts.upsert(
-                        req.connection_id,
+                        connection_id,
                         executed_shopper_id,
                         key=f"prefers_{category.strip().lower().replace(' ', '_')}",
                         value=category.strip(),
-                        source_session_id=req.session_id,
+                        source_session_id=session_id,
                         provenance="derived_from_purchase",
                         confidence=0.6,
                     )
@@ -2989,8 +3000,8 @@ async def accept_proposal(
             )
 
     await session_store.add_turn(
-        session_id=req.session_id,
-        connection_id=req.connection_id,
+        session_id=session_id,
+        connection_id=connection_id,
         speaker="assistant",
         text=reply,
         case_id=last_case_id,
@@ -2999,7 +3010,7 @@ async def accept_proposal(
 
     return ChatReply(
         reply=reply,
-        session_id=req.session_id,
+        session_id=session_id,
         case_id=last_case_id,
         used_model=False,
         action_taken="PROPOSE_CART_CHANGE",
@@ -3009,6 +3020,28 @@ async def accept_proposal(
         cart_changed=all_succeeded,
         selected_action=change_type,
         risk_outcome=None,
+    )
+
+
+@router.post("/proposals/{proposal_id}/accept", response_model=ChatReply)
+async def accept_proposal(
+    proposal_id: str,
+    req: ProposalCartRequest,
+    key=Depends(any_key),
+    who: Visitor = Depends(visitor),
+) -> ChatReply:
+    """REST accept-tap. Auth/ownership only - the actual re-validation and
+    execution logic lives in `accept_cart_proposal_core`, shared with V2's
+    conversational confirmation path (Production architecture, Phase 3)."""
+    belongs_to(key, req.connection_id)
+    await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
+    shopper_id = await who.shopper_id_for(req.connection_id)
+    return await accept_cart_proposal_core(
+        connection_id=req.connection_id,
+        session_id=req.session_id,
+        cart_id=req.cart_id,
+        proposal_id=proposal_id,
+        shopper_id=shopper_id,
     )
 
 

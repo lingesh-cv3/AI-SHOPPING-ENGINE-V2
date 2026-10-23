@@ -882,6 +882,10 @@ export const api = {
     cartId?: string,
     friction?: string,
     selectedVariantId?: string,
+    /** The term the shopper searched for, sent as structured data with a
+     *  DEAD_SEARCH friction so the engine can search for it itself rather
+     *  than only listing departments. Ignored by the engine otherwise. */
+    frictionQuery?: string,
   ) =>
     call<ChatReplyV2>("/api/v2/chat", {
       method: "POST",
@@ -892,8 +896,26 @@ export const api = {
         cart_id: cartId ?? null,
         friction: friction ?? null,
         selected_variant_id: selectedVariantId ?? null,
+        friction_query: frictionQuery ?? null,
       }),
     }),
+
+  /** After a product-card tap changed the cart: lets an open guided
+   *  shopping mission confirm the add from the real cart and open its next
+   *  stage (or close with the summary). `reply` is null when there is no
+   *  mission or nothing new in the cart. Reads the cart only. */
+  advanceMission: (sessionId: string, cartId: string) =>
+    call<{ reply: string | null; products: ProductSummaryV2[] }>(
+      "/api/v2/chat/mission/advance",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          connection_id: getConnection(),
+          session_id: sessionId,
+          cart_id: cartId,
+        }),
+      },
+    ),
 };
   /** Ask the engine what it would do about a detected friction. */
  

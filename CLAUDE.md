@@ -100,10 +100,23 @@ in PROGRESS.md and Completed.md, not here.
 **V2 owns:** understanding (message → typed `StateDelta`), state
 (`ShoppingStateV2`, a typed view over the same `shopping_states` table),
 context assembly, retrieval, evidence, response grounding. It can act
-(cart proposals, checkout, payment recovery) but every action still only
-constructs a candidate (`PROPOSE_CART_CHANGE` / `PREPARE_CHECKOUT` /
-`CHECK_ORDER_STATUS` / recovery) — never a direct mutation. A cart only
-changes after the shopper's own call to `POST /api/chat/proposals/{id}/accept`.
+(cart proposals, checkout, payment recovery); every action constructs a
+candidate (`PROPOSE_CART_CHANGE` / `PREPARE_CHECKOUT` / `CHECK_ORDER_STATUS` /
+recovery) and the model never authorizes a mutation. A cart changes only
+through the shopper's own authorization, by one of two routes, both ending in
+the same `accept_cart_proposal_core` (live stock/price re-check, atomic claim,
+Decision → Risk Gate → Execution → Adapter):
+`POST /api/chat/proposals/{id}/accept` (a tap or a typed "yes"), or an
+**explicit typed add command** (`engine/shopper_v2/add_command.py`: an add
+verb — add/buy/purchase/put-in-cart — that is not a question, negation,
+conditional, deferral or quotation) that executes directly **only when the
+product and any required variant are unambiguous**. If the product, the
+reference ("it"/"that one"), the size/variant or the target could resolve more
+than one way, V2 asks a clarification before mutating; a sized product is not
+added until the shopper chooses the size. Questions, negations, hypotheticals,
+quoted text and vague agreement ("sounds good", "I'll take it") never mutate.
+Discovery and recommendations are read-only. Payment is separate and always
+the shopper's own explicit authorization.
 
 **V2 must never import or bypass:** the Decision Engine, Risk Gate,
 execution's mutation paths, adapters' write methods, or anything cart/

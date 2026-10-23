@@ -83,6 +83,44 @@ def _set_cookie(response: Response, request: Request, token: str) -> None:
     )
 
 
+async def _remembered_cart_wins(connection_id: str, guest_cart: str, remembered: str) -> bool:
+    """Whether the cart remembered for the account should be kept over the one this tab holds.
+
+    The tab's cart used to ALWAYS win ("what they are holding now"). But after a sign-out the tab cannot
+    read the shopper's own cart (the account owns it), so the storefront starts a fresh EMPTY guest cart -
+    and signing back in then re-pointed the account at that empty cart, abandoning the one that held the
+    product (user-reported 2026-10-21). A tab cart that holds nothing has nothing to protect, so:
+
+      * the tab's cart really holds something        -> it wins (a fresh choice is never discarded)
+      * the tab's cart is empty or cannot be read    -> the remembered cart is kept, provided it still
+                                                        exists; the platform is the source of truth
+      * the remembered cart is definitively gone     -> the tab's cart wins (CART_NOT_FOUND/CART_INVALID)
+      * the remembered cart cannot be read right now -> kept: a transient platform error is never taken
+                                                        as "the cart is gone"
+    Nothing is deleted either way; the cart not chosen is simply no longer pointed at.
+    """
+    from shared.models.errors import CommerceError, ErrorCode
+
+    from .deps import engine
+
+    adapter = engine.registry.adapter_for(connection_id)
+    if adapter is None:
+        return False
+    try:
+        guest_lines = len((await adapter.get_cart(guest_cart)).lines)
+    except Exception:  # noqa: BLE001 - unknown is not "empty"; fall through to the remembered cart's own check
+        guest_lines = None
+    if guest_lines:
+        return False
+    try:
+        await adapter.get_cart(remembered)
+        return True
+    except CommerceError as exc:
+        return exc.code not in (ErrorCode.CART_NOT_FOUND, ErrorCode.CART_INVALID)
+    except Exception:  # noqa: BLE001 - transient failure: keep what was persisted
+        return True
+
+
 async def _finish(
     shopper: dict,
     connection_id: str,
@@ -153,12 +191,24 @@ async def _finish(
         shopper["shopper_id"], connection_id
     )
 
-    if guest_cart:
-        # What they are holding now wins, and becomes theirs.
-        await db.shopper_carts.remember(
-            shopper["shopper_id"], connection_id, guest_cart
-        )
-        cart_id = guest_cart
+    # A cart named in the request is only theirs if they actually held it (the adoption above checked) - an
+    # id merely NAMED by a signed-in caller must never become the account's cart.
+    guest_is_theirs = bool(guest_cart) and (
+        await db.owners.owner_of(connection_id, db.owners.CART, guest_cart)
+        == shopper["shopper_id"]
+    )
+
+    if guest_is_theirs:
+        if remembered and remembered != guest_cart and await _remembered_cart_wins(
+            connection_id, guest_cart, remembered
+        ):
+            cart_id = remembered
+        else:
+            # What they are holding now wins, and becomes theirs.
+            await db.shopper_carts.remember(
+                shopper["shopper_id"], connection_id, guest_cart
+            )
+            cart_id = guest_cart
     else:
         cart_id = remembered
 

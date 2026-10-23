@@ -1,8 +1,9 @@
 """Phase 3, first slice: Comparison.
 
-Reads `ShoppingStateV2.active_products` (populated by `orchestrator.py`
-after a discovery turn - see its own comment) to resolve "compare the top
-two" without needing the model's discarded `ProposedAction` parameters.
+Reads the active Focus Stack topic's product ids (`active_topic_product_ids`,
+falling back to legacy `active_products` only for a pre-Focus-Stack session)
+to resolve "compare the top two" without needing the model's discarded
+`ProposedAction` parameters.
 Both products are ALWAYS fetched fresh via `adapter.get_product` - never
 recalled from anything cached earlier in the conversation - mirroring V1's
 own COMPARE_PRODUCTS guarantee (Completed.md #27) exactly, reused rather
@@ -37,8 +38,15 @@ from .reference_resolution import (
     resolve_comparative_pair,
     resolve_group_selector,
 )
-from .respond import _claims_a_cart_action
-from .state import ShoppingStateV2, recent_relevant_product_ids
+from .respond import _claims_a_cart_action, grounded_reply_or_fallback
+from .retrieval import retrieve
+from .state import (
+    ShoppingStateV2,
+    active_topic_product_ids,
+    current_view_product_ids,
+    paused_topic_product_groups,
+    recent_relevant_product_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +84,22 @@ async def _best_matching_historical_group(
     the shopper most recently saw, matching what "earlier" colloquially
     means in an ongoing conversation - not whichever matching group
     happened to be stored first."""
-    groups = [g for g in state.recent_product_groups if g]
+    groups = paused_topic_product_groups(state)
+    # A topic the Focus Stack has just RESUMED for this very message ("compare
+    # both the shoes showed above" matches the paused shoes topic by label, so
+    # the stack makes it active) is no longer "paused" - but what is rendered
+    # on screen is still the topic the shopper stepped away from. Its products
+    # are therefore a candidate group too (most recent first), exactly when it
+    # is not what the shopper is currently looking at.
+    active_ids = active_topic_product_ids(state)
+    if active_ids and set(active_ids) != set(current_view_product_ids(state)):
+        groups = [active_ids, *groups]
     if not groups:
         return []
 
     best_score = 0
     best_products: list[Product] = []
-    for group_ids in reversed(groups):
+    for group_ids in groups:
         products: list[Product] = []
         for pid in group_ids:
             try:
@@ -160,8 +177,14 @@ async def run_compare_turn(
     adapter,
     message: str,
     state: ShoppingStateV2,
+    resolved_ids: list[str] | None = None,
 ) -> tuple[str, TurnEvidence, list[Product], bool]:
-    """Returns (reply, evidence, fetched products, used_model)."""
+    """Returns (reply, evidence, fetched products, used_model).
+
+    `resolved_ids`, when given, is the EXACT product set the turn's single
+    interpretation already resolved and verified ("compare both", "the
+    first two") - the comparison runs over precisely those products, with
+    no view/history/named-widening heuristics layered on top."""
     # Contextual reference resolution fix: a BARE comparative-pair
     # question ("which one was cheaper?", with no "earlier"/"before"
     # wording) means the products CURRENTLY in view - `active_products`,
@@ -176,10 +199,10 @@ async def run_compare_turn(
     # message itself carries no historical-reference wording (that case
     # is handled by the historical-group branch below, which explicitly
     # reaches into the ledger on purpose).
-    if looks_like_comparative_pair_reference(message) and not looks_like_historical_reference(
+    if resolved_ids is None and looks_like_comparative_pair_reference(message) and not looks_like_historical_reference(
         message
     ):
-        current_ids = list(dict.fromkeys(state.active_products))
+        current_ids = current_view_product_ids(state)
         current_products: list[Product] = []
         for pid in current_ids:
             try:
@@ -223,7 +246,7 @@ async def run_compare_turn(
     # ones. Tried first, and only when it actually finds a real matching
     # group - falls through to the ordinary 2-item path otherwise, so a
     # genuine "compare both" is never affected by this branch.
-    if looks_like_historical_reference(message):
+    if resolved_ids is None and looks_like_historical_reference(message):
         historical_products = await _best_matching_historical_group(message, state, adapter)
         if historical_products:
             evidence = already_verified_evidence(
@@ -274,7 +297,19 @@ async def run_compare_turn(
                 shopping_state=state.as_prompt_dict(),
             )
             if synthesis.text and not _claims_a_cart_action(synthesis.text):
-                return (synthesis.text, evidence, historical_products, synthesis.used_model)
+                # Production architecture (2026-09), Phase 5: shared
+                # grounded-reasoning gate - see `respond.py::
+                # grounded_reply_or_fallback`'s own docstring. A use-case
+                # claim ("better for long runs") reaches the shopper only
+                # when its own cited justification is real, checkable
+                # product text - never uncited free prose.
+                text, used_model = grounded_reply_or_fallback(
+                    cited_reason=synthesis.cited_reason, text=synthesis.text,
+                    products=historical_products,
+                    fallback=_deterministic_comparison(historical_products),
+                    used_model=synthesis.used_model,
+                )
+                return (text, evidence, historical_products, used_model)
 
     # Batch 2: resolves from current AND historical context - see
     # `state.recent_relevant_product_ids`'s own docstring for the real,
@@ -284,26 +319,76 @@ async def run_compare_turn(
     # and third" genuinely need the FULL currently-relevant group to
     # resolve against; the fixed-at-2 cap made those structurally
     # unresolvable regardless of what the shopper actually said.
-    ids = recent_relevant_product_ids(state, minimum=2, cap=10)
-    if len(ids) < 2:
-        return (_NEED_TWO_REPLY, TurnEvidence(query=None, products=[]), [], False)
-
+    # Root-cause fix (2026-09): a RELATIVE reference ("the first two",
+    # "both", "these", "compare them") binds to what is on screen right
+    # now (`current_view_product_ids`), never to whatever
+    # `recent_relevant_product_ids(minimum=2)` had to walk into a paused
+    # topic to find - live-reproduced: "compare the first two" after a
+    # single-result "waterproof trail shoes" search paired that one shoe
+    # with Performance Socks from an earlier topic. Another topic joins
+    # the comparison only when the message itself NAMES it (its own words
+    # score against that topic's real products - the same discipline
+    # `_best_matching_historical_group` already uses), never by mere
+    # recency.
+    view_ids = list(resolved_ids)[:10] if resolved_ids else current_view_product_ids(state)[:10]
     products: list[Product] = []
-    for pid in ids:
+    for pid in view_ids:
         try:
             products.append(await adapter.get_product(pid))
         except Exception:  # noqa: BLE001 - degrade honestly, never raise to the shopper
             logger.warning("shopper_v2 compare: get_product failed for %r", pid, exc_info=True)
 
+    if len(products) < 2 and resolved_ids is None:
+        named_group = await _best_matching_historical_group(message, state, adapter)
+        known = {p.product_id for p in products}
+        products = products + [p for p in named_group if p.product_id not in known]
+
     if len(products) < 2:
-        return (_FETCH_FAILED_REPLY, TurnEvidence(query=None, products=[]), products, False)
+        if len(view_ids) >= 2:
+            return (_FETCH_FAILED_REPLY, TurnEvidence(query=None, products=[]), products, False)
+        # Nothing else the shopper is looking at, and the message names no
+        # other topic - say so honestly, naming what IS in view.
+        if products:
+            return (
+                "I don't have two products in view to compare yet - I currently "
+                f"have {products[0].title} in view. Tell me which other product "
+                "you'd like it compared with.",
+                TurnEvidence(query=None, products=[]), [], False,
+            )
+        return (_NEED_TWO_REPLY, TurnEvidence(query=None, products=[]), [], False)
 
     # Generalized structured resolution: a named subset ("both", "all
     # three", "the first and third", "the cheaper one") narrows to exactly
     # those real products before anything else runs - never the default
     # top-2, and never a guess when the count named doesn't match reality
     # (see `resolve_group_selector`'s own docstring).
-    named = _resolve_named_subset(message, products)
+    named = _resolve_named_subset(message, products) if resolved_ids is None else None
+    if named is None and resolved_ids is None:
+        # Live-reproduced gap this closes: `products` here is only
+        # whatever the current topic's own small, already-tracked set
+        # happens to be (e.g. a 2-item mission's own 2 candidates) - a
+        # shopper explicitly naming two SPECIFIC real products ("compare
+        # the featherline and the trailblazer") is not limited to that
+        # set. Without this, one named product could resolve (if it
+        # happened to already be in view) while the other silently fell
+        # back to whatever ELSE was in the small set - producing a
+        # confident-sounding comparison against the WRONG second product,
+        # never an honest "I don't know that one." Mirrors
+        # `intent_resolution.py::_resolve_reference`'s own "not among
+        # what's shown -> live, bounded search by name" discipline,
+        # applied here for the same reason - a real product genuinely
+        # named in the message must still be found, never silently
+        # substituted.
+        try:
+            live_result = await retrieve(adapter, message, limit=10)
+        except Exception:  # noqa: BLE001 - degrade honestly, never raise
+            live_result = None
+        if live_result is not None and not live_result.unavailable and live_result.products:
+            known_ids = {p.product_id for p in products}
+            combined = products + [p for p in live_result.products if p.product_id not in known_ids]
+            named = _resolve_named_subset(message, combined)
+            if named is not None:
+                products = combined
     if named is not None:
         subset, _why = named
         if len(subset) == 1:
@@ -312,8 +397,15 @@ async def run_compare_turn(
             )
             return (f"That's {subset[0].title}, at {subset[0].price}.", evidence, subset, False)
         products = subset
-    else:
-        products = products[:2]
+    # Production architecture (2026-09), Phase 5: N-ary comparison. This
+    # used to truncate to `products[:2]` unconditionally whenever no
+    # explicit ordinal/named subset was given - silently dropping real,
+    # currently-relevant products from a comparison the shopper never
+    # asked to narrow ("which of these is the best value?" over a real
+    # 4-item shown set compared only the first 2, with no disclosure).
+    # `products` here is already bounded (`recent_relevant_product_ids`'s
+    # own `cap=10` above) - reasoned over and shown in full, never
+    # re-truncated a second time.
 
     # Every fetched product is real, by construction - `exists=True` for
     # both, unconditionally verified relevant (a shopper-named comparison
@@ -351,14 +443,47 @@ async def run_compare_turn(
         items=items,
         shopping_state=state.as_prompt_dict(),
     )
-    if synthesis.text and not _claims_a_cart_action(synthesis.text):
-        return (synthesis.text, evidence, products, synthesis.used_model)
+    # A recommendation request must be ANSWERED even when no grounded model
+    # text is available - a side-by-side listing does not answer "which one
+    # do you recommend?". The deterministic ranker (`answer.run_
+    # recommendation`: the stated budget, exclusions, preferences and
+    # `fit_reasons`, over exactly these real products) is a complete,
+    # model-free, grounded answer. Root-cause fix (2026-09): this degraded
+    # to `_deterministic_comparison` whenever synthesis was unavailable, so
+    # under a provider limit "recommend one" after a comparison just
+    # re-listed the products.
+    def _fallback() -> tuple[str, TurnEvidence, list[Product], bool]:
+        if synthesis_kind == "recommendation":
+            from .answer import run_recommendation
 
-    return (_deterministic_comparison(products), evidence, products, False)
+            reply, rec_evidence, picked = run_recommendation(
+                products=products, state=state, budget_amount=state.budget_amount,
+                scope_label="what you're looking at", message=message,
+            )
+            if picked:
+                return (reply, rec_evidence, picked, False)
+        return (_deterministic_comparison(products), evidence, products, False)
+
+    if synthesis.text and not _claims_a_cart_action(synthesis.text):
+        # Production architecture (2026-09), Phase 5: shared grounded-
+        # reasoning gate (see `respond.py::grounded_reply_or_fallback`'s
+        # own docstring) - this was the one synthesis call in this
+        # package with NO groundedness check on its output at all.
+        text, used_model = grounded_reply_or_fallback(
+            cited_reason=synthesis.cited_reason, text=synthesis.text,
+            products=products, fallback="", used_model=synthesis.used_model,
+        )
+        if text:
+            return (text, evidence, products, used_model)
+
+    return _fallback()
 
 
 def _deterministic_comparison(products: list[Product]) -> str:
-    a, b = products[0], products[1]
-    parts = [f"{a.title}" + (f" ({a.price})" if a.price else "")]
-    parts.append(f"{b.title}" + (f" ({b.price})" if b.price else ""))
-    return "Here are both, fetched just now: " + " vs. ".join(parts) + "."
+    """N-ary, production architecture (2026-09) Phase 5 - "which of these
+    is the best value" over a real 4-item shown set names all 4, never
+    silently narrows to the first two."""
+    parts = [f"{p.title}" + (f" ({p.price})" if p.price else "") for p in products]
+    if len(parts) <= 1:
+        return "Here's what I have: " + (parts[0] if parts else "nothing yet") + "."
+    return "Here are all " + str(len(parts)) + ", fetched just now: " + " vs. ".join(parts) + "."

@@ -36,10 +36,11 @@ from shared.models import (
     risk_properties_for,
 )
 
-from . import approval_view
+from . import approval_view, handover_view
 from .auth import any_key, belongs_to, merchant_scoped, operator
 from .deps import DEV_MERCHANT_NAME, MERCHANT_NAMES, engine
 from .schemas import (
+    HandoverClose,
     HandoverDone,
     ActionInfo,
     ApprovalDecision,
@@ -573,6 +574,118 @@ async def approval_history(
     offset = max(0, offset)
     rows, total = await db.decided_page(connection_id, limit=limit, offset=offset)
     return {"decisions": rows, "total": total, "limit": limit, "offset": offset}
+
+
+# ---------------------------------------------------------------------------
+# Shopper follow-ups: the merchant's own view of the people they were promised to
+# ---------------------------------------------------------------------------
+#
+# A shopper is told a person from the shop will follow up. That follow-up belongs
+# to the merchant: it is their customer. These routes are how the merchant sees and
+# closes their own, scoped to their key. The operator's cross-merchant routes below
+# (/ops/handovers) are a separate, operator-only view of the same records.
+
+
+async def _tell_shopper_handled(
+    connection_id: str, case_id: str, session_id: str | None, note: str | None
+) -> bool:
+    """Put the merchant's note into the shopper's conversation. True if it went.
+
+    Shared by the merchant's and the operator's close. The shopper was told a person
+    would help; when one has, and left a message, they should hear it. With no note
+    there is nothing to say, and nothing is invented.
+    """
+    if not (session_id and note):
+        return False
+    try:
+        await session_store.add_turn(
+            session_id=session_id,
+            connection_id=connection_id,
+            speaker="assistant",
+            text=f"An update from the shop: {note}",
+            case_id=case_id,
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("could not pass an update to the shopper")
+        return False
+
+
+def _actor(key) -> str:
+    """Who is acting, taken from the authenticated key - never from the request body."""
+    return f"{key.kind}:{key.label or key.key_id}"[:120]
+
+
+@app.get(f"{API}/handovers/{{connection_id}}")
+async def list_follow_ups(
+    connection_id: str,
+    handled: bool = False,
+    limit: int = 25,
+    offset: int = 0,
+    _=Depends(merchant_scoped()),
+) -> dict:
+    """This merchant's shopper follow-ups, with the true total.
+
+    `handled=false` (the default) is the open ones, longest wait first;
+    `handled=true` is the record of what has been dealt with, and by whom. Read from
+    the merchant's own data only; it calls no platform adapter, so it works while the
+    platform is down. No SLA exists, so nothing here is labelled late.
+    """
+    _adapter(connection_id)
+    limit = min(max(1, limit), _APPROVAL_PAGE_MAX)
+    offset = max(0, offset)
+    rows, total = await db.handover_page(
+        connection_id, handled=handled, limit=limit, offset=offset
+    )
+    return {"follow_ups": rows, "total": total, "limit": limit, "offset": offset}
+
+
+@app.get(f"{API}/handovers/{{connection_id}}/{{case_id}}")
+async def follow_up_detail(
+    connection_id: str,
+    case_id: str,
+    _=Depends(merchant_scoped()),
+) -> dict:
+    """One follow-up in full: the case, the conversation, and who the shopper is.
+
+    404 for a case that does not exist, belongs to another merchant, or is not a
+    hand-over - the same answer for all three, so an id cannot be probed.
+    """
+    _adapter(connection_id)
+    case = await db.get_case(connection_id, case_id)
+    if case is None or case.state != "ESCALATED":
+        raise HTTPException(404, "no such follow-up")
+    return await handover_view.detail(connection_id, case)
+
+
+@app.post(f"{API}/handovers/{{connection_id}}/{{case_id}}/close")
+async def close_follow_up(
+    connection_id: str,
+    case_id: str,
+    body: HandoverClose,
+    key=Depends(merchant_scoped()),
+) -> dict:
+    """Mark one of this merchant's follow-ups dealt with.
+
+    Who closed it is recorded from the authenticated key, not from the body. The
+    claim is atomic, so two simultaneous closes produce exactly one change and keep
+    the first closer. `changed` is False, with nothing else said, for an unknown id,
+    another merchant's id, a case that is not a hand-over, and one already closed -
+    indistinguishably, so ids cannot be probed.
+
+    A note goes to the shopper verbatim. `told_shopper` says whether anything was
+    sent, so the caller never has to assume.
+    """
+    _adapter(connection_id)
+    note = (body.note or "").strip() or None
+    closed = await db.close_handover(connection_id, case_id, _actor(key), note)
+    if closed is None:
+        return {"case_id": case_id, "changed": False, "told_shopper": False}
+
+    told = await _tell_shopper_handled(
+        connection_id, case_id, closed.get("session_id"), note
+    )
+    return {"case_id": case_id, "changed": True, "told_shopper": told}
 
 
 @app.post(f"{API}/approvals/{{connection_id}}/{{approval_id}}")
@@ -1252,17 +1365,9 @@ async def close_handover(
     # The shopper hears what happened. This is the point of the whole exercise:
     # they were told a person would help, a person did something, and until now
     # they heard nothing.
-    if closed.get("session_id") and body.note:
-        try:
-            await session_store.add_turn(
-                session_id=closed["session_id"],
-                connection_id=connection_id,
-                speaker="assistant",
-                text=f"An update from the shop: {body.note}",
-                case_id=case_id,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("could not pass an update to the shopper")
+    await _tell_shopper_handled(
+        connection_id, case_id, closed.get("session_id"), body.note
+    )
 
     return {"case_id": case_id, "changed": True}
 

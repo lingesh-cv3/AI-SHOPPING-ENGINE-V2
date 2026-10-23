@@ -34,29 +34,27 @@ is ambiguous or unresolvable, it returns a clarifying question instead of a
 guess - this module can never cause a wrong item to be proposed, only, at
 worst, an honest "which one?".
 
-`operation="add"` resolves against `active_products` (what has been shown/
-discovered this session). `operation` in `("remove", "set_quantity")`
-resolves against the REAL, freshly-fetched cart contents instead - "remove
-that" means something already IN the cart, not something merely shown.
-`operation="clear"` needs no reference at all.
+`operation="add"` never resolves WHICH product here (Rev. 2 migration,
+2026-09) - that decision belongs solely to `verification.py::verify()`,
+which sees every topic genuinely in view (`ConversationContext`), not just
+this module's own active-topic-only ledger. This module only classifies
+whether an "add" was said at all, and asks honestly when reached (meaning
+the unified path already declined to resolve it). `operation` in
+`("remove", "set_quantity")` still resolves directly here, against the
+REAL, freshly-fetched cart contents - "remove that" means something
+already IN the cart, a real single source of truth with no topic-scoping
+ambiguity to get wrong. `operation="clear"` needs no reference at all.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 
 from engine.execution.relevance import best_matches_with_score
 from engine.reasoning.service import CartReferenceIntent, ReasoningService
 from shared.models import Product
 
-from .reference_resolution import (
-    looks_like_group_or_ordinal_reference,
-    resolve_group_selector,
-    resolve_named_subset,
-)
-from .retrieval import retrieve
-from .state import ShoppingStateV2
+from .state import ShoppingStateV2, active_topic_product_ids, paused_topic_product_groups
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +93,7 @@ async def resolve_cart_target(
     history: list[str] | None,
     state: ShoppingStateV2,
     cart_id: str | None = None,
+    skip_own_interpretation: bool = False,
 ) -> CartTargetResult:
     """Returns a `CartTargetResult`. `is_cart_intent=False` means this
     message should NOT be treated as a cart action at all (the caller
@@ -102,8 +101,20 @@ async def resolve_cart_target(
     structural guarantee behind requirement 9 (a plain discovery statement
     can never become a cart action): it requires an explicit, positive
     `is_cart_intent=True` from the interpreter AND a resolvable target
-    before anything downstream ever sees this as a cart operation."""
-    active = list(dict.fromkeys(state.active_products))
+    before anything downstream ever sees this as a cart operation.
+
+    `skip_own_interpretation` (production architecture review §3, "no
+    cascading LLM fallback"): set by the caller (`node_reference_
+    resolution`) when IT already made a real interpretation attempt for
+    this exact message this turn and it failed to resolve anything
+    actionable - this function must not retry the identical question with
+    its own separate `interpret_cart_reference` call in that case. Stays
+    `False` (the call proceeds as the genuinely first attempt) whenever no
+    attempt was made yet this turn - e.g. a message that isn't an explicit
+    cart command ("I'll take this", "get me the Trailblazer"), which this
+    function's own call is still the right, first, and only place to
+    classify."""
+    active = active_topic_product_ids(state)
 
     cart_lines: list = []
     if cart_id:
@@ -141,16 +152,24 @@ async def resolve_cart_target(
     if not shown_payload and not cart_payload:
         return CartTargetResult(is_cart_intent=False)
 
-    try:
-        intent = await reasoning.interpret_cart_reference(
-            message=message,
-            active_products=shown_payload,
-            history=history,
-            cart_lines=cart_payload,
-        )
-    except Exception:  # noqa: BLE001 - degrade honestly, never raise into the turn
-        logger.exception("intent_resolution: interpret_cart_reference failed")
+    if skip_own_interpretation:
+        # No cascading LLM fallback: an interpretation attempt for this
+        # exact message already ran this turn and failed - degrade
+        # straight to "not a resolvable cart intent" (the same honest
+        # result a raised exception already produces below) rather than
+        # trying the identical question a second, independent time.
         intent = None
+    else:
+        try:
+            intent = await reasoning.interpret_cart_reference(
+                message=message,
+                active_products=shown_payload,
+                history=history,
+                cart_lines=cart_payload,
+            )
+        except Exception:  # noqa: BLE001 - degrade honestly, never raise into the turn
+            logger.exception("intent_resolution: interpret_cart_reference failed")
+            intent = None
 
     if intent is None or not intent.is_cart_intent or intent.operation == "none":
         return CartTargetResult(is_cart_intent=False)
@@ -162,84 +181,37 @@ async def resolve_cart_target(
             return CartTargetResult(is_cart_intent=True, operation="clear", product_id=None)
         return CartTargetResult(is_cart_intent=True, operation="clear")
 
-    # Conversational-flow review fix (Issue #1): live-reproduced,
-    # `interpret_cart_reference` classified "add both to the cart" as
-    # `reference_type="none"` 4/4 times, never "all" - a consistent
-    # classification gap for this specific closed-class word, not
-    # sampling variance (unlike this session's other characterized model
-    # noise). Same discipline `capability.py`'s own
-    # `looks_like_comparison_request`/etc already use for a measurably
-    # unreliable primary classification: a small, fixed, non-phrase-
-    # specific word list, gated on the same real-data precondition
-    # `_resolve_group_reference` itself already requires (2+ real
-    # candidates) before ever overriding the model's own field.
-    #
-    # Manual-test finding (generalized): the old check here only ever
-    # recognized "both"/"all of them"-shaped phrases - "add the first and
-    # third", or "add all three" validated against a real 3-item group,
-    # never resolved at all, always falling through to a single-product
-    # guess or a bare clarifying question. `looks_like_group_or_ordinal_reference`
-    # (`reference_resolution.py` - the SAME closed-class ordinal/collective
-    # markers `capability.py`'s routing backstop already uses for the
-    # ANSWER side of a reference) generalizes this to the same real class
-    # of message for the CART-ACTION side.
-    # Live-reproduced, generalized: a message naming SEVERAL real shown
-    # products by their own full titles together ("1. Marathon Pro Racing
-    # Shoe; 2. Cloudstep Max Cushion Running Shoe" - pasting a prior
-    # clarifying question's own numbered list back verbatim) named no
-    # ordinal/collective word at all, so `looks_like_group_or_ordinal_reference`
-    # alone never caught it - checked here, against the real, already-shown
-    # titles, deterministically, never via the model's own single
-    # `named_hint` (which only ever extracts one name).
-    named_subset_positions = resolve_named_subset(message, [p.title for p in shown])
-    if (
-        intent.operation == "add"
-        and intent.reference_type not in ("all", "ordinal", "name")
-        and (looks_like_group_or_ordinal_reference(message) or named_subset_positions is not None)
-    ):
-        intent = dataclasses.replace(intent, reference_type="all")
-
     if intent.operation == "add":
-        if intent.reference_type == "all":
-            resolved_ids = await _resolve_group_reference(message, shown, state=state, adapter=adapter)
-            # Deliberately conservative: "all" only ever resolves when there
-            # are at least 2 real, distinct candidates to resolve it TO - a
-            # single-item "all" is not a meaningfully different case from
-            # ordinary pronoun resolution, and falling through here (rather
-            # than returning a 1-item multi-add) keeps that path the one
-            # single source of truth for the single-item case.
-            if resolved_ids and len(resolved_ids) >= 2:
-                return CartTargetResult(
-                    is_cart_intent=True, operation="add",
-                    product_ids=resolved_ids, quantity=quantity,
-                )
-            # Genuinely couldn't ground "all" against anything real - ask,
-            # never guess, using the same ledger-aware clarifying question
-            # the singular ambiguous case already uses.
-            clarifying_question = await _clarify_with_ledger(
-                shown, intent, "add to your cart", state=state, adapter=adapter
-            )
-            return CartTargetResult(
-                is_cart_intent=True, operation="add", quantity=quantity,
-                clarifying_question=clarifying_question,
-            )
-
-        resolved = await _resolve_reference(intent, shown, adapter)
-        if resolved is None:
-            clarifying_question = await _clarify_with_ledger(
-                shown, intent, "add to your cart", state=state, adapter=adapter
-            )
-            return CartTargetResult(
-                is_cart_intent=True, operation="add", quantity=quantity,
-                clarifying_question=clarifying_question,
-            )
-        return CartTargetResult(is_cart_intent=True, operation="add", product_id=resolved, quantity=quantity)
+        # Rev. 2 migration (2026-09): deciding WHICH product an "add"
+        # targets is no longer this module's job. That decision is made
+        # exactly once, by `verification.py::verify()`, against the real,
+        # full `ConversationContext` - every topic genuinely in view this
+        # turn (active + every paused topic), not just this function's own
+        # `active_topic_product_ids` (`shown` below). This function is
+        # only ever reached for "add" after that unified path already
+        # declined to resolve cleanly (model unavailable this turn, or a
+        # genuine, real ambiguity even the unified path couldn't settle) -
+        # it must never independently pick a product here. Doing so was
+        # exactly the topic-blind bug this migration closes: an ordinal
+        # like "the first shoe" could only ever resolve against whatever
+        # happened to be active, regardless of the noun actually used,
+        # because a paused topic's own products were structurally invisible
+        # to this function. The only honest thing left to do is ask - never
+        # guess a second time with a narrower view than the first attempt
+        # already had.
+        clarifying_question = await _clarify_with_ledger(
+            shown, intent, "add to your cart", state=state, adapter=adapter
+        )
+        return CartTargetResult(
+            is_cart_intent=True, operation="add", quantity=quantity,
+            clarifying_question=clarifying_question,
+        )
 
     if intent.operation in ("remove", "set_quantity"):
         cart_products = [
             Product(product_id=line.product_id, title=line.title) for line in cart_lines
         ]
-        resolved = await _resolve_reference(intent, cart_products, adapter, live_search=False)
+        resolved = await _resolve_reference(intent, cart_products)
         if resolved is None:
             return CartTargetResult(
                 is_cart_intent=True, operation=intent.operation, quantity=quantity,
@@ -253,8 +225,12 @@ async def resolve_cart_target(
 
 
 async def _resolve_reference(
-    intent: CartReferenceIntent, candidates: list[Product], adapter, *, live_search: bool = True
+    intent: CartReferenceIntent, candidates: list[Product],
 ) -> str | None:
+    """Resolves a `remove`/`set_quantity` reference against the real,
+    current cart contents (`candidates`) - a single source of truth with
+    no topic to get wrong, unlike "add" (see this module's own docstring
+    for why "add" is never decided here after the Rev. 2 migration)."""
     if intent.reference_type == "ordinal":
         if intent.position is not None and 1 <= intent.position <= len(candidates):
             return candidates[intent.position - 1].product_id
@@ -274,122 +250,9 @@ async def _resolve_reference(
         score, best = best_matches_with_score(candidates, intent.named_hint)
         if score > 0 and len(best) == 1:
             return best[0].product_id
-        if len(best) > 1:
-            return None  # genuinely ambiguous among what's shown/in cart
-
-        if not live_search:
-            return None  # a cart-line reference is never resolved via a fresh search
-
-        # Not among what's shown - a live, bounded, verified lookup by
-        # name (e.g. "get me the Trailblazer" for a product never yet
-        # displayed this turn). Reuses the exact same retrieve+re-score
-        # discipline as ordinary discovery; only accepted if EXACTLY one
-        # real, confidently-scored candidate comes back.
-        try:
-            result = await retrieve(adapter, intent.named_hint, limit=10)
-        except Exception:  # noqa: BLE001
-            return None
-        if result.unavailable or not result.products:
-            return None
-        live_score, live_best = best_matches_with_score(result.products, intent.named_hint)
-        if live_score > 0 and len(live_best) == 1:
-            return live_best[0].product_id
-        return None
+        return None  # no match, or genuinely ambiguous among the real cart lines
 
     return None
-
-
-#: Bounds how many distinct products "add all"/"add both" can ever resolve
-#: to in one turn - a real, deliberate ceiling, not just a display limit.
-#: Each resolved id still goes through its OWN separate proposal below
-#: (`cart_proposal.py`, unchanged), so this bounds how many individual
-#: risk-gated proposals one turn can create, not a bulk-mutation size.
-_MAX_ALL_REFERENCE_ITEMS = 6
-
-
-async def _resolve_group_reference(
-    message: str, shown: list[Product], *, state: ShoppingStateV2, adapter
-) -> list[str]:
-    """Resolves a collective/ordinal cart-add reference ("both", "all of
-    them", "all three" - count-validated, "the first and third") to the
-    real, currently-relevant set of products - THIS turn's own shown set,
-    extended by the ledger's most recent PRIOR group when the current
-    turn's own set is too small to be what the reference plausibly means
-    (exactly the "shoes... slides... add both" shape - `shown` alone would
-    be just the slide). Every id returned was already a real,
-    independently-verified `active_products`/ledger entry - nothing here
-    is invented or guessed at.
-
-    Context-awareness fix (generalized, not tied to any one phrasing):
-    used to reach back only as far as the SINGLE immediately-prior group -
-    correct for "shoes... slides... add both" (one topic switch), wrong
-    for a conversation with several switches in between ("shoes...
-    socks... a jacket... add both the shoes and the jacket"), where the
-    right historical group is not necessarily the most recent one. Now
-    scores every OTHER real, still-retained ledger group by the SAME real
-    word-overlap the message's own words actually match
-    (`best_matches_with_score` - the identical scoring `compare.py`'s own
-    `_best_matching_historical_group` already uses for the read side of
-    this same problem, reused here rather than re-derived) and reaches
-    into whichever one scores highest. Falls back to the single
-    immediately-prior group only when nothing scores at all - the correct,
-    honest behavior for a bare "add both" that names no topic of its own
-    to match against, exactly as before.
-
-    Manual-test finding (generalized): this used to just return the whole
-    universe for ANY "all"-shaped reference, with no way to select a named
-    subset of it ("add the first and third", "add all three" of a real
-    4-item group) - `resolve_group_selector` (the same real, count-aware
-    ordinal/collective resolver `capability.py`'s reference backstop
-    already uses) now narrows to exactly the real subset named, when the
-    message names one; a generic "both"/"all of them" still resolves to
-    the whole real universe, exactly as before."""
-    ids = list(dict.fromkeys(p.product_id for p in shown))
-    if len(ids) < _MAX_ALL_REFERENCE_ITEMS:
-        groups = [g for g in state.recent_product_groups if g]
-        other_groups = [g for g in groups if [pid for pid in g if pid not in ids]]
-        best_ids: list[str] = []
-        best_score = 0
-        for group_ids in other_groups:
-            candidate_ids = [pid for pid in group_ids if pid not in ids][:8]
-            if not candidate_ids:
-                continue
-            products = []
-            for pid in candidate_ids:
-                try:
-                    products.append(await adapter.get_product(pid))
-                except Exception:  # noqa: BLE001 - skip what can't be fetched, never guess
-                    logger.warning(
-                        "intent_resolution: group-reference get_product failed for %r",
-                        pid, exc_info=True,
-                    )
-            if not products:
-                continue
-            score, _ = best_matches_with_score(products, message)
-            if score > best_score:
-                best_score = score
-                best_ids = [p.product_id for p in products]
-        if best_score > 0 and best_ids:
-            ids = [*ids, *best_ids]
-        elif len(groups) >= 2:
-            prior_ids = [pid for pid in groups[-2] if pid not in ids]
-            ids = [*ids, *prior_ids]
-    ids = ids[:_MAX_ALL_REFERENCE_ITEMS]
-
-    # A message naming SEVERAL real shown products by their own full
-    # titles together is unambiguous regardless of any ordinal/collective
-    # wording - checked against `shown` (this turn's own real products,
-    # the case the reported gap named exactly) before falling to ordinal
-    # position resolution.
-    named_positions = resolve_named_subset(message, [p.title for p in shown])
-    if named_positions is not None:
-        shown_ids = [p.product_id for p in shown]
-        return [shown_ids[i] for i in named_positions if i < len(shown_ids)]
-
-    positions = resolve_group_selector(message, len(ids))
-    if positions is not None:
-        return [ids[i] for i in positions]
-    return ids
 
 
 async def _clarify_with_ledger(
@@ -417,12 +280,18 @@ async def _clarify_with_ledger(
     time, since this module can still only ever resolve to a single
     product per call, exactly as `resolve_cart_target`'s own docstring
     already states."""
-    groups = [g for g in state.recent_product_groups if g]
-    if len(groups) < 2:
+    # Focus Stack migration: `groups` is every PAUSED topic's own real
+    # products, most-recently-paused first, excluding the active topic
+    # entirely - `groups[0]` is the direct equivalent of the legacy
+    # ledger's own `groups[-2]` ("the group immediately before this one");
+    # the legacy `len(groups) < 2` minimum becomes `< 1` here for the same
+    # reason (see `paused_topic_product_groups`'s own docstring).
+    groups = paused_topic_product_groups(state)
+    if len(groups) < 1:
         return _clarify(shown, intent, verb)
 
     shown_ids = {p.product_id for p in shown}
-    prior_ids = [pid for pid in groups[-2] if pid not in shown_ids][:4]
+    prior_ids = [pid for pid in groups[0] if pid not in shown_ids][:4]
     if not prior_ids:
         return _clarify(shown, intent, verb)
 

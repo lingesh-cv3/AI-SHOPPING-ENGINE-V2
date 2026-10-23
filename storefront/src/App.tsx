@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AccountMenu } from "./AccountMenu";
 import {
   api,
+  EngineError,
   getConnection,
   shopperMessage,
   type Cart,
@@ -195,6 +196,10 @@ export default function App() {
   const [pipeline, setPipeline] = useState<Pipeline | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // True only when the catalogue request itself failed. Kept apart from `error` (which the
+  // cart panel shows) because "the shop could not be reached" and "this category is empty"
+  // are different facts, and the shopper must never be told the second when it is the first.
+  const [loadFailed, setLoadFailed] = useState(false);
   // See this effect's own StrictMode comment below.
   const bootstrappedRef = useRef(false);
 
@@ -212,8 +217,13 @@ export default function App() {
     async (q: string, d: string | null) => {
       setBusy(true);
       setError(null);
+      setLoadFailed(false);
+      // Set once the catalogue request has answered: a later failure in this same try (the
+      // dead-search hand-off to the assistant) does not mean the shop is unreachable.
+      let searched = false;
       try {
         const r = await api.search(q, d);
+        searched = true;
         setProducts(r.products);
 
         if (!r.is_dead_search) {
@@ -238,6 +248,8 @@ export default function App() {
           `I searched for "${q}" and nothing came up.`,
           cart?.cart_id,
           "DEAD_SEARCH",
+          undefined,
+          q,
         );
         const mapped = mapV2Reply(reply);
 
@@ -267,6 +279,7 @@ export default function App() {
         }
       } catch (e) {
         setError(shopperMessage(e));
+        if (!searched) setLoadFailed(true);
       } finally {
         setBusy(false);
       }
@@ -321,12 +334,31 @@ export default function App() {
     // A cart the engine does not recognise is not a cart. This already fell back
     // to creating a new one; the missing half was clearing the stale id, so the
     // next reload tried the dead one again.
-    const cartReady = storedCart
-      ? api.getCart(storedCart).catch(() => {
-          sessionStorage.removeItem(cartKey);
-          return api.createCart();
-        })
-      : api.createCart();
+    //
+    // Only a definite "that cart does not exist" answer replaces the stored
+    // cart. A transient failure (a 5xx, a dropped connection, a busy engine) used
+    // to do the same - silently swapping the shopper's real basket for a new
+    // empty one, and with it their pending suggestions. Those are retried with a
+    // short back-off and, if they persist, surfaced as an error while the stored
+    // id is kept, so the next load can find the basket again.
+    const restoreCart = async (id: string) => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await api.getCart(id);
+        } catch (e) {
+          const gone =
+            e instanceof EngineError &&
+            (e.code === "CART_NOT_FOUND" || e.code === "CART_INVALID" || /\(404\)/.test(e.message));
+          if (gone) {
+            sessionStorage.removeItem(cartKey);
+            return api.createCart();
+          }
+          if (attempt >= 2) throw e;
+          await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+        }
+      }
+    };
+    const cartReady = storedCart ? restoreCart(storedCart) : api.createCart();
       
     // Structural fix, live-reproduced: this used to also clear the session
     // key on ANY transcript-fetch failure, including the completely
@@ -600,6 +632,33 @@ export default function App() {
           refreshSignal={chatTurns.length}
           onCartChanged={() => {
             api.getCart(cart.cart_id).then(setCart).catch(() => {});
+            // An approved proposal is how a typed "add" reaches the cart. If a
+            // guided mission is open, the real cart now decides whether its
+            // stage is done: the engine answers with the confirmation and the
+            // next stage (or nothing when there is no mission / nothing new).
+            api
+              .advanceMission(sessionId, cart.cart_id)
+              .then((adv) => {
+                if (!adv.reply) return;
+                const text = adv.reply;
+                setChatTurns((prev) => [
+                  ...prev,
+                  {
+                    speaker: "assistant",
+                    text,
+                    products: adv.products.length
+                      ? adv.products.map((p) => ({
+                          product_id: p.product_id,
+                          title: p.title,
+                          description: p.description,
+                          price: p.price,
+                          categories: [],
+                        }))
+                      : undefined,
+                  },
+                ]);
+              })
+              .catch(() => {});
           }}
         />
       )}
@@ -733,6 +792,20 @@ export default function App() {
               ))}
             </nav>
 
+            {loadFailed && (
+              <div className="banner" role="alert">
+                <div className="eyebrow">Shop unavailable</div>
+                <h2>We can&rsquo;t reach the shop right now</h2>
+                <p>
+                  The catalogue didn&rsquo;t load, so what you see below may be out of
+                  date.{" "}
+                  <button onClick={() => load(query, dept)} disabled={busy}>
+                    Try again
+                  </button>
+                </p>
+              </div>
+            )}
+
             {deadSearch && (
               <div className="banner">
                 <div className="eyebrow">Nothing matched</div>
@@ -744,7 +817,7 @@ export default function App() {
               </div>
             )}
 
-            {products.length === 0 && !deadSearch && !busy && (
+            {products.length === 0 && !deadSearch && !busy && !loadFailed && (
               <p className="empty">Nothing in this category yet.</p>
             )}
 

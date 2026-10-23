@@ -51,6 +51,7 @@ export function mapV2Reply(r: ChatReplyV2): {
   awaitingPerson?: boolean;
   why?: ChatTurn["why"];
   choices?: ChatTurn["choices"];
+  categoryChoices?: string[];
 } {
   const capability = r.trace?.capability as string | undefined;
   const evidenceById = new Map(
@@ -103,7 +104,21 @@ export function mapV2Reply(r: ChatReplyV2): {
       }
     | null
     | undefined;
-  const choices = fulfillmentPending?.options?.length
+  // A typed approval of a proposal whose product still needs a size/option: the
+  // same accept-flow buttons the Suggestions panel shows (the shopper's tap adds it).
+  const acceptChoices = r.trace?.accept_choices as
+    | { variant_id: string; label: string; product_id: string; product_title: string; left: number | null }[]
+    | undefined;
+  const choices = acceptChoices?.length
+    ? acceptChoices.map((c) => ({
+        variant_id: c.variant_id,
+        label: c.label,
+        product_id: c.product_id,
+        product_title: c.product_title,
+        left: c.left ?? null,
+        source: "accept_flow" as const,
+      }))
+    : fulfillmentPending?.options?.length
     ? fulfillmentPending.options.map((o) => ({
         variant_id: o.variant_id,
         label: o.label,
@@ -114,9 +129,17 @@ export function mapV2Reply(r: ChatReplyV2): {
       }))
     : undefined;
 
+  // Store-level discovery ("what do you have?"): the merchant's own departments, each verified server-side to hold
+  // something buyable (`engine/shopper_v2/store_discovery.py`). Rendered by the existing category chips, whose tap
+  // sends "Show me <category>" - nothing is invented here.
+  const categoryChoices = Array.isArray(r.trace?.category_choices) && (r.trace.category_choices as string[]).length > 0
+    ? (r.trace.category_choices as string[])
+    : undefined;
+
   return {
     products,
     comparison,
+    categoryChoices,
     payment: checkoutPayload ?? undefined,
     awaitingPerson: capability === "payment_recovery" ? true : undefined,
     why,
@@ -395,10 +418,11 @@ export function ChatWidget({
       const r: ChatReplyV2 = await api.chatV2(sessionId, said, cartId);
       const mapped = mapV2Reply(r);
 
-      // A V2 chat turn never mutates the cart directly - it can only ever
-      // create a proposal (see cart_proposal.py's own hard rule), which the
-      // existing ProposalsPanel calls `onCartChanged` for itself once the
-      // shopper actually accepts it. Nothing to refresh from this turn.
+      // A V2 chat turn never mutates the cart on its own authority - it creates
+      // proposals. The one exception is the shopper's own typed approval of a
+      // pending proposal ("yes"), which runs the same accept path as the Accept
+      // button; when that changed the cart, refresh it like the button does.
+      if (r.trace?.cart_changed) onCartChanged?.();
       onTurns([
         ...withShopper,
         {
@@ -411,6 +435,7 @@ export function ChatWidget({
           payment: mapped.payment,
           why: mapped.why,
           choices: mapped.choices,
+          categoryChoices: mapped.categoryChoices,
         },
       ]);
     } catch (e) {
@@ -486,20 +511,49 @@ export function ChatWidget({
       const r = await api.act(sessionId, productId, said, variantId, cartId);
       onReply?.(r);
       if (r.cart_changed) onCartChanged?.();
-      onTurns([
-        ...withShopper,
-        {
-          speaker: "assistant",
-          text: r.reply,
-          awaitingPerson: r.awaiting_person,
-          // The real, live accept-flow variant check (`/api/chat/act` /
-          // `/api/chat/proposals/{id}/accept`) - see `ChatTurn.choices`'s
-          // own docstring for why this tag must always be set explicitly.
-          choices: r.choices?.map((ch) => ({ ...ch, source: "accept_flow" as const })),
-          payment: r.payment,
-          why: r.why,
-        },
-      ]);
+      const reply: ChatTurn = {
+        speaker: "assistant",
+        text: r.reply,
+        awaitingPerson: r.awaiting_person,
+        // The real, live accept-flow variant check (`/api/chat/act` /
+        // `/api/chat/proposals/{id}/accept`) - see `ChatTurn.choices`'s
+        // own docstring for why this tag must always be set explicitly.
+        choices: r.choices?.map((ch) => ({ ...ch, source: "accept_flow" as const })),
+        payment: r.payment,
+        why: r.why,
+      };
+      onTurns([...withShopper, reply]);
+
+      // A guided mission moves on once the REAL cart holds the product. A tap
+      // is not a chat turn, so ask the engine to check the cart now; it
+      // answers with the next stage (or nothing when there is no mission).
+      // Optional: the add itself already succeeded either way.
+      if (r.cart_changed && cartId) {
+        try {
+          const adv = await api.advanceMission(sessionId, cartId);
+          if (adv.reply) {
+            onTurns([
+              ...withShopper,
+              reply,
+              {
+                speaker: "assistant",
+                text: adv.reply,
+                products: adv.products.length
+                  ? adv.products.map((p) => ({
+                      product_id: p.product_id,
+                      title: p.title,
+                      description: p.description,
+                      price: p.price,
+                      categories: [],
+                    }))
+                  : undefined,
+              },
+            ]);
+          }
+        } catch {
+          /* the mission follow-up is best-effort */
+        }
+      }
     } catch (e) {
       onTurns([...withShopper, { speaker: "assistant", text: shopperMessage(e) }]);
     } finally {

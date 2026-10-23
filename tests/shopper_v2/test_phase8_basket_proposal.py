@@ -146,8 +146,15 @@ async def main() -> None:
         check("an all-done mission proposes nothing", done_results == [])
 
         # 8. Full turn-level integration via run_mission_turn: the
-        #    propose_basket signal actually reaches basket_proposal from
-        #    the same entry point the orchestrator calls.
+        #    propose_basket signal now reaches `fulfillment.py` directly
+        #    (architecture review, Step 7) - NOT `basket_proposal.py`'s
+        #    older pending-confirm flow. P1005 ("Fell Runner Trail Shoe")
+        #    genuinely needs a size choice (real catalog data, confirmed
+        #    live against the running Northfield adapter before writing
+        #    this assertion - CLAUDE.md's own "assert against real
+        #    observed output" standard), so the correct new behavior is a
+        #    real variant question, not a direct add and not a pending
+        #    CartProposal row at all.
         turn_state = ShoppingStateV2(
             session_id="sess_test_phase8_turn", connection_id=connection_id,
             mission_items=[MissionItem(item_id="j1", label="running shoes", candidates=["P1005"])],
@@ -161,14 +168,23 @@ async def main() -> None:
             connection_id=connection_id, session_id="sess_test_phase8_turn", cart_id=cart2.cart_id,
         )
         check("run_mission_turn handles a basket-propose request end to end", turn_handled)
-        check("run_mission_turn's reply reflects the real proposal", "running shoes" in turn_reply)
-        turn_pending = await cp_store.pending_for_cart(connection_id, cart2.cart_id, session_id="sess_test_phase8_turn")
-        check("run_mission_turn actually created a real, persisted proposal", len(turn_pending) == 1)
         check(
-            "run_mission_turn surfaces the real proposal id to its caller "
-            "(a live-discovered gap: without this, a shopper's client has "
-            "no way to ever approve/reject a basket-proposed item)",
-            turn_proposal_ids == [turn_pending[0]["proposal_id"]],
+            "run_mission_turn's reply asks the real variant question for the real product",
+            "Fell Runner Trail Shoe" in turn_reply and "7" in turn_reply,
+        )
+        turn_pending = await cp_store.pending_for_cart(connection_id, cart2.cart_id, session_id="sess_test_phase8_turn")
+        check(
+            "no pending CartProposal is created - this path adds directly, "
+            "never through a separate confirm step",
+            turn_pending == [],
+        )
+        check(
+            "no proposal ids are surfaced either - nothing was proposed",
+            turn_proposal_ids == [],
+        )
+        check(
+            "the fulfillment queue now holds the real pending variant question",
+            any(i.product_id == "P1005" and i.status == "needs_variant" for i in turn_new_state.fulfillment_queue),
         )
 
         # 9. Without decision/gate/execution wired in, degrades honestly

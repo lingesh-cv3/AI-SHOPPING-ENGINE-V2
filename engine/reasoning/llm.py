@@ -23,6 +23,7 @@ response headers rather than assumed, because published limits go stale quickly.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -78,7 +79,16 @@ class LLMConfig:
     #: creatively. Two identical shopper situations should not produce wildly
     #: different proposals.
     temperature: float = 0.2
-    max_tokens: int = 1200
+    #: Ceiling for one completion. The interpretation tool call carries a
+    #: full `shopping_state` and `secondary_operation`, so it must not be
+    #: starved: at a 1200 ceiling with DEFAULT reasoning effort the model's
+    #: hidden reasoning consumed the budget and the JSON was cut off before
+    #: its closing brace (Groq `tool_use_failed`, indistinguishable from a
+    #: rate limit in the trace). The real fix is `reasoning_effort` (see
+    #: `complete()`), which cut a typical call from ~550 to ~350 completion
+    #: tokens - this ceiling then leaves >3x headroom while keeping the
+    #: per-call tokens-per-minute reservation small.
+    max_tokens: int = 1400
     timeout_seconds: float = 8.0
 
     @classmethod
@@ -195,31 +205,104 @@ class LLMClient:
             "max_tokens": self.config.max_tokens,
             "messages": [{"role": "system", "content": system}, *messages],
         }
+        # OpenAI's reasoning-era models (gpt-5/gpt-6 family, o-series) reject
+        # the legacy `max_tokens` and any non-default `temperature` with a 400
+        # - which would degrade every turn to "no model". They take
+        # `max_completion_tokens` (hidden reasoning tokens count against it,
+        # as with Groq's gpt-oss) and a `reasoning_effort`. Detected by model
+        # family on OpenAI's own endpoint only; Groq and older OpenAI models
+        # keep the legacy shape unchanged.
+        if _is_openai_reasoning_model(self.config.base_url, self.config.model):
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
+            payload.pop("temperature", None)
+            # Measured (2026-10): `gpt-6-luna` on /v1/chat/completions rejects
+            # function tools unless reasoning_effort is exactly "none" (omitting
+            # it or sending "low" both 400). Structured extraction needs no
+            # hidden reasoning anyway, so "none" is also the cheapest. Other
+            # reasoning-era families (unverified with tools) keep "low".
+            default_effort = "none" if (self.config.model or "").lower().startswith("gpt-6") else "low"
+            effort = os.getenv("LLM_REASONING_EFFORT", default_effort).strip()
+            if effort:
+                payload["reasoning_effort"] = effort
+        # Groq's gpt-oss models are reasoning models: hidden reasoning tokens
+        # are billed against `max_tokens` AND the tokens-per-minute limit.
+        # Measured (2026-09): default effort spent ~550 completion tokens on
+        # a compact tool call (and, at a 1200 ceiling, was the real cause of
+        # the truncated-JSON `tool_use_failed` failures - reasoning ate the
+        # budget before the JSON closed); effort=low spent ~350 with the
+        # same classification. Structured extraction does not need deep
+        # reasoning. Only sent where the provider/model accepts it -
+        # OpenAI chat models reject the parameter. Overridable per process
+        # via LLM_REASONING_EFFORT ("" disables).
+        if "groq" in (self.config.base_url or "") and "gpt-oss" in (self.config.model or ""):
+            effort = os.getenv("LLM_REASONING_EFFORT", "low").strip()
+            if effort:
+                payload["extra_body"] = {"reasoning_effort": effort}
         if tools:
             payload["tools"] = tools
             # "required" makes the model call a tool rather than replying in
             # prose. Used when we need structured proposals and nothing else.
             payload["tool_choice"] = "required" if force_tool else "auto"
 
-        try:
-            response = await self._client.chat.completions.create(**payload)
-        except RateLimitError as exc:
-            raise LLMUnavailable(
-                "rate limited by the model provider",
-                retry_after_seconds=_retry_after(exc),
-            ) from exc
-        except APIStatusError as exc:
-            # A 404 here almost always means the model ID was retired. Worth
-            # saying so plainly, because the generic message is unhelpful.
-            hint = ""
-            if exc.status_code == 404:
-                hint = (
-                    f" - model '{self.config.model}' may have been retired. "
-                    "Check the provider's deprecation page."
+        # Opt-in, bounded Retry-After wait. A provider 429 states when it will
+        # accept the request again; on a tokens-per-minute tier that is often
+        # only seconds away. Default 0 = degrade immediately (a shopper is
+        # waiting). A deployment on a tight tier, or a verification run
+        # measuring real-provider success, sets LLM_RATE_LIMIT_WAIT_SECONDS
+        # to the longest total wait it will accept; the wait is never
+        # honoured beyond that cap.
+        wait_cap = float(os.getenv("LLM_RATE_LIMIT_WAIT_SECONDS", "0") or 0)
+        waited_total = 0.0
+        tool_retry_done = False
+        while True:
+            try:
+                response = await self._client.chat.completions.create(**payload)
+                break
+            except RateLimitError as exc:
+                retry_after = _retry_after(exc)
+                if (
+                    wait_cap > 0
+                    and retry_after is not None
+                    and waited_total + retry_after + 0.5 <= wait_cap
+                ):
+                    await asyncio.sleep(retry_after + 0.5)
+                    waited_total += retry_after + 0.5
+                    continue
+                raise LLMUnavailable(
+                    "rate limited by the model provider",
+                    retry_after_seconds=retry_after,
+                ) from exc
+            except APIStatusError as exc:
+                # A 404 here almost always means the model ID was retired. Worth
+                # saying so plainly, because the generic message is unhelpful.
+                hint = ""
+                # Server-side only (never shown to a shopper): the provider's
+                # own error code/message is what tells a malformed generation
+                # (`tool_use_failed`) from a bad request or a retired model.
+                logger.warning(
+                    "provider error %s: %s",
+                    exc.status_code,
+                    str(getattr(exc, "body", None))[:500],
                 )
-            raise LLMUnavailable(f"provider returned {exc.status_code}{hint}") from exc
-        except Exception as exc:  # noqa: BLE001 - transport, DNS, timeouts
-            raise LLMUnavailable(f"could not reach the model provider: {exc}") from exc
+                # A `tool_use_failed` 400 is the model's own malformed
+                # generation (schema-invalid arguments), not a bad request:
+                # sampling is stochastic, so one regeneration is a sound
+                # response. Bounded to one - never a loop.
+                if (
+                    exc.status_code == 400
+                    and not tool_retry_done
+                    and "tool_use_failed" in str(getattr(exc, "body", ""))
+                ):
+                    tool_retry_done = True
+                    continue
+                if exc.status_code == 404:
+                    hint = (
+                        f" - model '{self.config.model}' may have been retired. "
+                        "Check the provider's deprecation page."
+                    )
+                raise LLMUnavailable(f"provider returned {exc.status_code}{hint}") from exc
+            except Exception as exc:  # noqa: BLE001 - transport, DNS, timeouts
+                raise LLMUnavailable(f"could not reach the model provider: {exc}") from exc
 
         choice = response.choices[0].message
         calls: list[dict[str, Any]] = []
@@ -254,6 +337,15 @@ class LLMClient:
             completion_tokens=getattr(usage, "completion_tokens", None),
             model=response.model,
         )
+
+
+_OPENAI_REASONING_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
+
+
+def _is_openai_reasoning_model(base_url: str | None, model: str | None) -> bool:
+    return "api.openai.com" in (base_url or "") and (model or "").lower().startswith(
+        _OPENAI_REASONING_PREFIXES
+    )
 
 
 def _retry_after(exc: Exception) -> float | None:

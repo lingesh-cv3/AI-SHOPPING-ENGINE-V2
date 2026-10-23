@@ -27,14 +27,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from engine.execution import mission_ranking, semantic_retrieval
 from engine.reasoning.service import ReasoningService
-from shared.models import Product
+from shared.models import Operation, Product
 
-from . import search_context
+from . import named_product, search_context, vocabulary
 from .contracts import Candidate, CandidateSet, RetrievalMethod, SearchIntent
 from .evidence import TurnEvidence, build_evidence, product_as_dict
+from .reference_resolution import _distinctive_title_words
 from .retrieval import retrieve
 from .tracing import TurnTrace
 
@@ -56,6 +58,34 @@ _SEMANTIC_SAMPLE_LIMIT = 500
 #: the worst case to 3 extra calls on top of the 1 `judge_relevance` call,
 #: never unbounded.
 _MAX_JUDGE_PICK_ATTEMPTS = 3
+
+#: Closed-class, non-phrase-specific: words a bare conversational follow-up
+#: is built from ("Why this?", "tell me more", "what about it") that name
+#: NOTHING of their own - `_distinctive_title_words` alone doesn't filter
+#: these (its own contract is product TITLES, a different vocabulary), so
+#: without this a bare follow-up's own pronouns/deictics ("this", "why")
+#: would wrongly look like a distinctive noun that disagrees with the
+#: prior query, exactly the same false-positive shape as the topic-switch
+#: check this filters for below - never used to guess MEANING, only to
+#: recognize that a message carries no product-specific content to check
+#: at all.
+#: An explicit request for a product ("I want X", "do you have X", "show me X").
+#: The "this store does not carry it" verdict (see `run_discovery_turn`) is only
+#: ever drawn for a message of this shape - never for "recommend one", "which
+#: would you choose?" or any other phrase whose unfamiliar words are not a
+#: product the shopper asked for.
+_REQUEST_FRAME = re.compile(
+    r"\bi(?:'d| would)? (?:want|need|like)\b|\blooking for\b|\bdo you (?:have|sell|carry|stock)\b|"
+    r"\bhave you got\b|\bgot any\b|\bshow me\b|\bfind me\b|\bget me\b",
+    re.IGNORECASE,
+)
+
+_CONTINUATION_FILLER_WORDS = frozenset({
+    "this", "that", "these", "those", "it", "them", "one", "ones", "why",
+    "how", "what", "else", "more", "again", "then", "please", "yes",
+    "okay", "ok", "sure", "wait", "hold", "actually", "never", "mind",
+    "show", "tell", "give", "find", "any", "some", "want", "need",
+})
 
 
 _RETRIEVAL_LIMIT = 20
@@ -99,7 +129,7 @@ async def _do_retrieve(adapter, query: str, *, limit: int = _RETRIEVAL_LIMIT) ->
     )
 
 
-async def run_discovery_turn(
+async def _run_discovery_turn_once(
     *,
     reasoning: ReasoningService,
     adapter,
@@ -111,6 +141,9 @@ async def run_discovery_turn(
     shopping_state: dict | None,
     memory_facts: list[dict] | None,
     trace: TurnTrace,
+    browse_all: bool = False,
+    raw_said_extra: str = "",
+    preset_products: list[Product] | None = None,
 ) -> tuple[TurnEvidence, list[Product], SearchIntent]:
     """The full retrieval -> evidence step for one V2 discovery turn.
     Returns (evidence, all fetched products, the SearchIntent actually
@@ -125,6 +158,10 @@ async def run_discovery_turn(
     below would otherwise have to wait for.
     """
     primary_query = (delta_query or message or "").strip() or message
+    if browse_all:
+        # The shopper asked for the store's whole domain ("show me coffee"
+        # at a coffee merchant) - a browse, not a search for a product word.
+        primary_query = ""
     proactive_carry_forward_used = False
     if constraint_only_turn:
         last_query = await search_context.get_last_effective_query(
@@ -140,7 +177,22 @@ async def run_discovery_turn(
     trace.search_intent_query = intent.query
     trace.search_intent_fallback_used = proactive_carry_forward_used
 
-    candidate_set = await _do_retrieve(adapter, intent.query)
+    if preset_products is not None:
+        # Category-grounded browse: the candidates are real products whose
+        # own `categories` matched a category the interpreter named AND
+        # the merchant's taxonomy confirmed (see `run_discovery_turn`).
+        candidate_set = CandidateSet(
+            intent=intent,
+            candidates=[
+                Candidate(product=p, retrieval_method=RetrievalMethod.ADAPTER_KEYWORD)
+                for p in preset_products
+            ],
+            total_available=len(preset_products),
+            unavailable=False,
+            truncated=False,
+        )
+    else:
+        candidate_set = await _do_retrieve(adapter, intent.query)
     # A carried-forward query is, by construction, words the shopper said
     # on an EARLIER turn, not this one - `query_diverges_from_said` (called
     # inside `build_evidence` below) checks the query's words against what
@@ -151,6 +203,11 @@ async def run_discovery_turn(
     raw_said_for_evidence = (
         f"{primary_query} {message}" if proactive_carry_forward_used else message
     )
+    if raw_said_extra:
+        # Spelling-normalized words are still the shopper's own words (a
+        # corrected token IS what they typed, fixed) - without this the
+        # divergence check would read a correction as an invented query.
+        raw_said_for_evidence = f"{raw_said_for_evidence} {raw_said_extra}"
 
     if candidate_set.unavailable:
         trace.candidate_count = 0
@@ -175,11 +232,39 @@ async def run_discovery_turn(
     # record. A shopper switching topics ("actually, do you have kayaks")
     # still searches their own new words first and correctly finds
     # nothing on its own merits - this never overrides a real result.
+    #
+    # Rev. 2 migration (2026-09): live-reproduced, this used to fire for
+    # ANY zero-result query regardless of whether it plausibly continued
+    # the prior topic - a genuinely NEW topic's own query returning zero
+    # results (e.g. a merchant search bug, or simply nothing in stock)
+    # would silently substitute the PREVIOUS topic's results instead of
+    # saying so honestly ("Show me socks." finding 0 candidates for a
+    # tokenizer reason silently re-showed the previous running-shoes
+    # search). The missing check: nothing here confirmed THIS message
+    # actually relates to the prior query at all before reusing it. Now
+    # requires a real, distinctive word shared between this turn's own
+    # message and the prior query - the same word-overlap discipline
+    # `verification.py`'s cross-check and `compare.py`'s historical-group
+    # matching already use for this exact class of decision - before ever
+    # trusting the substitution; a message that shares nothing with the
+    # prior query is exactly what "switching topics" means, and must
+    # degrade honestly (see the caller: an honest "nothing found" reply,
+    # never a masked substitution).
     if not products:
         last_query = await search_context.get_last_effective_query(
             session_id, connection_id
         )
-        if last_query and last_query != intent.query:
+        # A bare deictic follow-up ("Why this?", "tell me more") carries no
+        # distinctive noun of its OWN to check at all - that is evidence of
+        # pure continuation, never of a topic switch, so it must not be
+        # penalized the same way a message that DOES name something else
+        # entirely ("Show me socks.") correctly is. Only a message that
+        # names something specific AND shares nothing with the prior query
+        # is the real switch-topic signal this fix targets.
+        message_content_words = _distinctive_title_words(message) - _CONTINUATION_FILLER_WORDS
+        last_query_words = _distinctive_title_words(last_query or "")
+        plausibly_continues = not message_content_words or bool(message_content_words & last_query_words)
+        if last_query and last_query != intent.query and plausibly_continues:
             fallback_set = await _do_retrieve(adapter, last_query)
             if not fallback_set.unavailable and fallback_set.candidates:
                 candidate_set = fallback_set
@@ -315,6 +400,425 @@ async def run_discovery_turn(
     return evidence, products, intent
 
 
+async def _products_in_categories(adapter, categories: list[str], vocab) -> list[Product]:
+    """Real products whose own `categories` include one of the (already
+    taxonomy-validated) category names. Tries the adapter's bounded
+    department browse first (both demo platforms support `dept=` +
+    paging); when that yields nothing, filters one bounded browse sample
+    client-side - a disclosed sample, not a full-catalog scan."""
+    wanted = {c.lower() for c in categories}
+    found: dict[str, Product] = {}
+    for cat in categories:
+        try:
+            result = await adapter.search_products("", limit=_RETRIEVAL_LIMIT, dept=cat)
+        except TypeError:
+            break  # adapter has no department browse - use the sample below
+        except Exception:  # noqa: BLE001
+            logger.warning("shopper_v2 pipeline: department browse failed for %r", cat, exc_info=True)
+            continue
+        for p in list(getattr(result, "products", result) or []):
+            if wanted & {c.lower() for c in (getattr(p, "categories", None) or [])}:
+                found.setdefault(p.product_id, p)
+    if found:
+        return list(found.values())
+    try:
+        sample = await adapter.search_products("", limit=_CATALOG_SAMPLE_LIMIT * 5)
+    except Exception:  # noqa: BLE001
+        return []
+    return [
+        p for p in list(getattr(sample, "products", sample) or [])
+        if wanted & {c.lower() for c in (getattr(p, "categories", None) or [])}
+    ]
+
+
+async def _products_with_variant_terms(adapter, words: list[str]) -> list[Product]:
+    """Real products one of whose variants carries every word (see `vocabulary.product_has_variant_terms`),
+    from one bounded browse sample - a disclosed sample, not a full-catalogue scan."""
+    try:
+        sample = await adapter.search_products("", limit=_CATALOG_SAMPLE_LIMIT * 5)
+    except Exception:  # noqa: BLE001
+        logger.warning("shopper_v2 pipeline: variant-term browse failed", exc_info=True)
+        return []
+    return [
+        p for p in list(getattr(sample, "products", sample) or [])
+        if vocabulary.product_has_variant_terms(p, words)
+    ]
+
+
+def _buyable(product: Product) -> bool:
+    variants = list(getattr(product, "variants", None) or [])
+    if variants:
+        return any(str(v.availability) != "OUT_OF_STOCK" for v in variants)
+    return str(getattr(product, "availability", "UNKNOWN")) != "OUT_OF_STOCK"
+
+
+def _product_stems(product: Product) -> set[str]:
+    """Every word this product's own catalogue data carries (title, description,
+    departments, variant titles and option values), stemmed - the only evidence an
+    attribute word may be matched against."""
+    parts = [product.title or "", product.description or "", *(product.categories or [])]
+    for v in getattr(product, "variants", None) or []:
+        parts.append(v.title or "")
+        parts.extend(str(x) for x in (v.attributes or {}).values())
+    return {vocabulary._stem(w) for w in vocabulary._tokens(" ".join(parts))}
+
+
+async def _declared_domain_categories(adapter, vocab) -> list[str]:
+    """The merchant-declared departments a shop-domain word ("coffee" at a coffee
+    shop) means - from the connection's own capability declaration, validated
+    against the departments that really exist in its catalogue. Empty when the
+    merchant declares none, which keeps whole-catalogue behaviour."""
+    try:
+        caps = await adapter.get_capabilities()
+        raw = caps.constraint(Operation.SEARCH_PRODUCTS, "domain_categories")
+    except Exception:  # noqa: BLE001 - no declaration is a degrade, never a failure
+        return []
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    return vocabulary.validate_categories([c.strip() for c in raw.split("|") if c.strip()], vocab)
+
+
+def _list_titles(products: list[Product], limit: int = 6) -> str:
+    return ", ".join(p.title for p in products[:limit])
+
+
+async def _domain_grounded_turn(
+    *, adapter, vocab, norm, domain_word: str, common: dict, trace: TurnTrace,
+):
+    """A request that names the shop's whole domain plus descriptors ("a fruity
+    coffee", "chocolatey coffee", "decaf coffee") answered from the merchant's
+    OWN declared range, with the descriptors treated as preferences to be matched
+    against what each product's data actually says - never as proof that such a
+    product exists or is in stock:
+
+    * descriptors every shown product's own text carries -> exactly those products;
+    * descriptors nothing in the range carries -> the in-stock range, with an honest
+      line saying none is described that way (no semantic guess such as
+      "blueberry means fruity");
+    * the only descriptor matches are sold out -> said so, with what IS in stock;
+    * the whole range sold out -> said so.
+    Returns `(evidence, products, intent)` like any discovery turn, or `None` when
+    this merchant declares no domain range (the caller then behaves as before)."""
+    core = await _declared_domain_categories(adapter, vocab)
+    if not core:
+        return None
+    range_products = await _products_in_categories(adapter, core, vocab)
+    if not range_products:
+        return None
+    descriptors = [
+        w for w in (
+            vocabulary.content_words(norm.query, vocab)[0] + vocabulary.content_words(norm.query, vocab)[1]
+        )
+    ]
+    stems = [vocabulary._stem(w) for w in descriptors]
+    in_stock = [p for p in range_products if _buyable(p)]
+    matched = [p for p in range_products if stems and all(st in _product_stems(p) for st in stems)] if stems else []
+    matched_in_stock = [p for p in matched if _buyable(p)]
+
+    reply: str | None = None
+    if not stems:
+        shown = in_stock
+    elif matched_in_stock:
+        shown = matched_in_stock
+    else:
+        shown = in_stock
+        said = " ".join(descriptors)
+        if matched:
+            reply = (
+                f"{_list_titles(matched)} fits \"{said}\" but "
+                f"{'is' if len(matched) == 1 else 'are'} sold out right now."
+            )
+            if in_stock:
+                reply += f" In stock instead: {_list_titles(in_stock)}."
+        elif in_stock:
+            reply = (
+                f"Nothing in our {domain_word} range is described as \"{said}\" - I can only go by "
+                f"what each product's description says. These {domain_word} options are in stock: "
+                f"{_list_titles(in_stock)}."
+            )
+    if not shown:
+        trace.query_normalization = {
+            **(trace.query_normalization or {}), "outcome": "domain_range_sold_out",
+            "domain_reply": f"Everything in our {domain_word} range is sold out right now.",
+        }
+        evidence = build_evidence(
+            query=norm.query, raw_said=common["message"], products=[], shopping_state=common["shopping_state"],
+            memory_facts=common["memory_facts"], catalog_sample=None, platform_unavailable=False,
+        )
+        return evidence, [], SearchIntent.from_shopping_state(
+            raw_message=common["message"], query=norm.query, shopping_state=common["shopping_state"])
+    result = await _run_discovery_turn_once(**common, delta_query=None, browse_all=True, preset_products=shown)
+    if not any(e.relevance_verified for e in result[0].products):
+        return None
+    trace.query_normalization = {
+        **(trace.query_normalization or {}),
+        "corrections": norm.corrections, "dropped_domain_terms": norm.dropped_domain_terms,
+        "outcome": "domain_grounded", "domain_categories": core, "descriptors": descriptors,
+        **({"domain_reply": reply} if reply else {}),
+    }
+    return result
+
+
+async def run_discovery_turn(
+    *,
+    reasoning: ReasoningService,
+    adapter,
+    session_id: str,
+    connection_id: str,
+    message: str,
+    delta_query: str | None,
+    constraint_only_turn: bool = False,
+    shopping_state: dict | None,
+    memory_facts: list[dict] | None,
+    trace: TurnTrace,
+    category_hints: list[str] | None = None,
+) -> tuple[TurnEvidence, list[Product], SearchIntent]:
+    """The public discovery entry: normalize the shopper's words against the
+    merchant's REAL catalog vocabulary (spelling + domain words - see
+    `vocabulary.py`), run the pipeline on the normalized query, and VERIFY
+    the result. A normalized search that verifies nothing never replaces a
+    literal search that did: the shopper's own words are re-run and win
+    whenever the correction found nothing real. Nothing is ever corrected
+    against a general dictionary, and a vocabulary that cannot be built
+    (platform down) degrades to exactly the pre-normalization behavior."""
+    common = dict(
+        reasoning=reasoning, adapter=adapter, session_id=session_id,
+        connection_id=connection_id, message=message,
+        constraint_only_turn=constraint_only_turn, shopping_state=shopping_state,
+        memory_facts=memory_facts, trace=trace,
+    )
+    base_query = (delta_query or message or "").strip() or message
+    norm = None
+    vocab = None
+    valid_categories: list[str] = []
+    if not constraint_only_turn:
+        try:
+            vocab = await vocabulary.get_vocabulary(adapter, connection_id)
+            if vocab is not None:
+                norm = vocabulary.normalize_query(base_query, vocab)
+                valid_categories = vocabulary.validate_categories(category_hints or [], vocab)
+        except Exception:  # noqa: BLE001 - normalization must never break a turn
+            logger.warning("shopper_v2 pipeline: query normalization failed", exc_info=True)
+            norm = None
+
+    # Every distinctive word the shopper used is unknown to this store's own
+    # catalogue vocabulary ("jockey underwear", "coffee" at a running shop): the
+    # store does not sell it. A whole-category fallback would answer a specific
+    # request with an unrelated department (running tights for underwear,
+    # electrolyte tablets for coffee), so it is withheld and the turn ends in an
+    # honest "this store doesn't carry that" instead. Words the store DOES know
+    # (including its own domain) never trigger this.
+    not_carried = False
+    if (
+        vocab is not None and norm is not None and not constraint_only_turn
+        and not norm.browse_only and _REQUEST_FRAME.search(message or "")
+    ):
+        # The store's own domain words ("coffee" at a coffee shop) are removed
+        # from `norm.query` by normalization, but they are still words this
+        # store knows: "a fruity coffee" is a request for coffee with an
+        # unfamiliar adjective, never for something the store does not sell.
+        known_words, unknown_words = vocabulary.content_words(
+            " ".join([norm.query, *norm.dropped_domain_terms]), vocab,
+        )
+        not_carried = bool(unknown_words) and not known_words
+
+    def _mark_not_carried(result):
+        evidence, products, intent = result
+        if not_carried and not any(e.relevance_verified for e in evidence.products):
+            trace.query_normalization = {
+                **(trace.query_normalization or {}), "outcome": "not_carried",
+            }
+            evidence = evidence.model_copy(update={"shop_carries_category": False})
+        return evidence, products, intent
+
+    async def _category_browse(outcome: str):
+        preset = await _products_in_categories(adapter, valid_categories, vocab)
+        if not preset:
+            return None
+        result = await _run_discovery_turn_once(
+            **common, delta_query=None, browse_all=True, preset_products=preset,
+        )
+        if not any(e.relevance_verified for e in result[0].products):
+            return None
+        trace.query_normalization = {
+            **(
+                {"corrections": norm.corrections, "dropped_domain_terms": norm.dropped_domain_terms}
+                if norm is not None else {}
+            ),
+            "grounded_categories": valid_categories,
+            "outcome": outcome,
+        }
+        return result
+
+    async def _variant_browse():
+        """Last grounded resort before an honest no-match: a word that only product VARIANTS can ground ("beans"
+        -> the "250g whole bean" option on every coffee). Real catalogue evidence, no model guess; the products
+        come from a bounded browse sample (disclosed, like the category fallbacks) and then go through exactly the
+        same hard filters (stock, budget, exclusions) as any other candidate."""
+        if vocab is None or constraint_only_turn:
+            return None
+        query_text = norm.query if norm is not None else base_query
+        words = vocabulary.variant_only_words(query_text, vocab)
+        if not words:
+            return None
+        # Every distinctive word must be accounted for by variant evidence (the store's own domain word, already
+        # neutralized by normalization, counts as accounted for). Any other word - unknown ("kayak") or a title
+        # word the ordinary search already handled - means this is not a pure variant request, and grounding on
+        # the variant word alone would answer a different question than the one asked.
+        # (`query_text` is already normalized: the store's domain word is not in it, so it needs no check.)
+        known, unknown = vocabulary.content_words(query_text, vocab)
+        if unknown or any(vocabulary._stem(w) not in vocab.variant_stems for w in known):
+            return None
+        # EVERY known variant word must be carried by one variant, not only the variant-only ones: "ground beans"
+        # is not "beans" just because "ground" also happens to appear in some description.
+        terms = [w for w in known if vocabulary._stem(w) in vocab.variant_stems]
+        preset = await _products_with_variant_terms(adapter, terms)
+        if not preset:
+            return None
+        result = await _run_discovery_turn_once(
+            **common, delta_query=None, browse_all=True, preset_products=preset,
+        )
+        if not any(e.relevance_verified for e in result[0].products):
+            return None
+        trace.query_normalization = {
+            **(
+                {"corrections": norm.corrections, "dropped_domain_terms": norm.dropped_domain_terms}
+                if norm is not None else {}
+            ),
+            "grounded_variant_terms": words,
+            "outcome": "variant_grounded",
+        }
+        return result
+
+    # The request names one of the merchant's declared DEPARTMENTS exactly ("Show me Footwear" - the tap of a
+    # category choice, or the same words typed): browse that department. The platform's own keyword search does
+    # not match department names (only 1 of Northfield's 6 departments returned anything), and a title match on the
+    # name ("Recovery Slide" for "Recovery") would show products from OTHER departments.
+    if vocab is not None and not constraint_only_turn:
+        named_departments = vocabulary.departments_named(base_query, vocab)
+        if named_departments:
+            saved_categories = valid_categories
+            valid_categories = named_departments
+            try:
+                grounded = await _category_browse("department_named_browse")
+            finally:
+                valid_categories = saved_categories
+            if grounded is not None:
+                return grounded
+
+    # Several products named in one request ("the Trailblazer and the Starter Road Shoe"): each named part is resolved
+    # on its own and every one found is shown, in the order named; a part that cannot be found is said so. The
+    # ordinary search would keep only the top-scoring match and silently drop the rest.
+    if vocab is not None and not constraint_only_turn:
+        try:
+            multi = await named_product.resolve_named_products(adapter=adapter, message=message, vocab=vocab)
+        except Exception:  # noqa: BLE001 - never break a turn on this
+            logger.warning("shopper_v2 pipeline: multi-product resolution failed", exc_info=True)
+            multi = None
+        if multi is not None:
+            result = await _run_discovery_turn_once(
+                **common, delta_query=None, browse_all=True, preset_products=list(multi.products),
+            )
+            evidence, shown_products, intent = result
+            verified = {e.product_id for e in evidence.products if e.relevance_verified}
+            order = {p.product_id: i for i, p in enumerate(multi.products)}
+            shown_products = sorted(
+                [p for p in shown_products if p.product_id in verified], key=lambda p: order.get(p.product_id, 99),
+            )
+            evidence = evidence.model_copy(update={"products": sorted(
+                evidence.products, key=lambda e: order.get(e.product_id, 99),
+            )})
+            unavailable = [p.title for p in multi.products if p.product_id not in verified]
+            parts = []
+            if shown_products:
+                parts.append("Here " + ("they are" if len(shown_products) > 1 else "it is") + ": "
+                             + ", ".join(p.title for p in shown_products) + ".")
+            if unavailable:
+                parts.append(f"{', '.join(unavailable)} {'is' if len(unavailable) == 1 else 'are'} not available right now "
+                             "(out of stock or outside what you asked for).")
+            if multi.missing:
+                parts.append(f"I couldn't find: {', '.join(multi.missing)}.")
+            if multi.ambiguous:
+                parts.append(f"{', '.join(multi.ambiguous)} could mean several products - tell me which one.")
+            trace.query_normalization = {
+                "outcome": "named_products", "named": [p.product_id for p in multi.products],
+                "missing": multi.missing, "ambiguous": multi.ambiguous, "unavailable": unavailable,
+                "domain_reply": " ".join(parts),
+            }
+            return evidence, shown_products, intent
+
+    # A shop-domain word with or without descriptors ("coffee", "a fruity coffee")
+    # at a merchant that DECLARES what its domain range is: answered from that
+    # range deterministically, no interpreter needed (see `_domain_grounded_turn`).
+    if norm is not None and vocab is not None and norm.dropped_domain_terms and not constraint_only_turn:
+        try:
+            domain_result = await _domain_grounded_turn(
+                adapter=adapter, vocab=vocab, norm=norm, domain_word=norm.dropped_domain_terms[0],
+                common=common, trace=trace,
+            )
+        except Exception:  # noqa: BLE001 - grounding must never break a turn
+            logger.warning("shopper_v2 pipeline: domain grounding failed", exc_info=True)
+            domain_result = None
+        if domain_result is not None:
+            return domain_result
+
+    # The shopper asked for the store's whole domain ("show me coffee") and
+    # the interpreter grounded it onto real categories: browse THOSE, not
+    # the entire store (equipment/gifts are not what "coffee" means).
+    if valid_categories and norm is not None and norm.browse_only:
+        grounded = await _category_browse("category_grounded_browse")
+        if grounded is not None:
+            return grounded
+
+    if norm is not None and norm.changed:
+        evidence, products, intent = await _run_discovery_turn_once(
+            **common, delta_query=norm.query, browse_all=norm.browse_only,
+            raw_said_extra=" ".join(norm.corrections.values()),
+        )
+        if any(e.relevance_verified for e in evidence.products):
+            trace.query_normalization = {
+                "corrections": norm.corrections,
+                "dropped_domain_terms": norm.dropped_domain_terms,
+                "browse_only": norm.browse_only,
+                "outcome": "normalized_verified",
+            }
+            return evidence, products, intent
+        literal = await _run_discovery_turn_once(**common, delta_query=delta_query)
+        literal_verified = any(e.relevance_verified for e in literal[0].products)
+        trace.query_normalization = {
+            "corrections": norm.corrections,
+            "dropped_domain_terms": norm.dropped_domain_terms,
+            "browse_only": norm.browse_only,
+            "outcome": "literal_kept" if literal_verified else "neither_verified",
+        }
+        # Prefer whichever attempt found something real; when neither did,
+        # a category the interpreter grounded (and the taxonomy confirmed) is
+        # the last real option before an honest no-match.
+        if not literal_verified and valid_categories and not not_carried:
+            grounded = await _category_browse("category_grounded_after_no_match")
+            if grounded is not None:
+                return grounded
+        if not literal_verified:
+            grounded = await _variant_browse()
+            if grounded is not None:
+                return grounded
+        return _mark_not_carried(literal)
+
+    literal_result = await _run_discovery_turn_once(**common, delta_query=delta_query)
+    if (
+        valid_categories and not not_carried
+        and not any(e.relevance_verified for e in literal_result[0].products)
+    ):
+        grounded = await _category_browse("category_grounded_after_no_match")
+        if grounded is not None:
+            return grounded
+    if not any(e.relevance_verified for e in literal_result[0].products):
+        grounded = await _variant_browse()
+        if grounded is not None:
+            return grounded
+    return _mark_not_carried(literal_result)
+
+
 def _judge_pick_passes_hard_filter(product: Product, shopping_state: dict | None) -> bool:
     """The semantic judge only ever proposes a product it found plausible
     by category/description - it has no concept of the shopper's stated
@@ -366,24 +870,20 @@ async def _try_semantic_judge(
     every other product was checked against - see
     `_judge_pick_passes_hard_filter`. A pick that fails is treated as no
     match, not silently downgraded to unverified-but-shown."""
-    # Structural fix: `already_fetched` (this turn's REAL search candidates)
-    # was accepted as a parameter but never actually read here - the judge
-    # was always shown a generic, query-blind catalog browse instead of
-    # what this turn's own search already surfaced. Prefer the real,
-    # already-fetched candidates when there are any; only fall back to a
-    # blind browse when this turn's search itself found nothing at all
-    # (`no_candidates`), so the judge still has something to reason over.
-    if already_fetched:
-        sample = list(already_fetched)
-    else:
-        try:
-            sample_result = await retrieve(adapter, "", limit=_CATALOG_SAMPLE_LIMIT)
-        except Exception:  # noqa: BLE001 - degrade to the existing verdict, never raise further
-            logger.warning("shopper_v2 pipeline: catalog sample fetch failed", exc_info=True)
-            return evidence, None
-        sample = list(sample_result.products or [])
-    if not sample:
+    # Step 22 live finding (gpt-4o-mini, 2 of 2): "beans" at a coffee shop
+    # matched no product text, and this judge used to BROWSE a generic
+    # catalogue sample and pick one product as "the best fit" - a manufactured
+    # single answer to a request that names a whole class of products, which
+    # also pre-empted the grounded category path (a verified pick meant
+    # "something was found", so the interpreter's taxonomy-validated
+    # categories were never browsed). The judge now only ever chooses among
+    # this turn's REAL retrieved candidates (`already_fetched`); with none
+    # there is nothing to judge, and the turn ends in the honest no-match
+    # reply (or the grounded category browse, when the interpreter supplied
+    # categories the store's own taxonomy confirms).
+    if not already_fetched:
         return evidence, None
+    sample = list(already_fetched)
 
     categories = sorted({c for p in sample for c in (p.categories or [])})
     sample_titles = [

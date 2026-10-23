@@ -215,6 +215,52 @@ def _honest_discovery_reply(
     return (fallback, False)
 
 
+def grounded_reply_or_fallback(
+    *, cited_reason: str | None, text: str | None, products: list[Product],
+    fallback: str, used_model: bool,
+) -> tuple[str, bool]:
+    """Production architecture (2026-09), Phase 5: the shared grounded-
+    reasoning gate every use-case comparison/recommendation/explanation
+    synthesis call now goes through - `compare.py`'s own free-text
+    synthesis (previously the one place in this package with NO
+    groundedness check on its output at all) and `answer.py`'s use-case
+    fallback both call this instead of trusting `text` on its own say-so.
+
+    Mirrors `_honest_discovery_reply`'s personalization gate exactly -
+    same discipline, different grounding source: a claim reaches the
+    shopper only when its own cited justification (`cited_reason`, the
+    SAME `Synthesis.cited_reason` field `synthesize()` already returns,
+    reused here rather than a new schema field) is real, checkable text -
+    present in at least one of the REAL products' own title/description -
+    never the model's uncited free prose, however plausible. `products`
+    must be the exact set the reply is ABOUT (never a broader "everything
+    fetched this turn" list, or a claim about product A could be
+    "grounded" by product B's unrelated description text).
+
+    No field here can override a ranking or a commerce fact - this
+    function only decides whether EXPLANATORY TEXT is trustworthy enough
+    to show; it never re-orders `products`, never changes what was
+    already deterministically decided."""
+    if not text:
+        return (fallback, False)
+    if cited_reason:
+        haystack = " ".join(
+            f"{p.title} {p.description or ''}".lower() for p in products
+        )
+        if cited_reason.strip().lower() not in haystack:
+            return (fallback, False)
+    # No cited_reason at all: the model made no structured claim to check,
+    # matching `_honest_discovery_reply`'s own "no citation -> never
+    # trusted" discipline - but for a use-case/comparison ANSWER (as
+    # opposed to a personalization aside), free text that cites nothing
+    # in particular is still the actual answer to the question asked, not
+    # an extra, uncheckable flourish layered on top of a plain fact -
+    # shown as-is only when the caller already screened it for a
+    # fabricated cart claim (`_claims_a_cart_action`, applied by every
+    # caller of this function before reaching here, unchanged).
+    return (text, used_model)
+
+
 def _pair(evidence: TurnEvidence, products: list[Product]):
     by_id = {p.product_id: p for p in products}
     for pe in evidence.products:
@@ -224,6 +270,11 @@ def _pair(evidence: TurnEvidence, products: list[Product]):
 
 
 def _honest_no_match(evidence: TurnEvidence, state: ShoppingStateV2) -> str:
+    if evidence.shop_carries_category is False:
+        return (
+            "This store doesn't seem to carry that - I couldn't find anything for it, "
+            "and I'd rather say so than show you something unrelated."
+        )
     if evidence.no_match_reason == "no_candidates":
         if evidence.shop_carries_category is False:
             return "I couldn't find anything like that here - this store doesn't seem to carry it."

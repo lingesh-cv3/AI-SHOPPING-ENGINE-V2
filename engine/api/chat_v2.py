@@ -13,7 +13,10 @@ opaque objects, passed straight through to `orchestrator.py` exactly as
 `engine/api/chat.py` already constructs and uses them (same shared `engine`
 singleton, same `db.record_case`/`execute_case` functions) - never
 reimplemented. Every cart-affecting path still resolves to a
-`PROPOSE_CART_CHANGE` proposal, never a direct mutation - see
+`PROPOSE_CART_CHANGE` proposal; the model never authorizes a mutation. An
+explicit typed add command (`shopper_v2/add_command.py`) with an unambiguous
+product and variant runs that proposal through the same
+`accept_cart_proposal_core` in the same turn (otherwise it asks) - see
 `engine/shopper_v2/cart_proposal.py`'s own docstring for the full safety
 argument. Shoppers approve or reject a V2-created proposal through the
 EXISTING, unmodified `POST /api/chat/proposals/{id}/accept` /
@@ -31,6 +34,7 @@ from engine import db
 from engine import session as session_store
 from engine.execution import events as shopper_events
 from engine.execution import return_risk
+from engine.shopper_v2 import guided_mission
 from engine.shopper_v2.evidence import TurnEvidence, build_why_v2
 from engine.shopper_v2.orchestrator import run_turn
 from engine.shopper_v2.state import ShoppingStateV2
@@ -63,6 +67,14 @@ class ChatRequestV2(BaseModel):
     #: code, a declined payment); asking the model to re-infer it from a
     #: synthesized sentence is strictly worse than just being told.
     friction: str | None = None
+    #: Optional. The term the shopper actually searched for, sent as
+    #: STRUCTURED data alongside `friction="DEAD_SEARCH"`. Previously the term
+    #: existed only inside the synthesized `message` sentence, which friction
+    #: recovery never parsed - so a dead search could only ever list
+    #: departments. Honored only for a dead search; ignored for every other
+    #: friction type and when there is no friction signal. Length-bounded like
+    #: a search box, and always treated as a search term, never as a command.
+    friction_query: str | None = Field(default=None, max_length=200)
     #: Optional. A tapped variant-option button, when the frontend renders
     #: one - the reply to a pending `fulfillment.py` question ("what size
     #: for the Trailblazer?"). Trusted over anything the shopper's own
@@ -120,6 +132,79 @@ class ChatReplyV2(BaseModel):
     #: function's own docstring for why V1's `engine/api/why.py::explain`
     #: (built around rejected ACTIONS) is not reused as-is here.
     why: dict | None = None
+
+
+class MissionAdvanceRequest(BaseModel):
+    connection_id: str
+    session_id: str
+    cart_id: str
+
+
+class MissionAdvanceReply(BaseModel):
+    #: What follows a confirmed add for an open guided mission (the cart
+    #: confirmation and the next stage - or the closing summary); `None` when
+    #: nothing changed (no mission, nothing newly in the cart).
+    reply: str | None = None
+    products: list[ProductSummaryV2] = Field(default_factory=list)
+
+
+@router.post("/mission/advance", response_model=MissionAdvanceReply)
+async def mission_advance(
+    req: MissionAdvanceRequest,
+    key=Depends(any_key),
+    who: Visitor = Depends(visitor),
+) -> MissionAdvanceReply:
+    """Called by the storefront after a product-card tap changed the cart, so
+    a guided mission moves on to its next stage the same way it does after a
+    typed add. Read-only with respect to the cart: it only READS the cart the
+    caller owns and updates the mission's own stage bookkeeping - the same
+    ownership checks `chat_v2` applies guard it, and it never adds, removes,
+    prices or pays for anything."""
+    belongs_to(key, req.connection_id)
+    await require_owner(
+        who, req.connection_id, db.owners.SESSION, req.session_id,
+        code="SESSION_NOT_FOUND", message="no such conversation", read_only=True,
+    )
+    await require_owner(
+        who, req.connection_id, db.owners.CART, req.cart_id,
+        code="CART_NOT_FOUND", message="no such cart", read_only=True,
+    )
+    adapter = engine.registry.adapter_for(req.connection_id)
+    if adapter is None:
+        raise HTTPException(404, f"unknown connection '{req.connection_id}'")
+    advanced = await guided_mission.advance_from_cart(
+        adapter=adapter, session_id=req.session_id, connection_id=req.connection_id,
+        cart_id=req.cart_id,
+    )
+    if advanced is None:
+        return MissionAdvanceReply()
+    text, products = advanced
+    try:
+        await session_store.add_turn(
+            session_id=req.session_id, connection_id=req.connection_id, speaker="assistant",
+            text=text,
+            products=[
+                {
+                    "product_id": p.product_id, "title": p.title, "description": p.description,
+                    "price": str(p.price) if p.price is not None else None, "categories": [],
+                    "fit": None,
+                }
+                for p in products
+            ] or None,
+        )
+    except Exception:  # noqa: BLE001 - best-effort transcript write, never fail the advance
+        pass
+    return MissionAdvanceReply(
+        reply=text,
+        products=[
+            ProductSummaryV2(
+                product_id=p.product_id, title=p.title, description=p.description,
+                price=str(p.price) if p.price is not None else None, image_url=p.image_url,
+                availability=str(p.availability) if p.availability is not None else None,
+            )
+            for p in products
+        ],
+    )
 
 
 @router.post("", response_model=ChatReplyV2)
@@ -180,6 +265,7 @@ async def chat_v2(
         connection_id=req.connection_id,
         message=req.message,
         friction=req.friction,
+        friction_query=req.friction_query,
         memory_facts=memory_facts or None,
         cart_id=req.cart_id,
         decision=engine.decision,

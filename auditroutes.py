@@ -186,6 +186,16 @@ PROBES = [
     ("approval history", "GET", "/api/approvals/conn_demo/history", SK_DEMO, None, None),
     ("approval history (cross-merchant)", "GET", "/api/approvals/conn_kettle/history",
      SK_KETTLE, SK_DEMO, None),
+    # Shopper follow-ups (a merchant's own hand-overs). Case ids that do not exist:
+    # the owner gets a 404 / "changed: false" and nothing is touched, so these probe
+    # the lock without mutating real work.
+    ("follow-ups list", "GET", "/api/handovers/conn_demo", SK_DEMO, None, None),
+    ("follow-ups list (cross-merchant)", "GET", "/api/handovers/conn_kettle",
+     SK_KETTLE, SK_DEMO, None),
+    ("follow-up detail (cross-merchant)", "GET", "/api/handovers/conn_kettle/case_audit_probe",
+     SK_KETTLE, SK_DEMO, None),
+    ("follow-up close (cross-merchant)", "POST",
+     "/api/handovers/conn_kettle/case_audit_probe/close", SK_KETTLE, SK_DEMO, {}),
     ("approval decide (cross-merchant)", "POST", "/api/approvals/conn_kettle/apr_audit_probe",
      SK_KETTLE, SK_DEMO, {"approved": False, "decided_by": "audit-probe"}),
     # Reads a transcript rather than sending a message. Same router, same guard,

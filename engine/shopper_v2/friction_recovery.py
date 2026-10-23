@@ -50,7 +50,7 @@ async def run_friction_recovery_turn(
     keeps the same return shape every other capability uses so
     `orchestrator.py` doesn't need a special case."""
     if friction == DEAD_SEARCH:
-        return await _dead_search_reply(adapter), TurnEvidence(query=None, products=[])
+        return await dead_search_reply(adapter), TurnEvidence(query=None, products=[])
     if friction == PROMOTION_FAILED:
         return _promotion_failed_reply(state), TurnEvidence(query=None, products=[])
     return (
@@ -60,7 +60,7 @@ async def run_friction_recovery_turn(
     )
 
 
-async def _dead_search_reply(adapter) -> str:
+async def dead_search_reply(adapter) -> str:
     """A dead search is not a dead end - the merchant's own real department
     list (never invented) gives the shopper something concrete to try
     instead of a bare apology."""

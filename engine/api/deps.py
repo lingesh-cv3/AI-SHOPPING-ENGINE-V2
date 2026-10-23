@@ -62,6 +62,13 @@ MERCHANT_NAMES: dict[str, str] = {
     KETTLE_ID: KETTLE_NAME,
 }
 
+# Trading names feed ONLY the catalog vocabulary's domain-word derivation
+# (`engine/shopper_v2/vocabulary.py`) - never an identifier.
+from engine.shopper_v2.vocabulary import register_merchant_name  # noqa: E402
+
+for _cid, _name in MERCHANT_NAMES.items():
+    register_merchant_name(_cid, _name)
+
 # Kept for backwards compatibility with earlier code that imported it directly.
 DEV_CONNECTION_ID = NORTHFIELD_ID
 DEV_MERCHANT_NAME = NORTHFIELD_NAME

@@ -55,7 +55,7 @@ test('the normal Shopper widget is the only assistant, opens as before, and reac
   expect(req.url()).toContain('/api/v2/chat');
 });
 
-test('REGRESSION: "I need shoes" through the real widget is discovery only, shows every real match, and explicit intent proposes + approving actually mutates the cart', async ({ page }) => {
+test('REGRESSION: "I need shoes" through the real widget is discovery only, shows every real match, and an explicit add command actually adds to the cart (no approval step)', async ({ page }) => {
   test.setTimeout(180000);
   await openChat(page);
 
@@ -64,28 +64,22 @@ test('REGRESSION: "I need shoes" through the real widget is discovery only, show
   // No fabricated "added" claim, and no cart-mutation control appears from
   // a plain discovery statement.
   await expect(page.locator('.chatwidget')).not.toContainText(/added to your cart/i);
-  // This demo catalogue's Footwear department was expanded to 9 real,
-  // genuinely distinct running shoes (per PROGRESS.md's catalog-diversity
-  // pass) - the widget still shows a deliberately capped shortlist of (up
-  // to) 4, matching the reply's own naming (respond.py's `verified[:4]`)
-  // and ChatWidget.tsx's own `.slice(0, 4)` - a documented, intentional
-  // UX decision (mission_ranking.py's DEFAULT_LIMIT, citing CLAUDE.md's
-  // own shopper-abandonment research), not a truncation bug. The backend's
-  // `products` API field still carries every verified candidate - this
-  // asserts what the shopper actually SEES in the widget, not the full
-  // verified count, which the "genuine multi-product ambiguity" test below
-  // exercises against the real, uncapped candidate set instead.
-  await expect(page.locator('.chatproduct')).toHaveCount(4);
+  // This demo catalogue's Footwear department holds 9 real, genuinely distinct
+  // running shoes, and a plain uncounted request shows EVERY verified match
+  // (commit ecc00d7, 2026-09-24: "plain discovery queries show everything
+  // found, not a fixed 4-item preview"; only an explicit count such as "show
+  // me two shoes" caps the display - see test_query_intent_consolidation.py).
+  // The old expectation of 4 cards described the superseded preview cap.
+  await expect(page.locator('.chatproduct')).toHaveCount(9);
 
   // With several real products now shown, "I'll take this" is genuinely
   // ambiguous and must ask which one, never guess (the same trusted-tap
   // invariant this project holds everywhere else) - covered by its own
   // test below ("genuine multi-product ambiguity..."), not repeated here.
   // A narrower need instead, that resolves to exactly one real product,
-  // is what exercises the actual regression this test guards: explicit
-  // intent creates a real proposal, shown by the EXISTING ProposalsPanel
-  // (unchanged, already generic over who created a proposal), never an
-  // inline cart mutation from chat text alone.
+  // is what exercises the actual regression this test guards: an explicit
+  // typed add command (Step 25 policy) executes through the deterministic
+  // cart-add flow and is reported from the platform's actual result.
   await send(page, 'I need a water bottle');
   await expect(page.locator('.bubble').last().locator('.chatproduct').first()).toBeVisible({
     timeout: 30000,
@@ -95,34 +89,15 @@ test('REGRESSION: "I need shoes" through the real widget is discovery only, show
   // transcript above.
   await expect(page.locator('.bubble').last().locator('.chatproduct')).toHaveCount(1);
 
-  let sawProposal = false;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    await send(page, 'add the water bottle to my cart');
-    try {
-      await page.locator('.panel', { hasText: 'Suggestions' }).waitFor({ timeout: 20000 });
-      sawProposal = true;
-      break;
-    } catch {
-      await page.waitForTimeout(15000);
-    }
-  }
-  expect(sawProposal).toBe(true);
-
-  // Closing the chat panel first - a real shopper reaching for the
-  // sidebar's own Suggestions panel would do the same; the floating chat
-  // panel and the sidebar can visually overlap at this viewport size,
-  // which is a layout concern unrelated to the V1->V2 engine swap this
-  // test is verifying.
+  await send(page, 'add the water bottle to my cart');
+  // Reported from the platform's actual result, with no approval step...
+  await expect(page.locator('.chatwidget .bubble.assistant').last()).toContainText(/added/i, { timeout: 30000 });
+  await expect(page.locator('.chatwidget')).not.toContainText(/confirm to go ahead|proposal/i);
+  // ...and the real cart now actually holds the item (the panel is refreshed from the engine's cart_changed).
   await page.locator('.chatclose').click();
-  const acceptButton = page.locator('.panel', { hasText: 'Suggestions' }).getByRole('button', { name: 'Accept' }).first();
-  await acceptButton.click();
-
-  // The real cart (shared, sessionStorage-backed) now actually holds an
-  // item - or a real size/option choice appeared, the same
-  // already-existing needs_choice mechanism a direct tap already uses.
-  await page.waitForTimeout(3000);
-  const cartId = await page.evaluate(() => sessionStorage.getItem('cv3_cart_conn_demo'));
-  expect(cartId).toBeTruthy();
+  await expect(page.locator('.panel:not(:has-text("Suggestions")) .line')).toHaveCount(1, { timeout: 15000 });
+  await expect(page.locator('.panel:not(:has-text("Suggestions")) .line').first()).toContainText(/bottle/i);
+  await expect(page.locator('.panel', { hasText: 'Suggestions' }).getByRole('button', { name: 'Accept' })).toHaveCount(0);
 });
 
 test('genuine multi-product ambiguity asks which one, never guesses or fabricates a proposal', async ({ page }) => {
@@ -131,12 +106,10 @@ test('genuine multi-product ambiguity asks which one, never guesses or fabricate
 
   await send(page, 'I need shoes');
   await expect(page.locator('.chatproduct').first()).toBeVisible({ timeout: 30000 });
-  // See the REGRESSION test's own comment: the widget shows a capped
-  // shortlist of 4 real cards even though 9 real candidates exist
-  // server-side - genuine ambiguity below comes from the real, uncapped
-  // candidate set the server resolves "this" against, not from how many
-  // cards happen to be rendered.
-  await expect(page.locator('.chatproduct')).toHaveCount(4);
+  // See the REGRESSION test's own comment: every verified match is shown (9
+  // here); ambiguity below comes from the real candidate set the server
+  // resolves "this" against.
+  await expect(page.locator('.chatproduct')).toHaveCount(9);
 
   await send(page, "I'll take this");
   await page.waitForTimeout(6000);
@@ -197,7 +170,7 @@ test('Kettle & Bloom (GraphQL): the same widget works there too', async ({ page 
   await expect(page.locator('.chatproduct').first()).toBeVisible({ timeout: 30000 });
 });
 
-test('multi-item mission: independent tracking and a real basket proposal, through the same widget', async ({ page }) => {
+test('multi-item mission: a staged plan, a focused answer to "add these", and an explicit add for a named product, through the same widget', async ({ page }) => {
   // Replaces coverage that used to live in shopper-v2.spec.ts against a
   // separate `ShopperV2Panel`/`shopper-v2-mission-sidebar` UI which no
   // longer exists (that component was never folded into the real
@@ -215,19 +188,17 @@ test('multi-item mission: independent tracking and a real basket proposal, throu
   await expect(page.locator('.bubble').last()).toContainText(/running shoes/i);
   await expect(page.locator('.bubble').last()).toContainText(/socks/i);
 
-  // A basket-propose request creates real, independent cart proposals -
-  // shown via the existing, unmodified ProposalsPanel, never silently
-  // merged into the cart.
-  let sawProposal = false;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    await send(page, 'add these to my cart');
-    try {
-      await page.locator('.panel', { hasText: 'Suggestions' }).waitFor({ timeout: 20000 });
-      sawProposal = true;
-      break;
-    } catch {
-      await page.waitForTimeout(15000);
-    }
-  }
-  expect(sawProposal).toBe(true);
+  // "add these to my cart" over a staged mission is NOT a request to add everything:
+  // each stage's product, size and approval are the shopper's own, so the assistant
+  // asks about the OPEN stage instead - no proposal, no cart change, no failure message.
+  await send(page, 'add these to my cart');
+  await expect(page.locator('.bubble').last()).toContainText(/one stage at a time/i, { timeout: 30000 });
+  await expect(page.locator('.bubble').last()).not.toContainText(/couldn.t process/i);
+  await expect(page.locator('.panel', { hasText: 'Suggestions' })).toHaveCount(0);
+
+  // Naming a product within the stage is an explicit add (Step 25): it asks the product's size first, then adds the
+  // shopper's own choice - no proposal, nothing in the cart before that choice.
+  await send(page, 'add the Starter Road Running Shoe');
+  await expect(page.locator('.bubble').last()).toContainText(/size/i, { timeout: 30000 });
+  await expect(page.locator('.panel', { hasText: 'Suggestions' })).toHaveCount(0);
 });

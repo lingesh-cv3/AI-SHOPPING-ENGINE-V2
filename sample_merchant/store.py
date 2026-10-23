@@ -17,6 +17,7 @@ Two things here exist specifically to make demos work:
 from __future__ import annotations
 
 import itertools
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -97,7 +98,15 @@ def search_items(
     if dept:
         items = [p for p in items if p["dept"].lower() == dept.lower()]
 
-    words = [w for w in query.lower().split() if len(w) > 2]
+    # A real shopper's search string is an ordinary typed sentence, not a
+    # bare keyword list - it ends in punctuation ("show me socks."), which
+    # `.split()` alone leaves attached to the word ("socks."), silently
+    # failing to match a title that has the bare word. Splitting on
+    # non-alphanumeric runs (the same tokenizer discipline
+    # `engine/shopper_v2/reference_resolution.py::_distinctive_title_words`
+    # already trusts) fixes this without changing the search's own
+    # deliberately-simple word-overlap ranking.
+    words = [w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) > 2]
     if words:
         scored = []
         for product in items:

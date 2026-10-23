@@ -27,10 +27,13 @@ import { StoreSettings } from "./StoreSettings";
 import { TasksPanel } from "./TasksPanel";
 import { MerchantApprovals } from "./MerchantApprovals";
 import { startApprovalPolling, useApprovalTotal } from "./merchantApprovalsStore";
+import { MerchantFollowUps } from "./MerchantFollowUps";
+import { startFollowUpPolling, useFollowUpTotal } from "./merchantFollowUpsStore";
 
 type SectionId =
   | "overview"
   | "approvals"
+  | "follow-ups"
   | "sales"
   | "orders"
   | "products"
@@ -54,7 +57,13 @@ interface NavGroup {
 
 const NAV: NavGroup[] = [
   { label: "Merchant", items: [{ id: "overview", label: "Overview" }] },
-  { label: "Decisions", items: [{ id: "approvals", label: "Approvals" }] },
+  {
+    label: "Decisions",
+    items: [
+      { id: "approvals", label: "Approvals" },
+      { id: "follow-ups", label: "Shopper follow-ups" },
+    ],
+  },
   {
     label: "Business",
     items: [
@@ -162,6 +171,19 @@ export function MerchantConsole() {
   }, [signedIn]);
   const approvalsWaiting = useApprovalTotal();
 
+  // Shoppers who were told a person from this shop would follow up. The same
+  // reasoning as approvals: a promise nobody sees is a promise broken, so the count
+  // is kept live on every screen and read from one store.
+  useEffect(() => {
+    if (!signedIn) return;
+    return startFollowUpPolling();
+  }, [signedIn]);
+  const followUpsWaiting = useFollowUpTotal();
+  const badges: Record<string, number | null> = {
+    approvals: approvalsWaiting,
+    "follow-ups": followUpsWaiting,
+  };
+
   async function setMode(mode: string) {
     if (!policy) return;
     setPolicy(
@@ -233,13 +255,13 @@ export function MerchantConsole() {
                 onClick={() => setSection(item.id)}
               >
                 {item.label}
-                {item.id === "approvals" && approvalsWaiting !== null && approvalsWaiting > 0 && (
+                {(badges[item.id] ?? 0) > 0 && (
                   <span
                     className="nav-badge"
-                    aria-label={`${approvalsWaiting} waiting`}
-                    data-testid="approvals-badge"
+                    aria-label={`${badges[item.id]} waiting`}
+                    data-testid={`${item.id}-badge`}
                   >
-                    {approvalsWaiting}
+                    {badges[item.id]}
                   </span>
                 )}
               </button>
@@ -251,6 +273,7 @@ export function MerchantConsole() {
       <main className="merchant-content">
         {section === "overview" && <Overview onNavigate={(s) => setSection(s as SectionId)} />}
         {section === "approvals" && <MerchantApprovals />}
+        {section === "follow-ups" && <MerchantFollowUps />}
         {section === "sales" && (
           <MerchantReport onNavigate={(s) => setSection(s as SectionId)} />
         )}

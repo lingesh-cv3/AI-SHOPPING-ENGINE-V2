@@ -236,6 +236,21 @@ def propose_tool() -> dict[str, Any]:
                                     "trade-off, never one you inferred."
                                 ),
                             },
+                            "priorities_remove": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "A previously-stated priority/preference "
+                                    "the shopper is now retracting or "
+                                    "cancelling - 'forget that', 'never mind "
+                                    "about X', 'actually X doesn't matter', "
+                                    "'no, forget the lightweight thing'. Name "
+                                    "the ACTUAL priority text being withdrawn "
+                                    "(match it to what's in the current "
+                                    "priorities list shown to you), never a "
+                                    "guess at wording not already stated."
+                                ),
+                            },
                             "mission_status": {
                                 "type": "string",
                                 "enum": ["exploring", "comparing", "deciding", "done"],
@@ -1326,6 +1341,623 @@ def cart_reference_tool() -> dict[str, Any]:
                     },
                 },
                 "required": ["is_cart_intent", "operation", "reference_type"],
+            },
+        },
+    }
+
+
+#: Rev. 2 architecture (2026-09) - the genuine-interpretation call. See
+#: `engine/shopper_v2/interpretation.py`'s own module docstring for the
+#: full architectural argument this exists to satisfy: this is NOT a
+#: bigger classifier bolted onto the old narrow extraction - it is asked
+#: to actually read the conversation, the real durable facts, and the
+#: real products/cart data it is given, and explain what it concludes,
+#: not just tick a box. `rationale` exists specifically so a human
+#: reviewing a trace can tell whether the model reasoned or guessed - it
+#: is never read by any control-flow code (see `InterpretationResult`'s
+#: own docstring).
+_INTERPRETATION_SYSTEM_PROMPT = (
+    "You are interpreting one turn of a real shopping conversation, the "
+    "way an attentive human shopping assistant would - not classifying a "
+    "sentence in isolation. You are given the recent conversation, the "
+    "shopper's own durable preferences (things true of them beyond this "
+    "one visit), the topic currently active, any paused topics from "
+    "earlier in THIS conversation, the exact real products last shown on "
+    "screen, the real cart contents, and any in-progress multi-item "
+    "purchase. Use all of it - a message is rarely self-contained.\n\n"
+    "Decide, in order:\n"
+    "1. CAPABILITY - what kind of help does this turn need: discover "
+    "(browse/search), compare, cart_action (add/remove/change/clear), "
+    "mission (multiple independent items to track), compatibility, "
+    "complementary, trade_off, cart_status, cart_intelligence, checkout, "
+    "order_status, conversational (greeting/thanks/small talk), or "
+    "unknown.\n"
+    "2. CONTEXT ACTION - does this turn continue the active topic, "
+    "genuinely start something new and unrelated (push), clearly return "
+    "to a paused topic named or implied by the message (resume - set "
+    "context_target_label to that paused topic's own label, verbatim, "
+    "never invented), or is it genuinely unclear which (ambiguous)? A "
+    "bare acknowledgement, hesitation, or a message that only refines "
+    "the SAME thing being discussed is 'continue', never 'push'.\n"
+    "3. REFERENCE - if the message points at specific product(s) rather "
+    "than describing a new search, say how: scope is 'last_rendered' "
+    "(what's literally on screen right now - almost always this for "
+    "ordinals like 'the first one' or comparatives like 'the cheaper "
+    "one'), 'paused_topic' (an explicit callback - 'the one you showed "
+    "me earlier', 'that first shoe from before'), 'cart' (the shopper "
+    "means something ALREADY IN THEIR CART, shown to you above as "
+    "'Real current cart contents' - a bare 'remove it'/'clear my cart'/'remove "
+    "the running shoes'/'change the quantity to 2' with no product just "
+    "shown or discussed this session, or a name/word that matches a "
+    "real cart line rather than anything on screen; recognize this "
+    "whenever the message's own words plainly describe a cart line "
+    "over anything last shown, not only for the exact examples above), "
+    "or 'named' (the shopper used the product's own name/words, and it "
+    "is not clearly the cart specifically). BUT: if the message "
+    "names a specific kind of product (e.g. 'shoe', 'sock', 'jacket') "
+    "and that kind does NOT match what's currently active or last shown "
+    "(e.g. socks are on screen but the message says 'the first shoe'), "
+    "the noun overrides the recency default - use 'paused_topic' scope "
+    "instead if a paused topic matches that noun, and set "
+    "context_target_label to that paused topic's own label, verbatim. "
+    "Never resolve an ordinal/superlative against a topic whose products "
+    "plainly don't match a specific noun the shopper used. kind is 'ordinal' "
+    "(with 1-based reference_positions - use -1 for 'the last one,' "
+    "NEVER count the real items to guess its number: 'first and last' "
+    "is positions [1, -1]), 'superlative' (with "
+    "reference_attribute price/rating and reference_direction max/min - "
+    "recognize ANY real phrasing of this: 'cheapest', 'most expensive', "
+    "'high price', 'costliest', 'top price', 'best rated', not just "
+    "fixed phrases), 'comparative_pair' ('the cheaper one' between "
+    "exactly two), 'all' (every item collectively), or 'named' (with "
+    "reference_names as the exact words used).\n"
+    "4. CART INTENT - if this is a decision to add/remove/change/clear "
+    "something (not merely describing what they want), set "
+    "cart_operation and reuse the SAME reference fields above for which "
+    "item(s) - 'remove'/'set_quantity' almost always mean scope='cart' "
+    "(you are changing something that is IN the cart, whether or not it "
+    "was also just shown), 'clear' needs no reference at all (leave "
+    "reference_kind 'none'), and 'add' usually means scope='last_rendered' "
+    "or 'named' (adding something just shown or named, not yet in the "
+    "cart). Never let an explicit remove/clear/change-quantity verb "
+    "collapse into an ordinary 'retrieve' search just because the named "
+    "item isn't part of the most recent search results - check it "
+    "against what's currently in cart above first.\n"
+    "5. CONVERSATIONAL REPAIR - does this message correct something just "
+    "said ('correction' - replaces the prior claim - e.g. 'no, I meant "
+    "the blue one', 'I said 8, not 9', 'actually make that two'), cancel "
+    "a specific pending item or thread ('cancellation' - e.g. 'actually "
+    "forget that', 'never mind'), pause without introducing anything new "
+    "('pause' - e.g. a bare 'wait'), plainly continue the same scope "
+    "('continuation' - e.g. 'what else?', meaning more of the same "
+    "search), or plainly AGREE TO / CONFIRM something the assistant just "
+    "proposed or asked about - a proposed cart change, a pending choice, "
+    "a yes/no question ('confirmation' - e.g. 'yes', 'yeah do that', "
+    "'sounds good', 'go ahead')? 'none' when the turn is an ordinary new "
+    "statement. THIS FIELD IS INDEPENDENT of capability/reference/"
+    "cart_operation above - always set it whenever ANY of these six "
+    "shapes applies, even when you have ALSO filled in a reference or "
+    "cart_operation for the same turn (a correction almost always also "
+    "carries a reference to what changed - set BOTH, never one instead "
+    "of the other).\n"
+    "6. DURABLE FACTS - is the shopper stating something that would still "
+    "be true on a completely different visit (a stable preference, a "
+    "past issue, a priority) - 'I prefer lightweight gear', 'I really "
+    "like decaf', 'my feet run wide'? List each as {subject, statement, "
+    "confidence} in your own words - do NOT force it into a fixed "
+    "category; describe what it actually is. `subject` must be a short, "
+    "SPECIFIC topic tag naming what the fact is ABOUT (e.g. "
+    "'coffee_preference', 'shoe_width') - never a generic word like "
+    "'shopper' or 'preference' that a different, unrelated fact could "
+    "also use; this becomes a storage key, and two different facts "
+    "sharing one key silently overwrite each other. NEVER extract a durable "
+    "fact from an ordinary one-time need or its incidental details - "
+    "'I need running shoes for a race next month' states a CURRENT "
+    "want with a one-off event date, not a stable truth; neither the "
+    "want nor the race date is a durable fact, even though the message "
+    "contains real, specific information. Only extract a durable fact "
+    "when the shopper is stating something general about THEMSELVES "
+    "that would apply regardless of what they're currently shopping for "
+    "(a preference, a physical fact, a recurring issue) - never an "
+    "event, a date, or a one-time purchase reason. An ordinary current-turn "
+    "want ('I need shoes for a race') is NOT a durable fact.\n"
+    "7. QUESTION TYPE - what SEMANTIC OPERATION does the shopper actually "
+    "want performed, independent of which capability handles it? Most "
+    "turns are 'retrieve' (an ordinary show/browse). Set one of the "
+    "others whenever the message's OWN shape asks for it, regardless of "
+    "phrasing - never only for a fixed list of example words, always for "
+    "the underlying meaning: "
+    "'relationship' - asks how TWO specific things compare and wants the "
+    "comparison STATED ('which is cheaper', 'which is better rated', 'how "
+    "do these differ', 'is the sock cheaper than the shoe') - fill "
+    "reference_* for the FIRST thing, secondary_reference for the SECOND, "
+    "each with its own real scope (they are very often in DIFFERENT "
+    "topics - a paused one and the active one - resolve each honestly "
+    "against its own real scope, never force both into one). "
+    "'explanation' - asks WHY something was shown or picked ('why this', "
+    "'why did you suggest that', 'what makes this the pick') - "
+    "reference_scope is almost always 'last_rendered'. "
+    "'recommendation' - asks for a single best pick, typically under a "
+    "constraint ('what's the best one under 5000', 'which should I get', "
+    "'what do you recommend'). "
+    "'compound_comparison' - names TWO DIFFERENT superlatives to resolve "
+    "INDEPENDENTLY and then relate ('compare the cheapest and the "
+    "lightest', 'show me the cheapest versus the best rated') - fill "
+    "reference_attribute/reference_direction for the FIRST superlative, "
+    "the matching fields on secondary_reference for the SECOND; the two "
+    "attributes are very often DIFFERENT from each other - never force "
+    "them to match. "
+    "'alternatives' - wants MORE or DIFFERENT real options beyond what's "
+    "already shown ('what else do you have', 'anything different', "
+    "'show me other options'). "
+    "'attribute_refinement' - states a new preference that should "
+    "re-rank or filter the CURRENTLY active set, not start a brand-new "
+    "search ('something lightweight', 'I'd like something cheaper', "
+    "'comfort matters more to me'). IMPORTANT: whenever there are ALREADY "
+    "real products in view (active_topic_products/last_rendered_products "
+    "non-empty) and the message states a preference/priority with no new "
+    "product noun of its own, this is 'attribute_refinement' with "
+    "context_action='continue' - NOT 'retrieve' and NOT context_action="
+    "'push'. Pushing a new topic for a bare preference statement loses "
+    "the real products it was meant to re-rank. Only treat it as a new "
+    "topic/durable fact INSTEAD of a refinement when nothing is currently "
+    "in view to refine at all. "
+    "'state_change' - ONLY when conversational_repair above is also "
+    "non-'none' AND the message is not itself a product question - a "
+    "bare correction/cancellation/continuation with nothing else to "
+    "resolve. Never set 'state_change' for a message that also asks a "
+    "real product question - a correction that ALSO restates what's "
+    "wanted keeps the ORIGINAL question_type this turn is correcting, "
+    "not 'state_change'.\n\n"
+    "8. STATE UPDATE - does this message state something NEW or DIFFERENT "
+    "about the shopper's overall mission (a goal/category, a budget, a "
+    "hard requirement, a soft preference, an exclusion, a trade-off "
+    "priority, or a retraction of one already stated)? Fill shopping_state "
+    "ONLY for what actually changed THIS turn - omit a field entirely for "
+    "'no change', never guess or restate something already in effect. "
+    "must_have is a HARD requirement (a product lacking it is excluded "
+    "outright) - 'I need X', 'it must have X'. nice_to_have/priorities are "
+    "SOFT preferences/trade-offs ('I prefer X', 'lighter matters more than "
+    "cushioning') - never put a soft preference in must_have. A removal "
+    "('forget the lightweight thing', 'never mind the budget') must name "
+    "the ACTUAL existing text shown to you under 'Currently stated "
+    "mission state' - never a guess at wording not already stated. Most "
+    "turns state nothing new here - leave shopping_state out entirely "
+    "for an ordinary browse/reference/question with no new mission "
+    "content.\n\n"
+    "9. COMPOUND TURNS - almost every turn asks for exactly ONE thing; "
+    "leave secondary_operation null. Only set it when the SAME message "
+    "explicitly asks for a SECOND, genuinely different action to happen "
+    "AFTER the primary one above, using its results - 'show me X, and "
+    "how does that compare to Y' (primary: discover/search for X; "
+    "secondary: capability='compare', reference_names=['Y']), 'show me "
+    "X, what would you recommend' (secondary: capability='recommendation', "
+    "no reference_names - reason over the primary results themselves). "
+    "Never invent a secondary operation for an ordinary single-intent "
+    "message, however long or detailed.\n"
+    "10. STORE CATEGORIES - when the shopper is looking for products by a "
+    "word that is NOT itself one of the store's own category names (they "
+    "say 'beans', 'coffee', 'something for trails'), and the prompt lists "
+    "the store's real categories, set catalog_categories to the "
+    "category names (copied EXACTLY from that list, never invented) that "
+    "plausibly contain what they mean - 'beans' at a coffee shop means its "
+    "bean categories, not its equipment or gift categories. Leave it "
+    "null/empty when the shopper's own word already matches a category or "
+    "product, when no listed category fits, or when the message is not a "
+    "product search at all. This only narrows a search; the names you give "
+    "are re-checked against the store's real taxonomy.\n\n"
+    "Set clarify_if_uncertain=true when you are genuinely not confident "
+    "in your own reading rather than picking an arbitrary answer. Give a "
+    "rationale of ONE short sentence explaining what you concluded and "
+    "why - this is read by a human for debugging, never by any code that "
+    "acts on your answer; your answer is independently checked against "
+    "the real data before anything happens. Call interpret_conversation."
+)
+
+
+def interpretation_prompt(
+    *,
+    message: str,
+    history: list[str] | None,
+    durable_facts: list[dict] | None,
+    active_topic_label: str | None,
+    active_topic_products: list[dict],
+    paused_topics: list[dict],
+    last_rendered_products: list[dict],
+    cart_lines: list[dict] | None,
+    mission_summary: str | None,
+    current_shopping_state: dict | None = None,
+    store_categories: list[str] | None = None,
+    spelling_hint: str | None = None,
+) -> str:
+    """Prompt for the genuine-interpretation call (`interpretation_tool()`
+    below). Every list here is real, already-verified data assembled by
+    `engine/shopper_v2/conversation_context.py::build_context` - nothing
+    is invented in this prompt, and the model is never asked to produce a
+    product id itself; only positions/names/attributes it can express in
+    its own reasoning, all independently verified against these same real
+    lists by the caller (`engine/shopper_v2/verification.py`)."""
+    recent = "\n".join(f"  - {h}" for h in (history or [])[-14:])
+    facts = "\n".join(f"  - {f['key']}: {f['value']}" for f in (durable_facts or [])[:8])
+    active_products_text = "\n".join(
+        f"  {i + 1}. {p['title']}" + (f" ({p['price']})" if p.get("price") else "")
+        for i, p in enumerate(active_topic_products[:20])
+    )
+    last_rendered_text = "\n".join(
+        f"  {i + 1}. {p['title']}" + (f" ({p['price']})" if p.get("price") else "")
+        for i, p in enumerate(last_rendered_products[:20])
+    )
+    paused_text = "\n".join(
+        f"  - \"{t['label']}\" ({len(t.get('product_ids', []))} item(s))" for t in paused_topics
+    )
+    cart_text = "\n".join(
+        f"  - {l['title']} (qty {l.get('quantity', 1)})" for l in (cart_lines or [])
+    )
+    parts = [f"Shopper's message: {message!r}"]
+    if spelling_hint and spelling_hint != message:
+        parts.append(
+            "Spelling check against this store's own catalog words suggests "
+            f"the shopper meant: {spelling_hint!r} (interpret that; the typo "
+            "itself carries no meaning)"
+        )
+    if recent:
+        parts.append(f"Recent conversation:\n{recent}")
+    if facts:
+        parts.append(f"This shopper's own durable preferences (from past visits):\n{facts}")
+    parts.append(f"Currently active topic: {active_topic_label or '(none yet)'}")
+    if active_products_text:
+        parts.append(f"Real products in the active topic:\n{active_products_text}")
+    if last_rendered_text:
+        parts.append(f"Exactly what's rendered on screen right now:\n{last_rendered_text}")
+    if paused_text:
+        parts.append(f"Paused topics from earlier in this conversation:\n{paused_text}")
+    if cart_text:
+        parts.append(f"Real current cart contents:\n{cart_text}")
+    if mission_summary:
+        parts.append(f"In-progress multi-item mission: {mission_summary}")
+    if store_categories:
+        parts.append(
+            "The store's real product categories (for catalog_categories - "
+            "copy names exactly): " + "; ".join(store_categories[:40])
+        )
+    if current_shopping_state:
+        s = current_shopping_state
+        state_lines = []
+        if s.get("goal"):
+            state_lines.append(f"  - goal: {s['goal']}")
+        if s.get("budget_amount"):
+            state_lines.append(f"  - budget: {s['budget_amount']} {s.get('budget_currency') or ''}".rstrip())
+        if s.get("must_have"):
+            state_lines.append(f"  - must_have: {', '.join(s['must_have'])}")
+        if s.get("nice_to_have"):
+            state_lines.append(f"  - nice_to_have: {', '.join(s['nice_to_have'])}")
+        if s.get("priorities"):
+            state_lines.append(f"  - priorities: {', '.join(s['priorities'])}")
+        if s.get("exclusions"):
+            state_lines.append(f"  - exclusions: {', '.join(s['exclusions'])}")
+        if s.get("constraints"):
+            state_lines.append(f"  - constraints: {', '.join(s['constraints'])}")
+        if state_lines:
+            parts.append("Currently stated mission state (for matching a removal/retraction to its exact existing text):\n" + "\n".join(state_lines))
+    return "\n\n".join(parts)
+
+
+def interpretation_tool() -> dict[str, Any]:
+    """Tool schema for the genuine-interpretation call. Deliberately no
+    field for a product id, a variant, a risk judgment, or an ActionType -
+    every claim here is a structured, checkable INTERPRETATION, resolved
+    against real data by `verification.py`, never trusted or acted on
+    directly - the same narrow-capability guarantee every bounded call in
+    this file already carries."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "interpret_conversation",
+            "description": (
+                "Interpret one turn of a real shopping conversation: what "
+                "kind of help it needs, whether it continues/switches/"
+                "resumes a topic, what specific product(s) (if any) it "
+                "refers to and how, whether it's a cart decision, whether "
+                "it corrects/cancels/pauses/continues something, and "
+                "whether it states a durable fact worth remembering."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "capability": {
+                        "type": "string",
+                        "enum": [
+                            "discover", "compare", "cart_action", "mission",
+                            "compatibility", "complementary", "trade_off",
+                            "cart_status", "cart_intelligence", "checkout",
+                            "order_status", "conversational", "unknown",
+                        ],
+                    },
+                    "context_action": {
+                        "type": "string",
+                        "enum": ["continue", "push", "resume", "ambiguous"],
+                    },
+                    "context_target_label": {
+                        "type": ["string", "null"],
+                        "description": "The paused topic's own label, verbatim, when context_action is 'resume' or 'ambiguous'.",
+                    },
+                    "new_topic_label": {
+                        "type": ["string", "null"],
+                        "description": "A short label for the new topic, when context_action is 'push'.",
+                    },
+                    "reference_scope": {
+                        "type": ["string", "null"],
+                        "enum": ["last_rendered", "active_topic", "paused_topic", "cart", "named", "none", None],
+                    },
+                    "reference_kind": {
+                        "type": ["string", "null"],
+                        "enum": ["ordinal", "superlative", "comparative_pair", "all", "named", "none", None],
+                    },
+                    "reference_positions": {
+                        "type": ["array", "null"], "items": {"type": "integer"},
+                        "description": (
+                            "1-based positions, for reference_kind='ordinal'. Use -1 to mean "
+                            "'the last one' - never count the real items to guess its number, "
+                            "always -1 regardless of how many real items are shown. 'first and "
+                            "last' is [1, -1], never [1, <a guessed count>]."
+                        ),
+                    },
+                    "reference_attribute": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "The real product characteristic named, in the "
+                            "shopper's OWN words - 'price'/'cheaper'/'cost', "
+                            "'rating'/'reviews', or any other real attribute "
+                            "they name ('weight', 'battery life', 'capacity'). "
+                            "NEVER restricted to a fixed list - whatever they "
+                            "actually said. Verification will check whether "
+                            "real data for it exists on the products in view "
+                            "and degrade honestly if it doesn't - your job is "
+                            "only to report what they asked for, truthfully."
+                        ),
+                    },
+                    "reference_direction": {
+                        "type": ["string", "null"], "enum": ["max", "min", "none", None],
+                    },
+                    "reference_names": {
+                        "type": ["array", "null"], "items": {"type": "string"},
+                        "description": "The exact words used to name product(s), for reference_kind='named'.",
+                    },
+                    "question_type": {
+                        "type": ["string", "null"],
+                        "enum": [
+                            "retrieve", "relationship", "explanation",
+                            "recommendation", "compound_comparison",
+                            "alternatives", "attribute_refinement", "state_change",
+                            None,
+                        ],
+                        "description": (
+                            "The SEMANTIC OPERATION the shopper wants, not just "
+                            "which capability handles it. 'retrieve': show/browse "
+                            "(the default - most turns). 'relationship': asks how "
+                            "TWO specific real things compare to each other and "
+                            "wants that relationship stated ('which is cheaper', "
+                            "'which is better rated', 'how do these differ') - "
+                            "set reference_* for the FIRST thing and "
+                            "secondary_reference for the SECOND. 'explanation': "
+                            "asks WHY something was shown/picked ('why this', "
+                            "'why did you suggest that'). 'recommendation': asks "
+                            "for a single best pick, often under a constraint "
+                            "('what's the best one under 5000', 'which should I "
+                            "get'). 'compound_comparison': names TWO DIFFERENT "
+                            "superlatives to resolve independently and then "
+                            "relate ('compare the cheapest and the lightest') - "
+                            "set reference_attribute/reference_direction for the "
+                            "FIRST superlative and the matching fields on "
+                            "secondary_reference for the SECOND. 'alternatives': "
+                            "wants MORE or DIFFERENT real options beyond what's "
+                            "already shown ('what else do you have', 'anything "
+                            "different'). 'attribute_refinement': states a new "
+                            "preference that should re-rank/filter the CURRENTLY "
+                            "active set, not start a new search ('something "
+                            "lightweight', 'I want something cheaper'). "
+                            "'state_change': ONLY a correction/cancellation/"
+                            "continuation about the shopper's own prior "
+                            "statement or a question they just asked that "
+                            "couldn't be answered - never a product question "
+                            "itself (this should usually also set "
+                            "conversational_repair)."
+                        ),
+                    },
+                    "secondary_reference": {
+                        "type": ["object", "null"],
+                        "description": (
+                            "The SECOND thing to resolve, for question_type "
+                            "'relationship' or 'compound_comparison' only. Same "
+                            "meaning as the matching top-level reference_* "
+                            "fields, applied to the second/other side."
+                        ),
+                        "properties": {
+                            "reference_scope": {
+                                "type": ["string", "null"],
+                                "enum": ["last_rendered", "active_topic", "paused_topic", "cart", "named", "none", None],
+                            },
+                            "context_target_label": {"type": ["string", "null"]},
+                            "reference_kind": {
+                                "type": ["string", "null"],
+                                "enum": ["ordinal", "superlative", "comparative_pair", "all", "named", "none", None],
+                            },
+                            "reference_positions": {"type": ["array", "null"], "items": {"type": "integer"}},
+                            "reference_attribute": {"type": ["string", "null"]},
+                            "reference_direction": {"type": ["string", "null"], "enum": ["max", "min", "none", None]},
+                            "reference_names": {"type": ["array", "null"], "items": {"type": "string"}},
+                        },
+                    },
+                    "cart_operation": {
+                        "type": ["string", "null"],
+                        "enum": ["add", "remove", "set_quantity", "clear", "none", None],
+                    },
+                    "durable_fact_candidates": {
+                        "type": ["array", "null"],
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "subject": {
+                                    "type": "string",
+                                    "description": (
+                                        "A short, DISTINCTIVE topic tag for this specific fact - "
+                                        "e.g. 'coffee_preference', 'shoe_width', 'past_delivery_issue' "
+                                        "- never a generic word like 'shopper' or 'preference'. This "
+                                        "becomes a storage key: two different facts must never share "
+                                        "the same subject, or the second silently overwrites the first."
+                                    ),
+                                },
+                                "statement": {"type": "string"},
+                                "confidence": {"type": ["number", "string", "null"]},  # a string is coerced downstream; strict "number" made the provider reject the WHOLE call
+                            },
+                            "required": ["subject", "statement"],
+                        },
+                    },
+                    "conversational_repair": {
+                        "type": ["string", "null"],
+                        "enum": [
+                            "correction", "cancellation", "pause", "continuation",
+                            "confirmation", "none", None,
+                        ],
+                    },
+                    "clarify_if_uncertain": {"type": ["boolean", "null"]},
+                    "catalog_categories": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                        "description": (
+                            "Real store category names (exact, from the listed "
+                            "categories) that plausibly contain what the shopper "
+                            "is searching for by a non-category word. Null/empty "
+                            "when not applicable."
+                        ),
+                    },
+                    # Production architecture (2026-09), Phase 5: compound
+                    # turns. A SECOND, genuinely different action the SAME
+                    # message ALSO asks for, to run AFTER the primary
+                    # capability above completes, using its real results -
+                    # "show me waterproof trail shoes under 150, and how
+                    # does that compare to the Trailblazer" (primary: a
+                    # search; secondary: a comparison against the search's
+                    # own top result and the named Trailblazer). Deliberately
+                    # narrow (compare/recommendation only, never a third,
+                    # independent capability guess) and OPTIONAL - leave
+                    # `null` for the overwhelmingly common single-operation
+                    # turn; only set this when the message explicitly asks
+                    # for a second, distinct thing to happen, never inferred.
+                    "secondary_operation": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            # Nullable even though logically required whenever
+                            # `secondary_operation` itself is non-null - Phase
+                            # 17's own lesson (prompts.py's history): Groq's
+                            # structured-output validator enforces the
+                            # declared type strictly even for a field inside
+                            # an object the model might otherwise skip -
+                            # every field one level down must ALSO be
+                            # nullable, or one `null` here 400s the WHOLE
+                            # tool call, indistinguishable from a genuine
+                            # rate limit at every call site.
+                            "capability": {
+                                "type": ["string", "null"],
+                                "enum": ["compare", "recommendation", None],
+                            },
+                            "reference_names": {
+                                "type": ["array", "null"], "items": {"type": "string"},
+                                "description": (
+                                    "A SPECIFIC other product named to compare/recommend "
+                                    "against, alongside the primary operation's own real "
+                                    "results (e.g. ['Trailblazer']) - leave null/empty to "
+                                    "mean 'reason over the primary operation's own results "
+                                    "themselves', never invent a name not in the message."
+                                ),
+                            },
+                        },
+                    },
+                    # Production architecture (2026-09), Phase 1
+                    # reconciliation: copied field-for-field from
+                    # `propose_tool()`'s own `shopping_state` sub-schema -
+                    # the SAME, separately-hardened wording, not reinvented
+                    # - so this call becomes THE single authoritative
+                    # interpretation per turn instead of racing a second,
+                    # independent one for the identical question of "what
+                    # changed about the shopper's stated mission."
+                    "shopping_state": {
+                        "type": ["object", "null"],
+                        "description": (
+                            "Update to the shopper's CURRENT mission, only "
+                            "when THIS message states something new or "
+                            "different. Every field is optional and should "
+                            "be left out entirely when this message says "
+                            "nothing new about it - omitting a field means "
+                            "'no change', not 'clear it'. Never infer a "
+                            "durable goal/budget/constraint from a "
+                            "greeting, thanks, or small talk."
+                        ),
+                        "properties": {
+                            "goal": {
+                                "type": ["string", "null"],
+                                "description": (
+                                    "What they are ultimately trying to buy "
+                                    "or accomplish - the CATEGORY/mission "
+                                    "itself ('running shoes', 'a marathon "
+                                    "setup'), not a specific attribute or "
+                                    "requirement folded into the same "
+                                    "phrase. Only when newly stated or "
+                                    "changed this message."
+                                ),
+                            },
+                            "budget_amount": {"type": ["number", "null"]},
+                            "budget_currency": {"type": ["string", "null"]},
+                            "constraints_add": {"type": ["array", "null"], "items": {"type": "string"}},
+                            "constraints_remove": {"type": ["array", "null"], "items": {"type": "string"}},
+                            "must_have_add": {
+                                "type": ["array", "null"], "items": {"type": "string"},
+                                "description": (
+                                    "A HARD requirement, stated as non-negotiable. This becomes "
+                                    "a real FILTER - a product that does not satisfy it is "
+                                    "excluded outright. Do NOT put a soft preference here."
+                                ),
+                            },
+                            "must_have_remove": {"type": ["array", "null"], "items": {"type": "string"}},
+                            "nice_to_have_add": {
+                                "type": ["array", "null"], "items": {"type": "string"},
+                                "description": (
+                                    "A SOFT preference, not a hard requirement - 'I prefer X', "
+                                    "'I'd like X'. A RANKING signal only, never excluded outright."
+                                ),
+                            },
+                            "nice_to_have_remove": {"type": ["array", "null"], "items": {"type": "string"}},
+                            "exclusions_add": {"type": ["array", "null"], "items": {"type": "string"}},
+                            "exclusions_remove": {"type": ["array", "null"], "items": {"type": "string"}},
+                            "priorities_add": {
+                                "type": ["array", "null"], "items": {"type": "string"},
+                                "description": "A trade-off the shopper stated, in their own words.",
+                            },
+                            "priorities_remove": {
+                                "type": ["array", "null"], "items": {"type": "string"},
+                                "description": (
+                                    "A previously-stated priority/preference the shopper is now "
+                                    "retracting - match it to the CURRENT mission state shown to "
+                                    "you, never a guess at wording not already stated."
+                                ),
+                            },
+                            "mission_status": {
+                                "type": ["string", "null"],
+                                "enum": ["exploring", "comparing", "deciding", "done", None],
+                            },
+                            "clear_fields": {
+                                "type": ["array", "null"],
+                                "items": {"type": "string", "enum": ["goal", "budget_amount", "budget_currency", "mission_status"]},
+                            },
+                        },
+                        "additionalProperties": False,
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "A short, honest explanation of what you concluded and why - for a human reviewing a trace, never read by any control-flow code.",
+                    },
+                },
+                "required": ["capability", "context_action", "rationale"],
             },
         },
     }

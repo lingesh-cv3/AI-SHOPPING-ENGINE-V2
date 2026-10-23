@@ -64,7 +64,37 @@ _INTENT_WORDS: dict[str, tuple[str, ...]] = {
     "unconfirmed_requirement": ("does it actually", "confirm", "sure it's"),
 }
 
-_BUDGET_NUMBER = re.compile(r"(?:under|below|less than|bring it under)\s*\$?\s*([\d,]+)", re.IGNORECASE)
+_BUDGET_NUMBER = re.compile(r"(?:under|below|less than|bring it under)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)", re.IGNORECASE)
+#: "my cart is over 10000" - the figure the cart EXCEEDS is the limit the shopper has in mind. Only read as a
+#: target when the message is also a budget question (see `_budget_target`), never from a bare "over N".
+_EXCEEDED_NUMBER = re.compile(r"(?:over|above|exceeds?|exceeding|beyond|more than)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)", re.IGNORECASE)
+
+
+def _as_amount(raw: str | None) -> Decimal | None:
+    digits = (raw or "").replace(",", "").strip()
+    if not digits or not digits.replace(".", "", 1).isdigit():
+        return None
+    try:
+        value = Decimal(digits)
+    except InvalidOperation:
+        return None
+    return value if value > 0 else None
+
+
+def _budget_target(message: str, stated_budget: str | None) -> Decimal | None:
+    """The limit the shopper wants the cart under, from the strongest real source: an explicit "under N" in
+    this message; else (for a message that IS a budget question) the figure the cart "is over"; else the
+    budget they stated earlier in the conversation. `None` when none of them exists - a target is never
+    invented, and a reduction is never computed against one."""
+    explicit = _BUDGET_NUMBER.search(message)
+    if explicit and _as_amount(explicit.group(1)) is not None:
+        return _as_amount(explicit.group(1))
+    if "over_budget" in (_requested_kinds(message) or set()):
+        exceeded = _EXCEEDED_NUMBER.search(message)
+        if exceeded and _as_amount(exceeded.group(1)) is not None:
+            return _as_amount(exceeded.group(1))
+        return _as_amount(stated_budget)
+    return None
 
 
 def _requested_kinds(message: str) -> set[str] | None:
@@ -80,7 +110,7 @@ def _requested_kinds(message: str) -> set[str] | None:
     return matched or None
 
 
-def _budget_reduction_suggestion(message: str, payload: dict) -> str | None:
+def _budget_reduction_suggestion(message: str, payload: dict, stated_budget: str | None = None) -> str | None:
     """A CONCRETE change that brings the real cart total under the
     shopper's stated (or, failing that, message-stated) budget - grounded
     entirely in `payload["lines"]`'s own real prices/quantities (see
@@ -107,11 +137,10 @@ def _budget_reduction_suggestion(message: str, payload: dict) -> str | None:
     grand_total = payload.get("grand_total")
     if not lines or grand_total is None:
         return None
-    match = _BUDGET_NUMBER.search(message)
-    if not match:
+    target = _budget_target(message, stated_budget)
+    if target is None:
         return None
     try:
-        target = Decimal(match.group(1).replace(",", ""))
         total = Decimal(grand_total)
     except InvalidOperation:
         return None
@@ -196,6 +225,7 @@ async def run_cart_intelligence_turn(
     session_id: str,
     cart_id: str | None,
     message: str,
+    stated_budget: str | None = None,
 ) -> tuple[str, dict | None]:
     """Returns (reply, payload_or_None). Every finding named in the reply
     comes straight from `executed.payload["findings"]` - the real,
@@ -274,7 +304,7 @@ async def run_cart_intelligence_turn(
     # `over_budget` finding message, and per the shopper's actual question
     # (CLAUDE.md's "answer the message in front of you"), nothing else
     # this capability could also say is relevant to it.
-    budget_reply = _budget_reduction_suggestion(message, payload)
+    budget_reply = _budget_reduction_suggestion(message, payload, stated_budget)
     if budget_reply:
         return (budget_reply, payload)
 

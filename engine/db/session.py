@@ -172,6 +172,60 @@ async def create_schema() -> None:
                     )
                 )
 
+            # focus_stack (Shopper V2's Focus Stack - the authoritative
+            # conversational context model, see engine/shopper_v2/state.py
+            # ::Topic) arrived after the first shopping_states rows existed,
+            # same idempotent-migration pattern as mission_items above.
+            if "focus_stack" not in state_columns:
+                await conn.execute(
+                    text("ALTER TABLE shopping_states ADD COLUMN focus_stack TEXT")
+                )
+
+            # last_rendered (Rev. 2 architecture, see
+            # engine/shopper_v2/state.py::LastRendered) arrived after the
+            # first shopping_states rows existed, same idempotent-migration
+            # pattern as focus_stack above.
+            if "last_rendered" not in state_columns:
+                await conn.execute(
+                    text("ALTER TABLE shopping_states ADD COLUMN last_rendered TEXT")
+                )
+
+            # pending_question (Rev. 2 architecture, see
+            # engine/shopper_v2/answer.py) arrived after the first
+            # shopping_states rows existed, same idempotent-migration
+            # pattern as last_rendered above.
+            if "pending_question" not in state_columns:
+                await conn.execute(
+                    text("ALTER TABLE shopping_states ADD COLUMN pending_question TEXT")
+                )
+
+            # preference_domains (production architecture, Phase 2 - see
+            # engine/shopper_v2/state.py::ShoppingStateV2.preference_domains)
+            # arrived after the first shopping_states rows existed, same
+            # idempotent-migration pattern as pending_question above. Maps
+            # each stated preference/priority VALUE to the domain it was
+            # stated under (the active topic's label at that moment, or the
+            # turn's own goal) - lets ranking apply a preference only when
+            # domain-compatible with the current retrieval, never a global
+            # flag applied blindly across categories.
+            if "preference_domains" not in state_columns:
+                await conn.execute(
+                    text("ALTER TABLE shopping_states ADD COLUMN preference_domains TEXT")
+                )
+
+            # cancelled_preferences (production architecture, Phase 2 - see
+            # engine/shopper_v2/state.py::ShoppingStateV2.cancelled_
+            # preferences) arrived after the first shopping_states rows
+            # existed, same idempotent-migration pattern as pending_question
+            # above. A tombstone list: a cancelled preference's value is
+            # recorded here so it is never silently re-applied if the same
+            # phrase is re-extracted from replayed conversation history -
+            # cleared only by the shopper explicitly re-stating it.
+            if "cancelled_preferences" not in state_columns:
+                await conn.execute(
+                    text("ALTER TABLE shopping_states ADD COLUMN cancelled_preferences TEXT")
+                )
+
             # mission_item_id (Shopper V2's basket-proposal tagging, see
             # engine/shopper_v2/basket_proposal.py) arrived after the first
             # cart_proposals rows existed, same idempotent-migration

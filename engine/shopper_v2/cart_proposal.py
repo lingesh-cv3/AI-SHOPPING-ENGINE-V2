@@ -59,13 +59,14 @@ from __future__ import annotations
 
 import logging
 
+from engine.db import cart_proposals as cart_proposals_store
 from engine.db import record_case
 from engine.decision import DecisionEngine, operation_for
 from engine.risk import RiskGate
 from engine.execution import ExecutionService
 from shared.models import ActionType, ProposedAction
 
-from .state import ShoppingStateV2
+from .state import ShoppingStateV2, active_topic_product_ids
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ async def run_cart_change_proposal_turn(
         # function is ever called for those operations).
         product_id = hinted_product_id
         if not product_id and operation == "add":
-            candidates = list(dict.fromkeys(state.active_products))
+            candidates = active_topic_product_ids(state)
             if len(candidates) == 1:
                 product_id = candidates[0]
 
@@ -174,6 +175,28 @@ async def run_cart_change_proposal_turn(
             return (_NO_PRODUCT_REPLY if operation == "add" else _NO_TARGET_REPLY, None)
 
         quantity_param = quantity if operation == "set_quantity" else None
+
+        # Idempotency: asking twice for the same thing must not stack two
+        # pending proposals (approving both would add the product twice). The
+        # one already waiting is returned instead.
+        if operation == "add":
+            try:
+                waiting = await cart_proposals_store.pending_for_cart(connection_id, cart_id, session_id)
+            except Exception:  # noqa: BLE001 - a lookup failure never blocks an honest proposal
+                logger.warning("shopper_v2 cart_proposal: pending lookup failed", exc_info=True)
+                waiting = []
+            already = next(
+                (w for w in waiting
+                 if w.get("product_id") == product_id and w.get("change_type", "ADD") == "ADD"),
+                None,
+            )
+            if already is not None:
+                return (
+                    "I've already prepared that for you - proposal "
+                    f"{already.get('proposal_id')} is waiting for your approval. "
+                    "Nothing is in your cart until you approve it.",
+                    already,
+                )
 
     proposed = ProposedAction(
         action_type=ActionType.PROPOSE_CART_CHANGE,

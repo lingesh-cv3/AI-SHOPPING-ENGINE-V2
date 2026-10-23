@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .models import CartProposal
 from .session import session_scope
@@ -169,6 +169,29 @@ async def set_state(
             row.execution_result = execution_result
         result_dict = _as_dict(row)
     return result_dict
+
+
+async def claim_pending(
+    connection_id: str, proposal_id: str, *, state: str,
+) -> bool:
+    """Atomically move a proposal PENDING -> `state`, and report whether
+    THIS caller made the move. One SQL statement, so of any number of
+    concurrent callers (a REST accept-tap and a conversational "yes" on
+    the same proposal, a double tap, a retry) exactly one wins - the
+    rest see zero rows changed and must not execute. A read-check-then-
+    `set_state` sequence cannot give that guarantee: both callers can
+    read PENDING before either writes."""
+    async with session_scope() as db:
+        result = await db.execute(
+            update(CartProposal)
+            .where(
+                CartProposal.connection_id == connection_id,
+                CartProposal.proposal_id == proposal_id,
+                CartProposal.state == "PENDING",
+            )
+            .values(state=state, decided_at=datetime.now(UTC))
+        )
+        return (result.rowcount or 0) == 1
 
 
 def is_stale(proposal: dict) -> bool:

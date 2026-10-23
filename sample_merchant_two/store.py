@@ -14,6 +14,7 @@ the merchant's platform can do.
 from __future__ import annotations
 
 import itertools
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -85,7 +86,10 @@ def search(
     if collection:
         items = [p for p in items if p["collection"].lower() == collection.lower()]
 
-    words = [w for w in (term or "").lower().split() if len(w) > 2]
+    # Same tokenizer fix as Northfield's `store.py` - a plain `.split()`
+    # leaves trailing punctuation ("socks.") attached to the word, silently
+    # failing to match a real product's bare-word title.
+    words = [w for w in re.findall(r"[a-z0-9]+", (term or "").lower()) if len(w) > 2]
     if words:
         scored = []
         for product in items:

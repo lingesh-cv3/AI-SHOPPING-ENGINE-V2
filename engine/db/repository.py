@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 
 from shared.models import CaseState
 
@@ -2520,39 +2520,122 @@ async def handovers_across(
         return rows, total
 
 
+async def close_handover(
+    connection_id: str, case_id: str, by: str, note: str | None = None
+) -> dict | None:
+    """Close one handover, exactly once. Returns what the caller needs, or None.
+
+    The claim is a single conditional UPDATE - "set handled_at where it is still
+    null" - rather than load, check, write. Load-check-write let two simultaneous
+    closes both succeed, the second silently overwriting who had closed it and what
+    they said; an audit record that can be rewritten by a race is not one. With a
+    conditional UPDATE exactly one caller changes the row and keeps its actor.
+
+    Only a handover can be closed: the case must be ESCALATED. Closing an arbitrary
+    case id that happens to belong to the merchant is not "dealing with a follow-up".
+
+    None for every way it cannot be closed - no such case, another merchant's case,
+    not a handover, or already closed - so the caller answers the same for all of
+    them and nobody can learn whether a case id is real by trying it.
+    """
+    async with session_scope() as db:
+        claimed = await db.execute(
+            update(Case)
+            .where(
+                Case.case_id == case_id,
+                Case.connection_id == connection_id,
+                Case.state == str(CaseState.ESCALATED),
+                Case.handled_at.is_(None),
+            )
+            .values(handled_at=datetime.now(UTC), handled_by=by, handled_note=note)
+        )
+        if claimed.rowcount != 1:
+            return None
+
+        # Returned so the caller can tell the shopper. The session id is the whole
+        # reason this is worth returning rather than a bare True: without it, a
+        # follow-up is resolved and the shopper never learns.
+        session_id = await db.scalar(
+            select(Case.session_id).where(Case.case_id == case_id)
+        )
+        return {
+            "case_id": case_id,
+            "session_id": session_id,
+            "connection_id": connection_id,
+        }
+
+
 async def mark_handled(
     connection_id: str, case_id: str, by: str, note: str | None = None
 ) -> dict | None:
-    """Close a handover. Returns whether anything changed.
+    """Close a handover (the operator route's entry point). See `close_handover`."""
+    return await close_handover(connection_id, case_id, by, note)
 
-    Scoped by connection like everything else here, so one merchant's operator
-    cannot close another's work.
 
-    None either way a handover cannot be closed - an id that does not exist, one
-    belonging to another merchant, or one already closed. The caller reads that as
-    "nothing changed" and answers the same for all three, on purpose: telling an
-    operator which of them it was would let them learn whether a case id is real by
-    trying it. This used to return False for the first two and None only for the
-    third, which the caller's `is None` check let straight through to a crash.
+async def handover_page(
+    connection_id: str,
+    *,
+    handled: bool = False,
+    limit: int = 25,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """One merchant's shopper follow-ups, a page at a time, with the true total.
+
+    `handled=False` is the open ones, oldest first - a shopper was told a person
+    would help, and the longest wait comes first. `handled=True` is the record of
+    what has been dealt with, newest first, so "was this ever picked up, and by
+    whom" stays answerable.
+
+    `total` is a SQL count, never the size of the page, and is not computed by
+    loading the open cases. Everything here is filtered by `connection_id`: there is
+    no variant that reads across merchants.
+
+    `session_id` is deliberately not returned. The route resolves the conversation
+    and the shopper server-side from a case the merchant already owns.
     """
-    async with session_scope() as db:
-        case = await db.get(Case, case_id)
-        if case is None or case.connection_id != connection_id:
-            return None
-        if case.handled_at is not None:
-            return None
-        case.handled_at = datetime.now(UTC)
-        case.handled_by = by
-        case.handled_note = note
+    now = datetime.now(UTC)
+    condition = [
+        Case.connection_id == connection_id,
+        Case.state == str(CaseState.ESCALATED),
+        Case.handled_at.is_not(None) if handled else Case.handled_at.is_(None),
+    ]
+    order = (
+        (Case.handled_at.desc(), Case.case_id.desc())
+        if handled
+        else (Case.created_at.asc(), Case.case_id.asc())
+    )
 
-        # Returned so the caller can tell the shopper. The session id is the whole
-        # reason this is worth returning rather than a bare True: without it, an
-        # operator resolves something and the shopper never learns.
-        return {
-            "case_id": case.case_id,
-            "session_id": case.session_id,
-            "connection_id": case.connection_id,
-        }
+    async with session_scope() as db:
+        total = await db.scalar(select(func.count(Case.case_id)).where(*condition))
+        result = await db.execute(
+            select(Case).where(*condition).order_by(*order).limit(limit).offset(offset)
+        )
+        rows = []
+        for case in result.scalars():
+            created = _aware(case.created_at)
+            handled_at = _aware(case.handled_at)
+            rows.append(
+                {
+                    "case_id": case.case_id,
+                    "created_at": created.isoformat(),
+                    "waiting_minutes": (
+                        None if handled else int((now - created).total_seconds() / 60)
+                    ),
+                    "friction_type": case.friction_type,
+                    "diagnosis": case.diagnosis,
+                    "evidence": case.evidence,
+                    "used_model": case.used_model,
+                    "shopper_reply": case.shopper_reply,
+                    "rejected": case.rejected,
+                    "order_id": case.order_id,
+                    "query": case.query,
+                    "has_conversation": case.session_id is not None,
+                    "handled_at": handled_at.isoformat() if handled_at else None,
+                    "handled_by": case.handled_by,
+                    "handled_note": case.handled_note,
+                }
+            )
+    return rows, total or 0
 
 
 async def record_sent_mail(

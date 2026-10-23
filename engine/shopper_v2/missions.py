@@ -47,11 +47,11 @@ from engine.execution import events as shopper_events
 from engine.execution import mission_ranking
 from engine.execution.relevance import best_matches_with_score
 
-from . import fulfillment
-from .basket_proposal import run_basket_proposal_turn
+from . import fulfillment, guided_mission
+from .add_command import is_explicit_add_command
 from .evidence import build_evidence, product_as_dict
 from .retrieval import retrieve
-from .state import MissionItem, ShoppingStateV2
+from .state import MissionItem, ShoppingStateV2, active_topic_product_ids
 
 logger = logging.getLogger(__name__)
 
@@ -631,6 +631,7 @@ async def run_mission_turn(
     session_id: str | None = None,
     cart_id: str | None = None,
     memory_facts: list[dict] | None = None,
+    shopper_id: str | None = None,
 ):
     """Orchestrator-facing entry point. Returns
     `(reply, products, new_state, handled, proposal_ids)`. `handled=False`
@@ -654,12 +655,19 @@ async def run_mission_turn(
 
     When the interpreter detected an explicit basket-proposal request
     (`propose_basket`) AND `decision`/`gate`/`execution` were supplied by
-    the caller, delegates entirely to
-    `basket_proposal.run_basket_proposal_turn` - see that module's own
-    docstring for the full safety argument. Without those three, degrades
-    honestly rather than silently skipping the request.
+    the caller, each eligible item's own real top candidate (exactly one
+    real, already-verified candidate - ambiguous/empty items are reported
+    honestly instead) is added directly through
+    `fulfillment.start_fulfillment` - the SAME sequential, one-at-a-time,
+    real-variant-question flow every other multi-item add already uses
+    (architecture review, Step 7) - never
+    `basket_proposal.run_basket_proposal_turn`'s older pending-confirm
+    flow, still correct and still tested but no longer this call site's
+    path. Without `decision`/`gate`/`execution`, degrades honestly rather
+    than silently skipping the request.
     """
     before_ids = {i.item_id for i in state.mission_items}
+
     (
         new_state, handled, touched_ids, propose_basket, item_reasons, add_now_product_id,
     ) = await apply_mission_message(
@@ -667,6 +675,20 @@ async def run_mission_turn(
         memory_facts=memory_facts,
     )
     if not handled:
+        # Guided mission without a model: "I want shoes, socks and something
+        # for energy" is read deterministically (the provider is absent, down,
+        # or declined) into ordered stages with their real in-stock options up
+        # front. A brand-new multi-item result the MODEL found is adopted as a
+        # guided mission further below instead.
+        if not state.mission_items:
+            spec = guided_mission.parse_mission(message)
+            if spec is not None:
+                turn = await guided_mission.start(
+                    adapter=adapter, spec=spec, message=message, state=state,
+                    cart_id=cart_id, memory_facts=memory_facts,
+                )
+                if turn is not None:
+                    return turn.reply, turn.products, turn.state, True, []
         return None, [], state, False, []
 
     if add_now_product_id:
@@ -694,6 +716,7 @@ async def run_mission_turn(
             adapter=adapter, decision=decision, gate=gate, execution=execution,
             connection_id=connection_id, session_id=session_id, cart_id=cart_id,
             message=message, state=new_state, product_ids=[add_now_product_id], quantity=1,
+            explicit=is_explicit_add_command(message), shopper_id=shopper_id,
         )
         # Raw `Product` objects, matching the SAME shape the ordinary
         # reply path below returns via `_mission_item_products` - never a
@@ -730,7 +753,7 @@ async def run_mission_turn(
         # `active_products` - the same real ledger `compare.py`/
         # `tradeoff.py` already read, never a guess, never narrowing an
         # item whose ledger overlap is itself ambiguous (0 or 2+ matches).
-        active_ids = set(state.active_products)
+        active_ids = set(active_topic_product_ids(state))
         if active_ids:
             for item in new_state.mission_items:
                 if len(item.candidates) <= 1:
@@ -743,33 +766,69 @@ async def run_mission_turn(
                 if len(overlap) == 1:
                     item.candidates = [overlap[0][0]]
                     item.candidate_titles = [overlap[0][1]]
-        reply, products, basket_state, results = await run_basket_proposal_turn(
-            decision=decision,
-            gate=gate,
-            execution=execution,
-            adapter=adapter,
-            connection_id=connection_id,
-            session_id=session_id,
-            cart_id=cart_id,
-            message=message,
-            state=new_state,
+
+        # Architecture review (Step 7): "add both/all" for a mission must
+        # reach the SAME sequential, one-at-a-time, real-variant-question
+        # flow `fulfillment.py` already uses for every other multi-item
+        # add - never the older `basket_proposal.py` pending-confirm flow
+        # ("I've proposed adding X... confirm to go ahead"), which is the
+        # exact UX this session's own architecture review named as the
+        # wrong default for an already-authorized, explicit "add these"
+        # request. `basket_proposal.py`/`run_cart_change_proposal_turn`
+        # remain correct, tested, and available - only this ONE call site
+        # is redirected; nothing about their own safety argument changes,
+        # and `fulfillment.start_fulfillment`'s own shared real-cart
+        # precondition (added this same review) covers what
+        # `basket_proposal.py`'s own cross-check used to cover here.
+        eligible = [i for i in new_state.mission_items if i.status != "done"]
+        to_add_ids = [i.candidates[0] for i in eligible if len(i.candidates) == 1]
+        no_candidates = [i.label for i in eligible if not i.candidates]
+        ambiguous = [i.label for i in eligible if len(i.candidates) > 1]
+
+        extra_notes = []
+        if ambiguous:
+            extra_notes.append(f"You'll need to pick which one for: {', '.join(ambiguous)}.")
+        if no_candidates:
+            extra_notes.append(f"I haven't found anything for: {', '.join(no_candidates)} yet.")
+
+        if not to_add_ids:
+            reply = " ".join(extra_notes) if extra_notes else "Nothing to propose right now."
+            return reply, [], new_state, True, []
+
+        reply, newly_added = await fulfillment.start_fulfillment(
+            adapter=adapter, decision=decision, gate=gate, execution=execution,
+            connection_id=connection_id, session_id=session_id, cart_id=cart_id,
+            message=message, state=new_state, product_ids=to_add_ids, quantity=1,
+            explicit=is_explicit_add_command(message), shopper_id=shopper_id,
         )
-        # The real ids of every proposal this turn actually created - see
-        # this function's own docstring on why the caller (`orchestrator.py`)
-        # needs these: a live-discovered gap found via Playwright showed
-        # that without surfacing them, a shopper's client has no way to
-        # let them approve/reject a basket-proposed item at all, even
-        # though the real, persisted proposal exists server-side.
-        proposal_ids = [
-            r.proposal["proposal_id"]
-            for r in results
-            if r.outcome == "proposed" and r.proposal
-        ]
-        return reply, products, basket_state, True, proposal_ids
+        if extra_notes:
+            reply = f"{reply} {' '.join(extra_notes)}"
+
+        products = []
+        for pid in newly_added:
+            try:
+                products.append(await adapter.get_product(pid))
+            except Exception:  # noqa: BLE001 - degrade honestly, never invent a card
+                logger.warning("missions: get_product failed for added id %r", pid, exc_info=True)
+        # No pending proposals are ever created by this path - see
+        # `fulfillment.py`'s own docstring: a real add happens directly,
+        # or the Risk Gate holds a specific item for approval
+        # (`awaiting_approval`, reported in `reply` itself) - never a
+        # SEPARATE, second confirm step.
+        return reply, products, new_state, True, []
 
     items_by_id = {i.item_id: i for i in new_state.mission_items}
     new_items = [items_by_id[tid] for tid in touched_ids if tid not in before_ids]
     touched = [items_by_id[tid] for tid in touched_ids if tid in items_by_id]
+
+    # A brand-new multi-item mission found by the model-driven path becomes a
+    # guided, staged one (same plan, same stage-by-stage flow as the model-free
+    # start). Follow-up refinements of an existing mission are untouched.
+    if not before_ids and len(new_items) >= 2 and not guided_mission.guided_items(new_state):
+        turn = await guided_mission.adopt(
+            adapter=adapter, state=new_state, items=list(new_state.mission_items), cart_id=cart_id,
+        )
+        return turn.reply, turn.products, turn.state, True, []
 
     # Fetched ONCE per item, up front - the reply text below and the
     # `products` this function returns both read from this SAME dict, so a

@@ -21,7 +21,7 @@ Read-only, no adapter call, no `engine.decision`/`engine.risk`/
 from __future__ import annotations
 
 from .respond import _claims_a_cart_action
-from .state import ShoppingStateV2
+from .state import ShoppingStateV2, active_topic_product_ids
 
 _GENERIC_GREETING = (
     "Hi! I can help you find products, compare options, or check on an "
@@ -45,7 +45,7 @@ def run_conversational_turn(
     if conversational_reply and not _claims_a_cart_action(conversational_reply):
         return conversational_reply, used_model
 
-    if state.active_products:
+    if active_topic_product_ids(state):
         return _WITH_ACTIVE_PRODUCTS, False
     if state.goal or state.mission_items:
         return _GENERIC_ACKNOWLEDGEMENT, False

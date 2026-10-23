@@ -182,7 +182,20 @@ async def _live_orchestrator_check() -> None:
             connection_id=connection_id,
             message="lightweight matters most to me",
         )
-        check("a live trade-off turn is recognized", result.trace.get("capability") == "trade_off")
+        # Rev. 2 migration (2026-09): the sticky `delta.priorities_add`
+        # trigger this test used to reach `trade_off` through directly was
+        # retired (root-caused as the cause of a live "no, forget that"/
+        # "go back to X" both wrongly hijacking a stale re-rank reply) -
+        # a bare preference statement with real products active now
+        # routes deterministically through `Capability.ANSWER_QUESTION`
+        # (`question_type == "attribute_refinement"`), which calls this
+        # SAME `run_tradeoff_turn` internally. The capability LABEL
+        # changed by design; the re-ranking behavior asserted by every
+        # other check in this file did not.
+        check(
+            "a live trade-off turn is recognized",
+            result.trace.get("capability") in ("trade_off", "answer_question"),
+        )
         # NOT asserted: which specific product wins. That depends on the
         # PRIMARY reasoning call (`understand()`) isolating "lightweight"
         # as a clean priority phrase rather than capturing the whole
@@ -195,9 +208,13 @@ async def _live_orchestrator_check() -> None:
         # live check confirms is the pipeline itself: the trigger fires,
         # a real re-rank runs against the real catalog, and the result is
         # honestly persisted - never that extraction is perfectly reliable.
+        # Rev. 2: a bare preference is a durable-fact CANDIDATE (persisted
+        # only for a signed-in shopper, used same-turn for the re-rank), no
+        # longer a `state.priorities` write - so the live guarantee is that
+        # the model interpreted the turn (not degraded) and the re-rank ran.
         check(
-            "the live state has a real, persisted priority captured for this turn",
-            bool(result.state.priorities),
+            "the live turn was interpreted by the model (not degraded)",
+            result.trace.get("interpretation_used_model") is True and not result.trace.get("error"),
         )
         check(
             "active_products remains the same real set (re-ordered or unchanged), never fabricated",

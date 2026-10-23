@@ -48,8 +48,29 @@ partial, unverified, or unbuilt.
   cart all route through the unmodified Decision Engine → Risk Gate →
   execution → adapter pipeline, constructing only
   `PROPOSE_CART_CHANGE`/`PREPARE_CHECKOUT`/`CHECK_ORDER_STATUS`/recovery
-  candidates — a cart only changes after a shopper's own explicit call to
-  `POST /api/chat/proposals/{id}/accept`.
+  candidates. A cart changes only on the shopper's own authorization: a tap
+  or typed "yes" on a proposal, or an explicit typed add command
+  (`add_command.py`) whose product and variant are unambiguous — both end in
+  `accept_cart_proposal_core` (live stock/price re-check, atomic claim). An
+  bare "it" with several products in view, or a missing size asks first;
+  clear questions, negations, deferrals, double-quoted text and vague
+  agreement never add. Known remaining bypasses of the ambiguity guard are
+  listed in PROGRESS.md (not yet closed).
+  Verified model-free (`test_explicit_add_executes.py`) and live (gpt-4o-mini:
+  named add executes, sized product asks, ambiguous/hedged messages add
+  nothing).
+- **Cross-session cart persistence**: signing out and back in restores the
+  shopper's remembered cart instead of letting an empty guest cart replace
+  it; ownership-checked, and a transient platform error never discards it
+  (`test_cart_persistence_signin.py`, browser `cart-restore`).
+- **Store-level discovery**: "What do you have?" answers from the merchant's
+  declared departments (tappable choices, buyable-checked) on both demo
+  merchants — live-verified; named-department browse and variant-grounded
+  terms ("beans") included.
+- **Multi-product discovery**: two or three products named in one message are
+  each resolved and shown, with a plainly absent one reported rather than
+  invented — including when the model routes the message to the compare
+  answer (live-verified; `test_step25_named_multi_routed.py`).
 - **V2 missions and basket proposals**: a stated goal drives multi-item
   shortlisting with a real reason per item; a discovery-vs-cart-action
   routing bug (a plain restatement misclassified as cart intent) is fixed

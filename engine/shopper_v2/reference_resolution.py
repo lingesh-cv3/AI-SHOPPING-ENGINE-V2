@@ -24,6 +24,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from engine.execution.relevance import best_matches_with_score
+
 #: 0-based ordinal positions. Closed class, not tied to any product domain -
 #: "first"/"second"/... mean the same thing whether the group is shoes,
 #: coffees, or watches.
@@ -109,6 +111,45 @@ def _levenshtein_at_most_one(a: str, b: str) -> bool:
     return True
 
 
+#: "first" and "last" are the only two words in the ordinal vocabulary that
+#: are also ordinary English sequencing/temporal adverbs ("first, tell me
+#: X", "at last", "last week") rather than exclusively positional words -
+#: "second"/"third"/... have no such competing everyday use. Live-
+#: reproduced (2026-09): "wait, first tell me what socks you have" is a
+#: topic switch, not a reference to "the first [item]", but bare
+#: substring/word-boundary matching on "first" can't tell the two apart on
+#: the word alone.
+_ORDINAL_ADVERB_WORDS = {"first", "last"}
+_POSITIONAL_PRECEDERS = {
+    "the", "my", "your", "our", "that", "this", "which", "whichever",
+    "add", "get", "give", "pick", "choose", "want", "take", "show", "buy",
+}
+_POSITIONAL_FOLLOWERS = {"one", "ones", "item", "items", "product", "products", "option", "options", "pair"}
+
+
+def _is_positional_usage(tokens: list[str], token_index: int) -> bool:
+    """True when the ordinal-adverb word at `token_index` sits in a real
+    positional/referential context - preceded by a determiner/possessive/
+    selection verb ("the first", "my last", "add first"), immediately
+    followed by a referent noun ("first one", "last item"), or part of a
+    genuine ordinal list ("first and second/third/...") - rather than
+    functioning as a plain sequencing or temporal adverb ("first, tell
+    me...", "last week", "at last"). Only ever consulted for
+    `_ORDINAL_ADVERB_WORDS`; every other ordinal word is unambiguously
+    positional and skips this check entirely."""
+    prev_word = tokens[token_index - 1] if token_index > 0 else ""
+    next_word = tokens[token_index + 1] if token_index + 1 < len(tokens) else ""
+    if prev_word in _POSITIONAL_PRECEDERS or next_word in _POSITIONAL_FOLLOWERS:
+        return True
+    if next_word == "and" and token_index + 2 < len(tokens):
+        following = tokens[token_index + 2]
+        if following in _ORDINAL_TO_INDEX or any(
+            _levenshtein_at_most_one(following, word) for word in _ORDINAL_TO_INDEX
+        ):
+            return True
+    return False
+
+
 def resolve_ordinal_positions(message: str) -> list[int] | None:
     """Real 0-based positions named by ordinal words in `message` - "the
     first and third" -> [0, 2]. "last" is returned as -1 (a real Python
@@ -116,13 +157,29 @@ def resolve_ordinal_positions(message: str) -> list[int] | None:
     caller). Returns `None` when no ordinal word is present at all - this
     is a structural absence-of-signal, never a default guess.
 
+    "first"/"last" additionally require a real positional context (see
+    `_is_positional_usage`) since both also function as ordinary
+    sequencing/temporal adverbs in English; every other ordinal word is
+    matched on presence alone.
+
     Typo-tolerant (2026-09, live-reproduced: "add frist and second to the
     cart" failed outright on the literal typo) - every token in the
     message is also checked within edit-distance 1 of each real ordinal
     word (see `_levenshtein_at_most_one`), bounded to this tiny closed
     vocabulary so it can never misfire on an unrelated real word."""
     lowered = f" {message.lower().strip()} "
-    positions = [idx for word, idx in _ORDINAL_TO_INDEX.items() if f" {word} " in lowered]
+    tokens = [t.strip(".,!?'\"") for t in lowered.split()]
+    positions: list[int] = []
+    exact_words_present: set[str] = set()
+    for i, token in enumerate(tokens):
+        idx = _ORDINAL_TO_INDEX.get(token)
+        if idx is None:
+            continue
+        exact_words_present.add(token)
+        if token in _ORDINAL_ADVERB_WORDS and not _is_positional_usage(tokens, i):
+            continue
+        if idx not in positions:
+            positions.append(idx)
     # Typo-tolerant scan runs regardless of whether OTHER ordinal words
     # already matched exactly in this same message - "add frist and
     # second" must find BOTH "first" (typo'd) and "second" (exact), not
@@ -130,18 +187,20 @@ def resolve_ordinal_positions(message: str) -> list[int] | None:
     # already matched a real word exactly (via the exact-word membership
     # check on `_ORDINAL_TO_INDEX`), so a genuinely exact word is never
     # redundantly re-matched by its own typo-tolerant neighbor.
-    exact_words_present = {word for word in _ORDINAL_TO_INDEX if f" {word} " in lowered}
-    tokens = [t.strip(".,!?'\"") for t in lowered.split()]
-    for token in tokens:
+    for i, token in enumerate(tokens):
         if len(token) < 4 or token in exact_words_present:
             continue
         for word, idx in _ORDINAL_TO_INDEX.items():
             if word in exact_words_present:
                 continue
-            if _levenshtein_at_most_one(token, word) and idx not in positions:
-                positions.append(idx)
-    if re.search(r"\blast\b", lowered):
-        positions.append(-1)
+            if _levenshtein_at_most_one(token, word):
+                if word in _ORDINAL_ADVERB_WORDS and not _is_positional_usage(tokens, i):
+                    continue
+                if idx not in positions:
+                    positions.append(idx)
+    for i, token in enumerate(tokens):
+        if token == "last" and _is_positional_usage(tokens, i) and -1 not in positions:
+            positions.append(-1)
     return sorted(set(positions), key=lambda p: (p == -1, p)) if positions else None
 
 
@@ -626,3 +685,128 @@ def resolve_named_subset(message: str, titles: list[str]) -> list[int] | None:
 
     positions = exact_positions + fuzzy_positions
     return sorted(set(positions)) if len(set(positions)) >= 2 else None
+
+
+@dataclass
+class ReferenceCandidate:
+    """One real, already-known thing a `StructuredReference` might resolve
+    to - a product (`id`=product_id) or a Focus Stack topic (`id`=topic_id).
+    `title` is whatever real text this candidate is matched against
+    (a product's own title, or a topic's own label) - never invented."""
+
+    id: str
+    title: str
+
+
+@dataclass
+class StructuredReference:
+    """The ONE reference shape every interpreter that names an existing
+    thing emits - replacing the near-identical `reference_type`/`position`/
+    `named_hint` fields `CartReferenceIntent` (engine/reasoning/service.py)
+    and `MissionItemIntent` independently declared. Two schemas for the
+    same concept was the same duplication as the three independent
+    resolvers this function itself replaces - unifying the DATA shape and
+    the RESOLUTION shape are one change, not two."""
+
+    reference_type: str = "none"  # "ordinal" | "pronoun" | "name" | "none"
+    position: int | None = None
+    named_hint: str | None = None
+
+
+@dataclass
+class ResolvedReference:
+    """The one result shape every capability consumes identically. `ids`
+    is `None` when nothing resolved (no reference stated, or a genuine
+    ambiguity/miss) - never an empty-list-as-failure ambiguity with `ids`
+    itself. `ambiguous=True` marks a case where real candidates existed but
+    could not be narrowed to exactly one - the caller's job is to ask, not
+    guess further."""
+
+    ids: list[str] | None = None
+    ambiguous: bool = False
+
+
+def resolve_structured_reference(
+    reference: StructuredReference,
+    candidates: list[ReferenceCandidate],
+    *,
+    raw_message: str | None = None,
+) -> ResolvedReference:
+    """The one authoritative resolution step every capability
+    (`compare.py`, `intent_resolution.py`, `missions.py`) now shares -
+    given a `StructuredReference` (whatever an interpreter's own model call
+    extracted) and the real candidate list THAT CALLER chose to resolve
+    against, decide which real id(s), if any, this refers to.
+
+    Deliberately does not decide WHICH candidate list to use - that
+    remains each capability's own concern (a cart-action's "remove"
+    resolves against real cart lines; a mission's item-reference resolves
+    against tracked items; ordinary discovery resolves against whatever the
+    Focus Stack's active topic holds) - see each call site's own docstring
+    for why. This function only owns the ALGORITHM: ordinal bounds-check,
+    pronoun-singleton-check, and name-matching - previously reimplemented
+    three times with two different quality bars (missions.py's own
+    `_matched_candidate_id` independently re-verified the raw message
+    against candidate titles, catching a real, live-reproduced ambiguity
+    intent_resolution.py's own version did not guard against at all -
+    "get me the road one" against "Winter Road Shoe" AND "Starter Road
+    Running Shoe", both genuinely matching "road" - the model's own
+    `named_hint` silently picked one every time, an ungrounded specificity
+    the shopper's own words never resolved. Adopted here for every caller,
+    not just missions.py's).
+
+    `raw_message`, when supplied, cross-verifies a `name` match against the
+    UNVERIFIED model-supplied `named_hint` text - required to agree with
+    an independent re-score of the raw message's own words before treating
+    a single title match as confident. Omit it only when no raw message is
+    available (never to skip the check when one is)."""
+    if reference.reference_type == "ordinal":
+        if reference.position is not None and 1 <= reference.position <= len(candidates):
+            return ResolvedReference(ids=[candidates[reference.position - 1].id])
+        return ResolvedReference()
+
+    if reference.reference_type == "pronoun":
+        if len(candidates) == 1:
+            return ResolvedReference(ids=[candidates[0].id])
+        if len(candidates) > 1:
+            return ResolvedReference(ambiguous=True)
+        return ResolvedReference()
+
+    if reference.reference_type == "name":
+        hint = (reference.named_hint or "").strip()
+        if not hint or not candidates:
+            return ResolvedReference()
+
+        scored_candidates = [{"id": c.id, "title": c.title} for c in candidates]
+        hint_matches = [
+            c["id"] for c in scored_candidates
+            if hint.lower() in c["title"].lower() or c["title"].lower() in hint.lower()
+        ]
+        if len(hint_matches) == 0:
+            return ResolvedReference()
+        if len(hint_matches) > 1:
+            return ResolvedReference(ambiguous=True)
+
+        if not raw_message:
+            # No raw text to independently cross-verify against - the
+            # model's own single hint match stands, same as before this
+            # cross-check existed for callers that have no raw message
+            # (a validated re-reference case, not a fresh interpretation).
+            return ResolvedReference(ids=[hint_matches[0]])
+
+        by_id = {c.id: c.title for c in candidates}
+        top_score, top_matches = best_matches_with_score(
+            [{"title": t} for t in by_id.values()], raw_message,
+        )
+        if top_score == 0:
+            # The raw message had no significant words to score against
+            # titles at all - nothing to independently verify against, so
+            # the model's own single hint match stands.
+            return ResolvedReference(ids=[hint_matches[0]])
+        top_titles = {m["title"] for m in top_matches}
+        top_ids = {cid for cid, title in by_id.items() if title in top_titles}
+        if len(top_ids) != 1 or hint_matches[0] not in top_ids:
+            return ResolvedReference(ambiguous=True)
+        return ResolvedReference(ids=[hint_matches[0]])
+
+    return ResolvedReference()

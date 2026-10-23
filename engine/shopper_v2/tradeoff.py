@@ -54,6 +54,7 @@ async def run_tradeoff_turn(
     adapter,
     message: str,
     state: ShoppingStateV2,
+    memory_facts: list[dict] | None = None,
 ) -> tuple[str, TurnEvidence, list[Product], list[str]]:
     """Re-rank `state.active_products` using the CURRENT (just-updated)
     `state.priorities`/`must_have`/`constraints`/`exclusions`/`budget`, and
@@ -88,7 +89,7 @@ async def run_tradeoff_turn(
 
     product_dicts = [product_as_dict(p) for p in products]
     shortlist, fit_reasons = mission_ranking.rank_and_filter(
-        product_dicts, state.as_prompt_dict(), limit=len(product_dicts)
+        product_dicts, state.as_prompt_dict(), memory_facts=memory_facts, limit=len(product_dicts)
     )
 
     by_id = {p.product_id: p for p in products}
