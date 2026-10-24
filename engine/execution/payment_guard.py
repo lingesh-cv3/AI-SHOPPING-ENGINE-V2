@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from engine.db import idempotency as ledger
-from engine.execution import payment_reconcile
+from engine.execution import payment_alerts, payment_reconcile
 from shared.models import CheckoutResult, CommerceError, ErrorCode
 from shared.models.errors import WRITE_AMBIGUITY, WriteAmbiguity
 
@@ -94,6 +94,14 @@ async def _park_unknown(connection_id: str, cart_id: str, token: str | None, rea
         raise
     except Exception:  # noqa: BLE001
         logger.exception("could not park a payment as UNKNOWN_OUTCOME")
+        return
+    # Tell the merchant once (best effort: a failure is recorded and retried by the sweep, and never fails the shopper's tap).
+    try:
+        await _shielded(payment_alerts.sync(connection_id, cart_id))
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.exception("could not raise the unresolved-payment alert")
 
 
 def _unknown(reason: str, **detail) -> PayOutcome:
@@ -110,6 +118,7 @@ async def claim(adapter, connection_id: str, cart_id: str, key: str) -> tuple[di
         begun = await ledger.begin_payment(connection_id, cart_id, attempt_key=key)
 
     if begun.get("unknown"):
+        await payment_alerts.sync(connection_id, cart_id)  # a basket that went stale or was orphaned has had no alert yet
         retried = None
         if getattr(adapter, "honours_idempotency_keys", False):
             retried = await ledger.retry_unknown(connection_id, cart_id, attempt_key=key)
@@ -200,4 +209,6 @@ async def pay_basket(adapter, connection_id: str, cart_id: str, card_last4: str)
         logger.error("payment result for %s/%s could not be recorded: the ledger row had already moved", connection_id, cart_id)
         return _unknown("ledger_moved")
 
+    if claimed["retry_of_unknown"]:
+        await payment_alerts.close_for(connection_id, cart_id)  # the unknown outcome this retry settled is resolved
     return PayOutcome(kind="paid" if result.succeeded else "declined", result=result, order_id=args["order_id"])

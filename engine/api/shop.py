@@ -15,6 +15,8 @@ exists to prevent.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -22,6 +24,7 @@ from shared.models import CapabilityUnsupported, CommerceError, Money
 
 from engine import db
 from engine.execution import payment_guard as pay_guard
+from engine.execution import payment_reconcile
 from engine.notify import confirm_order
 
 from .auth import (
@@ -32,6 +35,12 @@ from .auth import (
     visitor,
 )
 from .deps import MERCHANT_NAMES, engine
+
+logger = logging.getLogger(__name__)
+
+#: How many cart ids create_cart will mint looking for one with no unresolved payment on it.
+_MAX_CART_MINTS = 5
+
 
 router = APIRouter(prefix="/api/shop", tags=["shop"])
 
@@ -92,6 +101,18 @@ def _product(p) -> dict:
             for v in p.variants
         ],
     }
+
+
+async def _cart_view(connection_id: str, c) -> dict:
+    """The normalised cart plus the basket's payment state: "paid", "in_flight", "unknown" or null.
+
+    The storefront disables payment on anything but null, and re-reads this after any payment attempt, so a basket held because a
+    payment's outcome could not be confirmed is shown as held however stale the page was. Read from the engine's own ledger;
+    the server-side guards stay authoritative either way.
+    """
+    view = _cart(c)
+    view["payment_state"] = await db.idempotency.payment_lock(connection_id, c.cart_id)
+    return view
 
 
 def _cart(c) -> dict:
@@ -359,10 +380,40 @@ async def create_cart(
     be filling it.
     """
     adapter = _adapter(connection_id)
-    try:
-        cart = await adapter.create_cart()
-    except CommerceError as exc:
-        raise _handle(exc) from exc
+
+    # A platform that reissues cart ids (a restart resets its counter) can mint an id whose payment ledger row is still
+    # unresolved from the id's previous life. That row is the only record the earlier basket may have been charged, so it is
+    # never discarded on the strength of "the platform says this id is new": reconciliation looks for evidence first, and when
+    # it cannot release the row this id is simply not used - another is minted (the unused empty cart is harmless).
+    cart = None
+    for _attempt in range(_MAX_CART_MINTS):
+        try:
+            candidate = await adapter.create_cart()
+        except CommerceError as exc:
+            raise _handle(exc) from exc
+        held = await db.idempotency.payment_row(connection_id, candidate.cart_id)
+        reconciled_paid = False
+        if held is not None and held["state"] in (db.idempotency.IN_FLIGHT, db.idempotency.UNKNOWN_OUTCOME):
+            outcome = await payment_reconcile.reconcile(adapter, connection_id, candidate.cart_id)
+            reconciled_paid = outcome.get("status") == "paid"
+            held = await db.idempotency.payment_row(connection_id, candidate.cart_id)
+        # Free to use: no row, or only a settled one. An id the platform proved it HAS a paid order for is never "fresh", and an
+        # unresolved row is never discarded - either way another id is minted.
+        if not reconciled_paid and (held is None or held["state"] not in (db.idempotency.IN_FLIGHT, db.idempotency.UNKNOWN_OUTCOME)):
+            cart = candidate
+            break
+        logger.warning(
+            "create_cart on %s minted %s, which still has an unresolved payment; using another id", connection_id, candidate.cart_id
+        )
+    if cart is None:
+        raise HTTPException(
+            503,
+            detail={
+                "code": "CART_UNAVAILABLE",
+                "message": "a new basket could not be started right now; try again in a moment",
+                "retryable": True,
+            },
+        )
 
     # Taken rather than claimed. The shop has just minted this id, so whoever is
     # holding it owns it - including when a restart has reissued a number somebody
@@ -382,7 +433,7 @@ async def create_cart(
     # route when it doesn't already hold a cart id).
     await db.record_funnel_event(connection_id, "CART_CREATED", cart.cart_id)
 
-    return _cart(cart)
+    return await _cart_view(connection_id, cart)
 
 
 @router.get("/{connection_id}/cart/{cart_id}")
@@ -394,7 +445,7 @@ async def get_cart(
     await _mine(who, connection_id, db.owners.CART, cart_id)
     adapter = _adapter(connection_id)
     try:
-        return _cart(await adapter.get_cart(cart_id))
+        return await _cart_view(connection_id, await adapter.get_cart(cart_id))
     except CommerceError as exc:
         raise _handle(exc) from exc
 
@@ -417,7 +468,7 @@ async def add_line(
         )
     except CommerceError as exc:
         raise _handle(exc) from exc
-    return _cart(cart)
+    return await _cart_view(connection_id, cart)
 
 
 @router.patch("/{connection_id}/cart/{cart_id}/lines/{line_id}")
@@ -446,7 +497,7 @@ async def change_line(
         cart = await adapter.update_cart(cart_id, line_id, quantity=body.quantity)
     except CommerceError as exc:
         raise _handle(exc) from exc
-    return _cart(cart)
+    return await _cart_view(connection_id, cart)
 
 
 @router.post("/{connection_id}/cart/{cart_id}/promotion")
@@ -465,7 +516,7 @@ async def apply_promotion(
     adapter = _adapter(connection_id)
     try:
         await adapter.apply_promotion(cart_id, body.code)
-        return _cart(await adapter.get_cart(cart_id))
+        return await _cart_view(connection_id, await adapter.get_cart(cart_id))
     except CommerceError as exc:
         raise _handle(exc) from exc
 

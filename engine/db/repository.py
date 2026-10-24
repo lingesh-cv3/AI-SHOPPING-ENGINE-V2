@@ -1560,6 +1560,80 @@ async def _upsert_task(
         existing.detail = detail
 
 
+#: The merchant task kind raised when a payment outcome cannot be confirmed (see engine/execution/payment_alerts.py).
+PAYMENT_TASK_KIND = "PAYMENT_UNRESOLVED"
+
+
+async def upsert_payment_alert(connection_id: str, subject_key: str, label: str, detail: dict) -> bool:
+    """Create the merchant task for one unresolved-payment episode, once. True when this call created it.
+
+    The unique (connection, kind, subject) constraint is the dedupe: a repeated call refreshes the open row and creates nothing.
+    """
+    async with session_scope() as db:
+        existing = (
+            await db.execute(
+                select(MerchantTask.task_id).where(
+                    MerchantTask.connection_id == connection_id,
+                    MerchantTask.kind == PAYMENT_TASK_KIND,
+                    MerchantTask.subject_key == subject_key,
+                )
+            )
+        ).scalar_one_or_none()
+        await _upsert_task(db, connection_id, PAYMENT_TASK_KIND, subject_key, label, detail)
+        if existing is not None:
+            task = (
+                await db.execute(
+                    select(MerchantTask).where(
+                        MerchantTask.connection_id == connection_id,
+                        MerchantTask.kind == PAYMENT_TASK_KIND,
+                        MerchantTask.subject_key == subject_key,
+                    )
+                )
+            ).scalar_one()
+            # Closed by the SYSTEM (never by a person) while the same episode is, again, unresolved: reopen it. A decision a
+            # person made is never reopened here.
+            if task.state == "RESOLVED" and str(task.decided_by or "").startswith("system:"):
+                task.state = "OPEN"
+                task.decided_at = None
+                task.decided_by = None
+                task.last_seen_at = datetime.now(UTC)
+                return True
+        return existing is None
+
+
+async def close_payment_alerts(connection_id: str, subject_prefix: str, *, decided_by: str) -> int:
+    """Close every OPEN unresolved-payment task of one basket (subject starts with `subject_prefix`). Returns how many closed."""
+    async with session_scope() as db:
+        rows = await db.execute(
+            select(MerchantTask).where(
+                MerchantTask.connection_id == connection_id,
+                MerchantTask.kind == PAYMENT_TASK_KIND,
+                MerchantTask.state == "OPEN",
+                MerchantTask.subject_key.like(f"{subject_prefix}%"),
+            )
+        )
+        closed = 0
+        for task in rows.scalars():
+            task.state = "RESOLVED"
+            task.decided_at = datetime.now(UTC)
+            task.decided_by = decided_by[:80]
+            closed += 1
+        return closed
+
+
+async def open_payment_alerts(limit: int = 500, offset: int = 0) -> list[tuple[str, str, str | None]]:
+    """(connection_id, subject_key, cart_id) of OPEN unresolved-payment tasks, one page, for the sweep that closes stale ones."""
+    async with session_scope() as db:
+        rows = await db.execute(
+            select(MerchantTask.connection_id, MerchantTask.subject_key, MerchantTask.detail)
+            .where(MerchantTask.kind == PAYMENT_TASK_KIND, MerchantTask.state == "OPEN")
+            .order_by(MerchantTask.created_at, MerchantTask.task_id)
+            .offset(offset)
+            .limit(limit)
+        )
+        return [(r[0], r[1], (r[2] or {}).get("cart_id")) for r in rows.all()]
+
+
 async def sync_merchant_tasks(
     connection_id: str, *, catalog_alerts: dict | None, unmet_demand: list[dict] | None
 ) -> None:
@@ -1688,6 +1762,10 @@ async def decide_merchant_task(
         if task is None:
             return None
         if task.state != "OPEN":
+            return {"task_id": task_id, "state": task.state, "changed": False}
+        if task.kind == PAYMENT_TASK_KIND:
+            # Informational: it closes itself when the payment's ledger row is resolved. A merchant "resolving" it would only
+            # suggest the basket is settled when nothing about the basket has changed.
             return {"task_id": task_id, "state": task.state, "changed": False}
 
         task.state = "RESOLVED" if resolved else "DISMISSED"
@@ -2405,7 +2483,10 @@ async def ops_stats(connection_ids: list[str]) -> dict:
     about outcomes.
     """
     if not connection_ids:
-        return {"waiting": 0, "oldest_wait_minutes": 0, "by_merchant": {}, "today": 0}
+        return {
+            "waiting": 0, "oldest_wait_minutes": 0, "by_merchant": {}, "today": 0,
+            "unresolved_payments": 0, "oldest_unresolved_payment_minutes": 0,
+        }
 
     now = datetime.now(UTC)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2442,6 +2523,8 @@ async def ops_stats(connection_ids: list[str]) -> dict:
 
     waits = [int((now - _aware(a.requested_at)).total_seconds() / 60) for a in rows]
 
+    unresolved = await unresolved_payment_figures(connection_ids)
+
     return {
         "waiting": len(rows),
         # The number that decides whether anyone should be worried. Ten cases
@@ -2450,7 +2533,36 @@ async def ops_stats(connection_ids: list[str]) -> dict:
         "oldest_wait_minutes": max(waits) if waits else 0,
         "by_merchant": by_merchant,
         "today": settled_today or 0,
+        # Baskets held because a payment's outcome could not be confirmed: a shopper maybe charged, maybe not.
+        "unresolved_payments": unresolved["count"],
+        "oldest_unresolved_payment_minutes": unresolved["oldest_minutes"],
     }
+
+
+async def unresolved_payment_figures(connection_ids: list[str]) -> dict:
+    """How many baskets are currently UNKNOWN_OUTCOME across these merchants, and how long the oldest has been held."""
+    if not connection_ids:
+        return {"count": 0, "oldest_minutes": 0}
+    now = datetime.now(UTC)
+    async with session_scope() as db:
+        rows = await db.execute(
+            select(ExecutionAttempt).where(
+                ExecutionAttempt.connection_id.in_(connection_ids),
+                ExecutionAttempt.action_type == "CHECKOUT",
+                ExecutionAttempt.state == "UNKNOWN_OUTCOME",
+            )
+        )
+        held = list(rows.scalars())
+    ages = []
+    for row in held:
+        raw = (row.result or {}).get("first_unknown_at") or (row.result or {}).get("unknown_at")
+        try:
+            since = datetime.fromisoformat(str(raw))
+            since = since if since.tzinfo else since.replace(tzinfo=UTC)
+            ages.append(int((now - since).total_seconds() / 60))
+        except (TypeError, ValueError):
+            continue
+    return {"count": len(held), "oldest_minutes": max(ages) if ages else 0}
 
 
 async def handovers_across(

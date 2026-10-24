@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 
 from engine import db
 from engine.db import idempotency as ledger
+from engine.execution import payment_alerts
 from shared.models import Order
 from shared.models.commerce import PaymentStatus
 
@@ -115,6 +116,13 @@ def _age_seconds(row: dict) -> float:
 
 async def reconcile(adapter, connection_id: str, cart_id: str, *, force: bool = False) -> dict:
     """Try to resolve one UNKNOWN_OUTCOME basket with evidence. Never raises. Returns {"status": <fixed code>}."""
+    outcome = await _reconcile(adapter, connection_id, cart_id, force=force)
+    if outcome.get("status") not in ("not_unknown", "throttled", "error"):
+        await payment_alerts.sync(connection_id, cart_id)  # resolved -> close the alert; still unknown -> make sure one exists
+    return outcome
+
+
+async def _reconcile(adapter, connection_id: str, cart_id: str, *, force: bool = False) -> dict:
     try:
         row = await ledger.payment_row(connection_id, cart_id)
         if row is None or row["state"] != ledger.UNKNOWN_OUTCOME:
@@ -177,6 +185,15 @@ async def resolve(
     is refused when the platform answers completely and shows none or does not show that order. With no lookup (or an
     inconclusive one) the operator's call stands and is recorded as asserted. CAS-protected: a row that moved is not touched.
     """
+    outcome = await _resolve(adapter, connection_id, cart_id, resolution=resolution, order_id=order_id, note=note, operator_id=operator_id)
+    if outcome.get("status") == "resolved":
+        await payment_alerts.sync(connection_id, cart_id)
+    return outcome
+
+
+async def _resolve(
+    adapter, connection_id: str, cart_id: str, *, resolution: str, order_id: str | None, note: str | None, operator_id: str
+) -> dict:
     row = await ledger.payment_row(connection_id, cart_id)
     if row is None or row["state"] != ledger.UNKNOWN_OUTCOME:
         return {"status": "not_found"}
@@ -225,6 +242,7 @@ async def sweep(registry) -> dict:
     result = {"stale": 0, "checked": 0, "paid": 0, "cleared": 0}
     try:
         result["stale"] = await ledger.stale_in_flight_to_unknown()
+        result["alerts"] = await payment_alerts.sweep()
         _total, rows = await ledger.unresolved_payments(limit=200)
         for row in rows:
             adapter = registry.adapter_for(row["connection_id"])

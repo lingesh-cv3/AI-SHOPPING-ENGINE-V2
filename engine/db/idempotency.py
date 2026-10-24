@@ -288,6 +288,9 @@ def _snapshot(row: ExecutionAttempt) -> dict:
         "manual": bool(res.get("manual")),
         "retry_of_unknown": bool(res.get("retry_of_unknown")),
         "operator": dict(res.get("operator") or {}),
+        "first_unknown_at": _parse(res.get("first_unknown_at")) or _parse(res.get("unknown_at")),
+        "episode": res.get("episode"),
+        "alert": dict(res.get("alert") or {}),
     }
 
 
@@ -361,7 +364,7 @@ def _claim_result(prev: dict, attempt_key: str | None, *, retry_of_unknown: bool
     }
     if retry_of_unknown:
         # an unknown outcome's history survives a same-key retry; a fresh claim after a decline starts clean
-        for field in ("reason", "unknown_at", "first_unknown_at", "recon"):
+        for field in ("reason", "unknown_at", "first_unknown_at", "recon", "episode", "alert"):
             if prev.get(field) is not None:
                 res[field] = prev[field]
         res.setdefault("first_unknown_at", prev.get("unknown_at"))
@@ -418,6 +421,8 @@ async def begin_payment(connection_id: str, cart_id: str, *, attempt_key: str | 
                 if started is not None and (_now() - started).total_seconds() > stale_after():
                     res = dict(row.result or {})
                     res.update({"reason": "stale_in_flight", "unknown_at": _iso(), "manual": False})
+                    res.setdefault("first_unknown_at", res["unknown_at"])
+                    res.setdefault("episode", uuid.uuid4().hex[:12])
                     moved = await _cas(
                         db, key, states=[IN_FLIGHT], token=_token_pred(snap["token"]),
                         values={"state": UNKNOWN_OUTCOME, "summary": "outcome unknown: attempt went stale", "result": res},
@@ -477,6 +482,8 @@ async def mark_unknown(connection_id: str, cart_id: str, *, token: str | None, r
             return False
         res = dict(row.result or {})
         res.update({"reason": reason, "unknown_at": _iso(), "manual": False})
+        res.setdefault("first_unknown_at", res["unknown_at"])
+        res.setdefault("episode", uuid.uuid4().hex[:12])
         return await _cas(
             db, key, states=[IN_FLIGHT], token=_token_pred(token),
             values={"state": UNKNOWN_OUTCOME, "summary": "outcome unknown", "result": res},
@@ -594,6 +601,29 @@ async def record_reconciliation(
         await _cas(db, key, states=[UNKNOWN_OUTCOME], token=_token_pred(token), values={"result": res})
 
 
+async def record_alert(
+    connection_id: str, cart_id: str, *, episode: str, state: str, token: str | None
+) -> None:
+    """Remember that the merchant alert for this unknown-outcome EPISODE was sent (or failed, with a try count).
+
+    An episode is one run of UNKNOWN_OUTCOME for a basket (it starts at `first_unknown_at` and survives same-key retries), so
+    one basket raises one alert per episode however many taps, retries, sweeps or restarts touch it.
+    """
+    key = cart_payment_key(connection_id, cart_id)
+    async with session_scope() as db:
+        row = await db.get(ExecutionAttempt, key)
+        if row is None or row.state != UNKNOWN_OUTCOME:
+            return
+        res = dict(row.result or {})
+        prev = dict(res.get("alert") or {})
+        if state == "failed" and prev.get("episode") == episode and prev.get("state") == "sent":
+            return  # a racing writer already recorded success; a later failure must not downgrade it
+        failed = 1 if state == "failed" else 0
+        tries = (int(prev.get("tries") or 0) + failed) if prev.get("episode") == episode else failed
+        res["alert"] = {"episode": episode, "state": state, "at": _iso(), "tries": tries}
+        await _cas(db, key, states=[UNKNOWN_OUTCOME], token=_token_pred(token), values={"result": res})
+
+
 async def stale_in_flight_to_unknown(min_age: float | None = None) -> int:
     """Sweep: IN_FLIGHT payment rows older than `min_age` (default `stale_after()`) become UNKNOWN_OUTCOME, never released.
 
@@ -615,6 +645,8 @@ async def stale_in_flight_to_unknown(min_age: float | None = None) -> int:
                 continue
             res = dict(row.result or {})
             res.update({"reason": "stale_in_flight", "unknown_at": _iso(), "manual": False})
+            res.setdefault("first_unknown_at", res["unknown_at"])
+            res.setdefault("episode", uuid.uuid4().hex[:12])
             if await _cas(
                 db, row.idempotency_key, states=[IN_FLIGHT], token=_token_pred(snap["token"]),
                 values={"state": UNKNOWN_OUTCOME, "summary": "outcome unknown: attempt went stale", "result": res},

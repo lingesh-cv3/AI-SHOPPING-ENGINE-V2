@@ -2452,6 +2452,30 @@ class ExecutionService:
                         final_state=str(CaseState.FAILED),
                     )
 
+                # No payment form for a basket that is being paid for, may already have been paid for, or is paid. The summary is
+                # what the shopper reads (the V2 checkout turn replies with it), so it is written for them. The pay routes refuse
+                # the same baskets server-side; this just stops the offer being made at all.
+                lock = await db.idempotency.payment_lock(case.connection_id, case.cart_id)
+                if lock in ("unknown", "in_flight"):
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=(
+                            "A payment on this basket is still being processed or needs checking, so I'm not offering to "
+                            "take another one. Please don't pay again."
+                        ),
+                        error_code="CART_PAYMENT_PENDING",
+                        final_state=str(CaseState.FAILED),
+                    )
+                if lock == "paid":
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="This basket has already been paid for, so there is nothing more to pay.",
+                        error_code="CART_ALREADY_PAID",
+                        final_state=str(CaseState.FAILED),
+                    )
+
                 # The cards are the merchant's test set rather than a real payment
                 # method list, because these are demo stores. On a real platform
                 # this is where the merchant's own methods would be read.
