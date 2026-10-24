@@ -17,6 +17,7 @@ Two things here exist specifically to make demos work:
 from __future__ import annotations
 
 import itertools
+import threading
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -331,7 +332,17 @@ def _price_basket(basket: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+#: The endpoint is a sync handler (threadpool), so the scan-then-insert below must be one atomic step or two concurrent
+#: requests with one key could both pass the scan and create two purchases - which a platform claiming idempotency must not do.
+_purchase_lock = threading.Lock()
+
+
 def create_purchase(basket_ref: str, card_last4: str, idem_key: str) -> dict | str:
+    with _purchase_lock:
+        return _create_purchase_locked(basket_ref, card_last4, idem_key)
+
+
+def _create_purchase_locked(basket_ref: str, card_last4: str, idem_key: str) -> dict | str:
     """Attempt a purchase.
 
     Idempotency is honoured: replaying the same key returns the original
@@ -373,5 +384,6 @@ def get_purchase(purchase_ref: str) -> dict | None:
     return _purchases.get(purchase_ref)
 
 
-def list_purchases() -> list[dict]:
-    return list(_purchases.values())
+def list_purchases(basket_ref: str | None = None) -> list[dict]:
+    rows = list(_purchases.values())
+    return [p for p in rows if p["basket_ref"] == basket_ref] if basket_ref else rows

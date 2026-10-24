@@ -31,6 +31,7 @@ from decimal import Decimal
 from typing import Any
 
 from engine import db
+from engine.execution import payment_guard as pay_guard
 from engine import session as session_store
 from engine.decision import CapabilityRegistry
 from engine.execution import cart_intelligence, product_relations, relevance
@@ -433,7 +434,20 @@ class ExecutionService:
         # already exist, and the platform has no idea we consider the basket
         # closed - only our own ledger knows that.
         if action_type in CART_MUTATING and case.cart_id:
-            if await db.idempotency.is_paid(connection_id, case.cart_id):
+            lock = await db.idempotency.payment_lock(connection_id, case.cart_id)
+            if lock in ("in_flight", "unknown"):
+                return Executed(
+                    succeeded=False,
+                    action_type=str(action_type),
+                    summary="Refused: a payment on this cart is being processed or needs checking.",
+                    shopper_summary=(
+                        "A payment on this basket is still being processed or "
+                        "needs checking, so I can't change what's in it right now."
+                    ),
+                    error_code="CART_PAYMENT_PENDING",
+                    final_state=str(CaseState.FAILED),
+                )
+            if lock == "paid":
                 return Executed(
                     succeeded=False,
                     action_type=str(action_type),
@@ -2531,11 +2545,55 @@ class ExecutionService:
                 key = db.idempotency.key_for(
                     case.case_id, str(action_type), {"order": case.order_id}
                 )
-                outcome = await adapter.recover_payment(
-                    case.order_id, method=method, idempotency_key=key
+
+                # Recovery moves money on the same basket a pay tap does, so it takes the same claim on the basket's ledger
+                # row first (engine/execution/payment_guard.py). Without a basket on record there is nothing to protect
+                # against a second charge, so it does not run. A recovery that ends in a timeout, a 5xx or anything
+                # unexpected parks the basket as UNKNOWN_OUTCOME - never a plain failure that frees it for another card.
+                if not case.cart_id:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary="No basket was recorded for this order, so recovery cannot be made safe.",
+                        error_code="VALIDATION_ERROR",
+                        final_state=str(CaseState.FAILED),
+                    )
+                claimed, refused = await pay_guard.claim(adapter, case.connection_id, case.cart_id, key)
+                if refused is not None:
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=f"Recovery not attempted: the basket's payment is {refused.kind}.",
+                        shopper_summary=refused.reply
+                        or "That basket's payment is already settled or being processed, so nothing more is being charged.",
+                        error_code="PAYMENT_OUTCOME_UNKNOWN" if refused.kind == "unknown" else "CART_ALREADY_PAID",
+                        final_state=str(CaseState.FAILED),
+                    )
+                outcome, failure = await pay_guard.guarded_call(
+                    case.connection_id, case.cart_id, claimed["token"],
+                    lambda: adapter.recover_payment(case.order_id, method=method, idempotency_key=key),
+                    retry_of_unknown=claimed["retry_of_unknown"],
                 )
+                if failure is not None:
+                    if failure.error_code == "CAPABILITY_UNSUPPORTED":
+                        # The row was released (a proven non-event); the dispatcher reports an unsupported capability as such.
+                        raise CapabilityUnsupported("recover_payment", connection_id=case.connection_id)
+                    return Executed(
+                        succeeded=False,
+                        action_type=str(action_type),
+                        summary=f"Recovery did not complete ({failure.error_code}).",
+                        shopper_summary=failure.reply,
+                        payload={"method": str(method), "order_id": case.order_id},
+                        error_code="PAYMENT_OUTCOME_UNKNOWN" if failure.kind == "unknown" else "PAYMENT_RECOVERY_FAILED",
+                        final_state=str(CaseState.FAILED),
+                    )
 
                 if not outcome.succeeded:
+                    # The platform answered: the basket is not charged, so it goes back to buyable (a settled decline).
+                    await pay_guard.shielded(db.idempotency.payment_settled(
+                        case.connection_id, case.cart_id, succeeded=False, order_id=case.order_id,
+                        summary="recovery declined", token=claimed["token"],
+                    ))
                     return Executed(
                         succeeded=False,
                         action_type=str(action_type),
@@ -2554,59 +2612,49 @@ class ExecutionService:
                     )
                 amount = outcome.amount_recovered
 
-                # A successful recovery is a completed purchase, the same as any
-                # other, and must count toward total sales the same way - not
-                # just toward revenue_recovered. Without this, the payment
-                # ledger (which total_sales reads) never learns this basket was
-                # ever paid, because recover_payment's own idempotency key is
-                # derived from the case and action, not from cart_payment_key -
-                # a different lock than the one begin_payment/payment_settled
-                # keep. Best-effort: a merchant's total-sales figure degrading
-                # to "missing this one row" is a far smaller problem than a
-                # shopper's recovered order failing over a report-side write.
-                if case.cart_id and amount:
-                    try:
-                        recovered_order = outcome.order
-                        await db.idempotency.payment_settled(
-                            case.connection_id,
-                            case.cart_id,
-                            succeeded=True,
-                            order_id=case.order_id,
-                            summary=f"recovered {case.order_id}",
-                            amount=str(amount.amount),
-                            currency=amount.currency,
-                            lines=(
-                                [
-                                    {
-                                        "product_id": line.product_id,
-                                        "product_name": line.title,
-                                        "quantity": line.quantity,
-                                        "unit_price": (
-                                            str(line.unit_price.amount)
-                                            if line.unit_price
-                                            else None
-                                        ),
-                                        "line_total": (
-                                            str(line.line_total.amount)
-                                            if line.line_total
-                                            else None
-                                        ),
-                                        "currency": (
-                                            line.unit_price.currency
-                                            if line.unit_price
-                                            else None
-                                        ),
-                                    }
-                                    for line in recovered_order.lines
-                                ]
-                                if recovered_order
-                                else None
-                            ),
-                        )
-                    except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "could not record recovered payment in the sales ledger"
-                        )
+                # A successful recovery is a completed purchase, the same as any other, and must count toward total sales the
+                # same way. The basket's ledger row was claimed above, so it is settled here under that claim; if the ledger
+                # write fails after the platform has charged, the basket is parked as UNKNOWN_OUTCOME, not left open.
+                recovered_order = outcome.order
+                try:
+                    settled = await pay_guard.shielded(db.idempotency.payment_settled(
+                        case.connection_id,
+                        case.cart_id,
+                        succeeded=True,
+                        order_id=case.order_id,
+                        summary=f"recovered {case.order_id}",
+                        amount=str(amount.amount) if amount else None,
+                        currency=amount.currency if amount else None,
+                        lines=(
+                            [
+                                {
+                                    "product_id": line.product_id,
+                                    "product_name": line.title,
+                                    "quantity": line.quantity,
+                                    "unit_price": (
+                                        str(line.unit_price.amount) if line.unit_price else None
+                                    ),
+                                    "line_total": (
+                                        str(line.line_total.amount) if line.line_total else None
+                                    ),
+                                    "currency": (
+                                        line.unit_price.currency if line.unit_price else None
+                                    ),
+                                }
+                                for line in recovered_order.lines
+                            ]
+                            if recovered_order
+                            else None
+                        ),
+                        token=claimed["token"],
+                    ))
+                    if not settled:
+                        logger.error("recovered payment could not be recorded: the ledger row had already moved")
+                except Exception:  # noqa: BLE001
+                    logger.exception("could not record recovered payment in the sales ledger")
+                    await db.idempotency.mark_unknown(
+                        case.connection_id, case.cart_id, token=claimed["token"], reason="post_charge_write_failed"
+                    )
 
                 return Executed(
                     succeeded=True,

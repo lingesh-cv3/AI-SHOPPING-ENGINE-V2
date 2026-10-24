@@ -91,6 +91,11 @@ class KettleAdapter(StandardCommerceInterface, SupportsWebhooks):
     when that platform's own events are worth wiring, not before.
     """
 
+    #: Replaying a placeOrder with the same idempotency key returns the original order (the stub serialises its
+    #: scan-then-insert). A claim about THIS demo platform only. It has NO lookup of orders by bag or key, so an ambiguous
+    #: payment here can only be resolved by the same-key retry (after the settle window) or by a person.
+    honours_idempotency_keys = True
+
     def __init__(
         self,
         *,

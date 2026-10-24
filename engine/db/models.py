@@ -296,9 +296,10 @@ class ExecutionAttempt(Base):
     case_id: Mapped[str] = mapped_column(String(40), index=True)
     action_type: Mapped[str] = mapped_column(String(40))
 
-    #: IN_FLIGHT until the platform answers. A row stuck IN_FLIGHT means the process
-    #: died mid-call and nobody knows whether the platform acted.
-    state: Mapped[str] = mapped_column(String(12), default="IN_FLIGHT", index=True)
+    #: IN_FLIGHT until the platform answers; DONE once it has; UNKNOWN_OUTCOME when the platform may
+    #: or may not have acted and nobody knows (a timeout, a 5xx, a crash, a stale IN_FLIGHT). That last
+    #: state is the only record a basket may have been charged and is never released without evidence.
+    state: Mapped[str] = mapped_column(String(20), default="IN_FLIGHT", index=True)
     succeeded: Mapped[bool | None] = mapped_column(Boolean)
     summary: Mapped[str | None] = mapped_column(Text)
     result: Mapped[dict] = mapped_column(JSON, default=dict)

@@ -42,6 +42,10 @@ logger = logging.getLogger(__name__)
 #: every second would be precision nobody asked for.
 SWEEP_SECONDS = 60
 
+#: Set at engine startup to a coroutine function that sweeps unresolved payments (stale IN_FLIGHT -> UNKNOWN_OUTCOME, then
+#: reconciliation with the platforms). A hook rather than an import so this module keeps depending on `db` only.
+payment_sweep = None
+
 
 def _message(item: dict) -> str:
     """What to tell the shopper.
@@ -70,6 +74,11 @@ def _message(item: dict) -> str:
 
 async def sweep_once() -> int:
     """Expire everything overdue. Returns how many."""
+    if payment_sweep is not None:
+        try:
+            await payment_sweep()
+        except Exception:  # noqa: BLE001 - a payment sweep failure must not stop the approval sweep
+            logger.exception("payment sweep failed")
     try:
         expired = await db.expire_approvals()
     except Exception:  # noqa: BLE001

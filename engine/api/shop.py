@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from shared.models import CapabilityUnsupported, CommerceError, Money
 
 from engine import db
+from engine.execution import payment_guard as pay_guard
 from engine.notify import confirm_order
 
 from .auth import (
@@ -207,12 +208,23 @@ async def _not_if_paid(connection_id: str, cart_id: str) -> None:
     because the platform has no idea we consider this basket closed; that
     knowledge lives only in our own ledger.
     """
-    if await db.idempotency.is_paid(connection_id, cart_id):
+    lock = await db.idempotency.payment_lock(connection_id, cart_id)
+    if lock == "paid":
         raise HTTPException(
             409,
             detail={
                 "code": "CART_ALREADY_PAID",
                 "message": "this basket has already been paid for",
+                "retryable": False,
+            },
+        )
+    if lock in ("in_flight", "unknown"):
+        # A payment is going through, or may already have gone through: changing the basket now could change what was charged.
+        raise HTTPException(
+            409,
+            detail={
+                "code": "CART_PAYMENT_PENDING",
+                "message": "a payment on this basket is being processed or needs checking",
                 "retryable": False,
             },
         )
@@ -481,90 +493,48 @@ async def checkout(
     await _mine(who, connection_id, db.owners.CART, cart_id)
     adapter = _adapter(connection_id)
 
-    # The same ledger the chat pay route uses, because this is the same money by
-    # another door. This route generated a fresh uuid per request, so it had no
-    # idempotency at all - not even the half the other one had. Same cart, same
-    # card, three taps, three orders, which is precisely what a shopper on a slow
-    # connection does when nothing happens after the first one.
-    settled = await db.idempotency.begin_payment(connection_id, cart_id)
+    # The same guard the chat pay route uses, because this is the same money by another door
+    # (engine/execution/payment_guard.py): one claim on the basket's ledger row, one deadline-bound platform call, and a
+    # timeout / 5xx / unexpected failure parks the basket as UNKNOWN_OUTCOME instead of releasing it - a different card is a
+    # different platform key, so releasing is what let one basket be bought twice. The platform key is built in one place.
+    outcome = await pay_guard.pay_basket(adapter, connection_id, cart_id, body.card_last4)
 
-    if settled is not None:
-        if settled.get("in_flight"):
-            # Not an error and not a second charge. The first tap is still in the
-            # air, and the honest answer is to say so rather than to start another.
-            raise HTTPException(
-                409,
-                detail={
-                    "code": "CHECKOUT_IN_PROGRESS",
-                    "message": "that payment is already going through",
-                    "retryable": True,
-                },
-            )
-        return await _already_bought(adapter, settled.get("order_id"))
-
-    # Derived from the cart and the card, and identical to the key the chat route
-    # builds - so a shopper who taps Pay here and then pays in the chat with the
-    # same card is one purchase to the platform as well as to us.
-    key = f"pay-{cart_id}-{body.card_last4}"
-
-    try:
-        result = await adapter.checkout_with_card(
-            cart_id, card_last4=body.card_last4, idempotency_key=key
+    if outcome.kind == "in_flight":
+        # Not an error and not a second charge. The first tap is still in the air, and the honest answer is to say so
+        # rather than to start another.
+        raise HTTPException(
+            409,
+            detail={
+                "code": "CHECKOUT_IN_PROGRESS",
+                "message": "that payment is already going through",
+                "retryable": True,
+            },
         )
-    except CommerceError as exc:
-        # Nothing was attempted, so the basket goes back rather than staying
-        # locked over a failure that was not the shopper's.
-        await db.idempotency.release_payment(connection_id, cart_id)
-        raise _handle(exc) from exc
+    if outcome.kind == "already_paid":
+        return await _already_bought(adapter, outcome.order_id)
+    if outcome.kind == "unknown":
+        raise HTTPException(
+            409,
+            detail={
+                "code": "PAYMENT_OUTCOME_UNKNOWN",
+                "message": "we could not confirm whether this payment went through; the basket is on hold, please do not pay again",
+                "retryable": False,
+            },
+        )
+    if outcome.kind == "not_processed":
+        # A fixed message per code: platform text never reaches the caller (invariant 5).
+        refused = outcome.error_code == "CART_INVALID"
+        raise HTTPException(
+            400,
+            detail={
+                "code": outcome.error_code,
+                "message": "there is nothing in this basket to pay for" if refused else "the payment could not be taken; nothing was charged",
+                "retryable": not refused,
+            },
+        )
 
+    result = outcome.result
     order = result.order
-
-    # A success locks the basket; a decline leaves it buyable, because a declined
-    # order is the one worth recovering and the shopper is about to be offered
-    # another way to pay.
-    await db.idempotency.payment_settled(
-        connection_id,
-        cart_id,
-        succeeded=result.succeeded,
-        order_id=order.order_id if order else None,
-        summary=(
-            f"paid {order.order_id}"
-            if result.succeeded and order
-            else "declined"
-        ),
-        amount=(
-            str(order.amount_paid.amount)
-            if result.succeeded and order and order.amount_paid
-            else None
-        ),
-        currency=(
-            order.amount_paid.currency
-            if result.succeeded and order and order.amount_paid
-            else None
-        ),
-        lines=(
-            [
-                {
-                    "product_id": line.product_id,
-                    "product_name": line.title,
-                    "quantity": line.quantity,
-                    "unit_price": (
-                        str(line.unit_price.amount) if line.unit_price else None
-                    ),
-                    "line_total": (
-                        str(line.line_total.amount) if line.line_total else None
-                    ),
-                    "currency": (
-                        line.unit_price.currency if line.unit_price else None
-                    ),
-                }
-                for line in order.lines
-            ]
-            if result.succeeded and order
-            else None
-        ),
-    )
-
 
     # The order belongs to whoever the cart belonged to. Recorded here rather than
     # left to first use, because the alternative is that the first person to count

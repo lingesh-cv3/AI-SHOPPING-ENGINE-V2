@@ -22,6 +22,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from engine import copilot, db, expiry
+from engine.execution import payment_reconcile
 from engine import session as session_store
 from engine.decision import operation_for
 from engine.reasoning.prompts import PROPOSABLE
@@ -42,6 +43,7 @@ from .deps import DEV_MERCHANT_NAME, MERCHANT_NAMES, engine
 from .schemas import (
     HandoverClose,
     HandoverDone,
+    PaymentResolve,
     ActionInfo,
     ApprovalDecision,
     ConnectionSummary,
@@ -102,6 +104,18 @@ async def _startup() -> None:
     )
     if stored:
         logger.info("restored %d merchant policies", len(stored))
+
+    # A payment attempt still IN_FLIGHT at startup belonged to a handler that died with the previous process (there is one
+    # engine process): the platform may have charged, so it is held as UNKNOWN_OUTCOME, never released.
+    try:
+        orphaned = await db.idempotency.stale_in_flight_to_unknown(0)
+        if orphaned:
+            logger.warning("held %d payment attempt(s) left IN_FLIGHT by the previous process as UNKNOWN_OUTCOME", orphaned)
+    except Exception:  # noqa: BLE001
+        logger.exception("could not sweep orphaned payment attempts at startup")
+
+    # Unresolved payments are reconciled with the platforms on the same timer as approval expiry.
+    expiry.payment_sweep = lambda: payment_reconcile.sweep(engine.registry)
 
     # Expire approvals nobody actions. Held on app.state so shutdown can cancel it;
     # a task nobody keeps a reference to can be garbage collected mid-run.
@@ -1300,6 +1314,72 @@ async def ops_history(limit: int = 40, _=Depends(operator)) -> dict:
             row["connection_id"], row["connection_id"]
         )
     return {"decisions": rows}
+
+
+@app.get(f"{API}/ops/payments/unresolved")
+async def ops_unresolved_payments(
+    offset: int = 0, limit: int = 50, _=Depends(operator)
+) -> dict:
+    """Baskets whose payment outcome could not be confirmed, oldest first, with the total.
+
+    The figure that says how many shoppers are currently held between "maybe charged" and "not charged". Reason codes and
+    times only: no shopper identity and no platform text.
+    """
+    total, rows = await db.idempotency.unresolved_payments(limit=max(1, min(limit, 200)), offset=max(0, offset))
+    visible = set(_operator_connections())
+    return {
+        "total": total,
+        "payments": [
+            {
+                "connection_id": r["connection_id"],
+                "merchant_name": MERCHANT_NAMES.get(r["connection_id"], r["connection_id"]),
+                "cart_id": r["cart_id"],
+                "reason": r["reason"],
+                "unknown_since": r["unknown_at"].isoformat() if r["unknown_at"] else None,
+                "last_check": r["recon"] or None,
+                "needs_a_person": r["manual"],
+            }
+            for r in rows
+            if r["connection_id"] in visible
+        ],
+    }
+
+
+def _payment_adapter_or_404(connection_id: str):
+    adapter = engine.registry.adapter_for(connection_id)
+    if adapter is None:
+        raise HTTPException(404, "no such payment")  # identical to a basket with no row
+    return adapter
+
+
+@app.post(f"{API}/ops/payments/{{connection_id}}/{{cart_id}}/reconcile")
+async def ops_reconcile_payment(connection_id: str, cart_id: str, _=Depends(operator)) -> dict:
+    """Ask the platform what it holds for this basket, now (bypassing the throttle)."""
+    adapter = _payment_adapter_or_404(connection_id)
+    row = await db.idempotency.payment_row(connection_id, cart_id)
+    if row is None or row["state"] != db.idempotency.UNKNOWN_OUTCOME:
+        raise HTTPException(404, "no such payment")
+    return await payment_reconcile.reconcile(adapter, connection_id, cart_id, force=True)
+
+
+@app.post(f"{API}/ops/payments/{{connection_id}}/{{cart_id}}/resolve")
+async def ops_resolve_payment(
+    connection_id: str, cart_id: str, body: PaymentResolve, who=Depends(operator)
+) -> dict:
+    """A person's decision on an unresolved payment. The platform's evidence outranks it (see payment_reconcile.resolve)."""
+    adapter = _payment_adapter_or_404(connection_id)
+    outcome = await payment_reconcile.resolve(
+        adapter, connection_id, cart_id, resolution=body.resolution, order_id=body.order_id, note=body.note,
+        operator_id=str(getattr(who, "key_id", None) or "operator"),
+    )
+    status = outcome["status"]
+    if status == "not_found":
+        raise HTTPException(404, "no such payment")
+    if status in ("moved",) or status.startswith("refused"):
+        raise HTTPException(409, detail={"code": status.upper(), "message": "the platform's records or the basket's state do not allow that resolution"})
+    if status in ("order_id_required", "bad_resolution"):
+        raise HTTPException(400, detail={"code": status.upper(), "message": "the resolution needs more information"})
+    return outcome
 
 
 @app.get(f"{API}/ops/stats")

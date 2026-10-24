@@ -9,6 +9,7 @@ platform-specific error string.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from enum import StrEnum
 from typing import Any
 
@@ -99,6 +100,33 @@ class CommerceError(Exception):
             f"CommerceError(code={self.code!r}, message={self.message!r}, "
             f"retryable={self.retryable!r})"
         )
+
+
+class WriteAmbiguity:
+    """Whether any attempt inside one adapter call may have reached the platform and been processed.
+
+    A retried write can end with an error that looks conclusive - the basket is "closed", the endpoint refuses - precisely
+    because an EARLIER attempt of the same call timed out after the platform acted. The final error code alone therefore
+    proves nothing. The transport layer flips this holder in place on any attempt that ended in a timeout, a transport
+    failure, a retryable status or an unreadable body; the caller reads it after the call. A mutable holder (not a rebound
+    flag) so the signal survives tasks created inside the call (`wait_for`, `shield`, `gather`).
+    """
+
+    __slots__ = ("ambiguous",)
+
+    def __init__(self) -> None:
+        self.ambiguous = False
+
+
+#: Set by the caller of a money-moving adapter call before it starts; read after it ends. None = nobody is listening.
+WRITE_AMBIGUITY: ContextVar[WriteAmbiguity | None] = ContextVar("write_ambiguity", default=None)
+
+
+def mark_write_ambiguous() -> None:
+    """Record that the attempt just made may have been processed by the platform. No-op when nobody is listening."""
+    holder = WRITE_AMBIGUITY.get()
+    if holder is not None:
+        holder.ambiguous = True
 
 
 class CapabilityUnsupported(CommerceError):

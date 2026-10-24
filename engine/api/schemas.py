@@ -8,6 +8,8 @@ flattened, display-ready data without polluting the domain models.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from engine.risk import AutomationMode
@@ -158,6 +160,17 @@ class ActionInfo(BaseModel):
     reversible: bool
     touches_customer_data: bool
     can_ever_be_automatic: bool
+
+class PaymentResolve(BaseModel):
+    """An operator's decision on a payment whose outcome could not be confirmed.
+
+    Who decided is NOT in the body: it comes from the authenticated operator key.
+    """
+
+    resolution: Literal["paid", "not_charged"]
+    order_id: str | None = Field(default=None, max_length=64)
+    note: str | None = Field(default=None, max_length=300)
+
 
 class HandoverDone(BaseModel):
     """Who dealt with a handover.

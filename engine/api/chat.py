@@ -20,6 +20,7 @@ looking - and the case is already in the queue when they are.
 
 from __future__ import annotations
 from engine.decision import operation_for
+from engine.execution import payment_guard as pay_guard
 from shared.models import (
     ActionType,
     CommerceError,
@@ -3091,27 +3092,31 @@ async def pay(
     # spent against it without ever asking whose it was.
     await _mine(who, req.connection_id, session_id=req.session_id, cart_id=req.cart_id)
 
-    # And before anything is charged twice.
+    # And before anything is charged twice - or charged again after an outcome nobody could confirm.
     #
-    # The platform key is derived from the cart and the card, which recognises the
-    # same card tapped twice and nothing else. A different card was a different key
-    # and bought the same basket again at the full amount. The card cannot come out
-    # of that key - a decline is stored under it too, so a cart-only key would
-    # replay the refusal forever and there would be no recovery to offer. So the
-    # engine keeps its own answer to "has this basket been bought".
-    settled = await db.idempotency.begin_payment(req.connection_id, req.cart_id)
+    # engine/execution/payment_guard.py owns the whole sequence (claim the basket's ledger row, call the platform under a
+    # deadline, settle or park the row). A timeout, a 5xx or any unexpected failure leaves the basket as UNKNOWN_OUTCOME
+    # rather than releasing it: the platform may have charged, and a different card is a different platform key, so a release
+    # here is what let one basket be bought twice (payment_repro/FINDINGS.md).
+    outcome = await pay_guard.pay_basket(adapter, req.connection_id, req.cart_id, req.card_last4)
 
-    if settled is not None:
-        if settled.get("in_flight"):
-            reply = (
-                "That is going through now - give it a moment rather than "
-                "paying again."
-            )
+    if outcome.kind in ("already_paid", "in_flight"):
+        if outcome.kind == "in_flight":
+            reply = pay_guard.IN_FLIGHT_REPLY
+            payment = {"in_flight": True, "paid": False, "cart_retired": False}
         else:
             reply = (
                 f"That basket is already paid for - it is order "
-                f"{settled.get('order_id')}. Nothing has been charged again."
+                f"{outcome.order_id}. Nothing has been charged again."
             )
+            payment = {
+                "paid": True,
+                "order_id": outcome.order_id,
+                # The storefront reads this to stop offering the cards again,
+                # rather than inferring it from the wording of a sentence.
+                "already_paid": True,
+                "cart_retired": True,
+            }
 
         await session_store.add_turn(
             session_id=req.session_id,
@@ -3124,14 +3129,7 @@ async def pay(
             session_id=req.session_id,
             used_model=False,
             cart_changed=False,
-            payment={
-                "paid": True,
-                "order_id": settled.get("order_id"),
-                # The storefront reads this to stop offering the cards again,
-                # rather than inferring it from the wording of a sentence.
-                "already_paid": True,
-                "cart_retired": True,
-            },
+            payment=payment,
         )
 
     await session_store.add_turn(
@@ -3141,100 +3139,29 @@ async def pay(
         text=f"Pay with the card ending {req.card_last4}",
     )
 
-    try:
-        # Derived from the cart and the card, never generated fresh.
-        #
-        # A shopper on a slow connection taps pay twice. Both requests arrive. With
-        # the same key the platform recognises the second as a retry of the first;
-        # with a random key per attempt it sees two purchases, which is exactly the
-        # failure the interface makes this parameter mandatory to prevent.
-        # Named idem_key, not key. `key` is already the auth record from
-        # Depends(any_key), and shadowing it here meant chat() was later handed a
-        # string where it expected a key - two different things sharing one name,
-        # twelve lines apart.
-        idem_key = f"pay-{req.cart_id}-{req.card_last4}"
-
-        result = await adapter.checkout_with_card(
-            req.cart_id, card_last4=req.card_last4, idempotency_key=idem_key
-        )
-    except CommerceError as exc:
-        # A platform refusal is not the shopper's fault and not their business.
-        logger.exception("checkout failed on %s", req.connection_id)
-
-        # Nothing was attempted, so the basket goes back. Holding the claim would
-        # lock somebody out of their own cart over an error that was not theirs.
-        await db.idempotency.release_payment(req.connection_id, req.cart_id)
-
-        if exc.code == ErrorCode.CART_INVALID:
-            # An empty basket, on both platforms. Not a platform failure and
-            # nothing to do with the card - the previous message reassured a
-            # shopper their card was fine and told them to try again, which
-            # changes nothing when there is nothing to buy.
-            reply = "There's nothing in this basket to pay for yet."
-        else:
-            reply = (
-                "Something went wrong taking the payment, and it was not your "
-                "card. Nothing has been charged - try again in a moment."
-            )
+    if outcome.kind in ("unknown", "not_processed"):
+        # Fixed, engine-written sentences only: platform text never reaches a shopper. An unknown outcome says so and asks the
+        # shopper not to pay again; only a PROVEN non-event (see payment_guard.DEFINITIVE_CODES) says nothing was charged.
+        logger.warning("payment on %s ended %s (%s)", req.connection_id, outcome.kind, outcome.error_code)
         await session_store.add_turn(
             session_id=req.session_id,
             connection_id=req.connection_id,
             speaker="assistant",
-            text=reply,
+            text=outcome.reply,
         )
         return ChatReply(
-            reply=reply,
+            reply=outcome.reply,
             session_id=req.session_id,
             used_model=False,
             cart_changed=False,
+            payment={"unknown": True, "hold": True, "paid": False, "cart_retired": False}
+            if outcome.kind == "unknown"
+            else None,
         )
 
+    result = outcome.result
     order = result.order
-    order_id = order.order_id if order else None
-
-    # A success locks the basket for good; a decline leaves it buyable, because the
-    # shopper is about to be offered another way to pay and refusing them then
-    # would turn a recoverable sale into a lost one.
-    await db.idempotency.payment_settled(
-        req.connection_id,
-        req.cart_id,
-        succeeded=result.succeeded,
-        order_id=order_id,
-        summary=(
-            f"paid {order_id}" if result.succeeded else f"declined on {order_id}"
-        ),
-        amount=(
-            str(order.amount_paid.amount)
-            if result.succeeded and order and order.amount_paid
-            else None
-        ),
-        currency=(
-            order.amount_paid.currency
-            if result.succeeded and order and order.amount_paid
-            else None
-        ),
-        lines=(
-            [
-                {
-                    "product_id": line.product_id,
-                    "product_name": line.title,
-                    "quantity": line.quantity,
-                    "unit_price": (
-                        str(line.unit_price.amount) if line.unit_price else None
-                    ),
-                    "line_total": (
-                        str(line.line_total.amount) if line.line_total else None
-                    ),
-                    "currency": (
-                        line.unit_price.currency if line.unit_price else None
-                    ),
-                }
-                for line in order.lines
-            ]
-            if result.succeeded and order
-            else None
-        ),
-    )
+    order_id = outcome.order_id
 
     # Theirs, paid or declined. The declined one matters more: it is the order a
     # shopper comes back to look at, and the one an operator writes to them about.

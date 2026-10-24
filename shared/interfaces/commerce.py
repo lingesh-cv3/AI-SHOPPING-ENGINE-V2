@@ -26,6 +26,7 @@ from abc import ABC, abstractmethod
 from ..models.capability import CapabilitySet
 from ..models.commerce import (
     Cart,
+    CheckoutLookup,
     CheckoutResult,
     InventoryStatus,
     Money,
@@ -149,6 +150,31 @@ class StandardCommerceInterface(ABC):
         architecture actually exposes" — never as a promise that CV3 can
         recover payments in general. Most connections will declare this
         unsupported and must raise CapabilityUnsupported.
+        """
+
+
+class SupportsCheckoutLookup(ABC):
+    """Optional mixin for platforms that can say which orders exist for a basket.
+
+    Asked only after an AMBIGUOUS payment (a timeout or 5xx, where the platform may or may not have acted), to find out
+    rather than guess. A platform that cannot look an order up by basket simply does not implement this, and its
+    ambiguous payments are resolved by a person.
+
+    `honours_idempotency_keys` is a claim about the platform: True only when replaying a checkout with the SAME
+    idempotency key is known to return the original order and never create a second. It gates the engine's same-card
+    retry of an unresolved payment; it defaults to False so an unproven platform is never retried blindly.
+    """
+
+    honours_idempotency_keys: bool = False
+
+    @abstractmethod
+    async def lookup_checkout(
+        self, cart_id: str, idempotency_keys: list[str]
+    ) -> CheckoutLookup:
+        """Orders the platform holds for this basket (or any of these keys).
+
+        Return ABSENT only when the platform answered completely and holds none. Anything partial, failed or unsure is
+        UNKNOWN. Raise CommerceError for transport failures; the caller treats that as inconclusive too.
         """
 
 

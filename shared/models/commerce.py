@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -245,6 +246,18 @@ class CheckoutResult(_Base):
         description="Some platforms complete payment in a hosted flow rather than "
         "via API. When set, the shopper must be sent here to finish.",
     )
+
+
+class CheckoutLookup(_Base):
+    """What a platform can say about the orders for one basket, asked after an ambiguous checkout.
+
+    FOUND   - at least one order exists (see `orders`; read each one's CURRENT payment status).
+    ABSENT  - the platform answered COMPLETELY and has no order for this basket / these keys.
+    UNKNOWN - the platform could not answer, or answered partially. Never treated as absence.
+    """
+
+    status: Literal["FOUND", "ABSENT", "UNKNOWN"]
+    orders: list[Order] = Field(default_factory=list)
 
 
 class PaymentRecoveryMethod(StrEnum):

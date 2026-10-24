@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 
 from shared.models import CommerceError, ErrorCode
+from shared.models.errors import mark_write_ambiguous
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,8 @@ class PlatformClient:
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
 
                 if response.status_code in _RETRYABLE_STATUS:
+                    # The platform may have processed this attempt before answering with an error status.
+                    mark_write_ambiguous()
                     last_error = CommerceError(
                         ErrorCode.RATE_LIMITED
                         if response.status_code == 429
@@ -120,14 +123,25 @@ class PlatformClient:
                     )
 
                 self._log(method, path, response.status_code, elapsed_ms, attempt)
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError as exc:
+                    # An unreadable body says nothing about whether the platform acted.
+                    mark_write_ambiguous()
+                    raise CommerceError(
+                        ErrorCode.UPSTREAM_ERROR,
+                        f"unreadable response from {path}",
+                        platform_detail=str(exc),
+                    ) from exc
 
             except httpx.TimeoutException as exc:
+                mark_write_ambiguous()
                 last_error = CommerceError(
                     ErrorCode.TIMEOUT, f"timeout calling {path}", platform_detail=str(exc)
                 )
                 await self._backoff(attempt)
             except httpx.HTTPError as exc:
+                mark_write_ambiguous()
                 last_error = CommerceError(
                     ErrorCode.UPSTREAM_ERROR,
                     f"transport failure calling {path}",

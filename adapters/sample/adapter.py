@@ -24,11 +24,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from shared.interfaces import StandardCommerceInterface
+from shared.interfaces import StandardCommerceInterface, SupportsCheckoutLookup
 from shared.models import (
     CapabilitySet,
     CapabilityUnsupported,
     Cart,
+    CheckoutLookup,
     CheckoutResult,
     CommerceError,
     ErrorCode,
@@ -52,13 +53,17 @@ API = "/api/v1"
 PLATFORM_NAME = "sample-merchant"
 
 
-class SampleMerchantAdapter(StandardCommerceInterface):
+class SampleMerchantAdapter(StandardCommerceInterface, SupportsCheckoutLookup):
     """One merchant connection to a sample-merchant backend.
 
     The class is the reusable platform adapter; an instance is one merchant
     connection. Two merchants on this platform construct two instances with
     different base URLs, credentials and currencies, and share no state.
     """
+
+    #: Replaying a purchase with the same idempotency key returns the original (the stub serialises its scan-then-insert).
+    #: A claim about THIS demo platform only; a real platform has to be proven before it is trusted here.
+    honours_idempotency_keys = True
 
     def __init__(
         self,
@@ -269,6 +274,19 @@ class SampleMerchantAdapter(StandardCommerceInterface):
     async def get_order(self, order_id: str) -> Order:
         body = await self._client.request("GET", f"{API}/purchase/{order_id}")
         return mapping.to_order(self._unwrap(body, "purchase"), currency=self.currency)
+
+    async def lookup_checkout(
+        self, cart_id: str, idempotency_keys: list[str]
+    ) -> CheckoutLookup:
+        """Purchases the platform holds for this basket. The listing is complete (filtered by basket), so none means absent."""
+        body = await self._client.request(
+            "GET", f"{API}/purchases", params={"basket_ref": cart_id}
+        )
+        rows = body.get("purchases") if isinstance(body, dict) else None
+        if not isinstance(rows, list):
+            return CheckoutLookup(status="UNKNOWN")
+        orders = [mapping.to_order(row, currency=self.currency) for row in rows]
+        return CheckoutLookup(status="FOUND" if orders else "ABSENT", orders=orders)
 
     # ---- Money-touching --------------------------------------------------
     # Reached only after Decision -> Risk -> Approval has cleared. The adapter

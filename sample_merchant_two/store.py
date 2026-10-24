@@ -14,6 +14,7 @@ the merchant's platform can do.
 from __future__ import annotations
 
 import itertools
+import threading
 import re
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -256,8 +257,16 @@ def price_bag(bag_ref: str) -> dict:
     }
 
 
+_order_lock = threading.Lock()  # scan-then-insert must be atomic under concurrent requests
+
+
 def place_order(bag_ref: str, card_last4: str, idempotency_key: str):
     """Place an order. Replaying an idempotency key returns the original."""
+    with _order_lock:
+        return _place_order_locked(bag_ref, card_last4, idempotency_key)
+
+
+def _place_order_locked(bag_ref: str, card_last4: str, idempotency_key: str):
     for existing in _orders.values():
         if existing["idempotencyKey"] == idempotency_key:
             return existing

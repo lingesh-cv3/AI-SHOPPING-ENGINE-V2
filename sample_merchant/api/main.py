@@ -145,9 +145,9 @@ def get_purchase(purchase_ref: str) -> dict:
 
 
 @app.get(f"{API}/purchases")
-def list_purchases() -> dict:
-    """Convenience view for demos, not part of any adapter flow."""
-    return {"purchases": store.list_purchases()}
+def list_purchases(basket_ref: str | None = None) -> dict:
+    """Purchases, optionally only those for one basket (used by the adapter's checkout lookup)."""
+    return {"purchases": store.list_purchases(basket_ref)}
 
 
 @app.post(f"{API}/_reset")
