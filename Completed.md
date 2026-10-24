@@ -169,6 +169,16 @@ partial, unverified, or unbuilt.
 - **Idempotent payment execution** on both the chat pay route and the
   sidebar Pay button, sharing one ledger — no duplicate charge on repeated
   taps or a different card.
+- **Ambiguous payment outcomes are held, not released** (local, model-free
+  verification only; NOT production-ready — see
+  `PAYMENT_SAFETY_INVESTIGATION.md` for the open release gate): a timeout, 5xx,
+  crash, disconnect or stale attempt parks the basket as `UNKNOWN_OUTCOME`;
+  different-card, concurrent, cross-route and recovery attempts are refused
+  until a platform lookup or a named operator resolves it. In the isolated
+  harness one basket now yields one platform purchase in every scenario
+  (previously two). Verified by 105 payment checks across 5 test files plus
+  the existing recovery/checkout tests, the model-free chain, fuzz and the
+  route/tenant audit.
 - **A tap beats the model's guess**: `chosen_variant` from a shopper's own
   button press always overrides any `variant_id` the model proposed.
 

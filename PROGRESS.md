@@ -25,24 +25,15 @@ counted as unfinished implementation work.
 
 ## Current Focus
 
-### Payment safety — UNRESOLVED RELEASE BLOCKER (checkout and payment are NOT production-ready)
-- REPRODUCED (isolated local sample merchant, disposable database copy, fake cards, no provider or network egress): when a pay call
-  ends in a timeout, a 5xx or an abandoned request, the engine releases the cart-level ledger row (`db.idempotency.release_payment`)
-  and tells the shopper "Nothing has been charged" although the platform had recorded the charge. Paying again with a DIFFERENT card
-  is a new platform key, so the platform took a second payment: two confirmed purchases for one basket on the chat route, the REST
-  checkout route, and after an abandoned request. The same card is safe (the platform replays the key), but the first message is
-  still false.
-- Cause (confirmed in code): `engine/api/chat.py` /pay and `engine/api/shop.py` checkout treat every `CommerceError` as "nothing was
-  attempted"; the platform key is per card while the ledger row is per cart; there is no unknown-outcome state; a timed-out money
-  action in `execution/service.py` is recorded as plain failure.
-- NOT FIXED. No payment change is in any commit. Proposed fix: an explicit unknown-outcome ledger state; release only on errors that
-  prove nothing happened; refuse further attempts on that basket until reconciled by evidence (an order lookup the platform interface
-  does not have yet, else a human); try/finally around the pay routes; store the error code. It touches `db/idempotency.py`,
-  `api/chat.py`, `api/shop.py`, `execution/service.py` and the adapter interface, and needs its own spec and invariant-guard review.
-  The reproduction harness, evidence and regression-test plan are kept OUTSIDE the repo in `D:\CV3\payment_repro\` (FINDINGS.md).
-- Limits of the evidence: demo platform only (an in-memory merchant keyed by idempotency key; real platforms may differ); a stuck
-  `IN_FLIGHT` row was not reproduced (the handler keeps running after a client disconnect); the Kettle `RETRY_PAYMENT` path was not
-  reproduced. `PAYMENT_SAFETY_INVESTIGATION.md` still describes this as code-read only and should be updated with the above.
+### Payment safety — fix implemented and verified locally; RELEASE GATE STILL OPEN (checkout and payment are NOT production-ready)
+- Done (see `PAYMENT_SAFETY_INVESTIGATION.md`): durable `UNKNOWN_OUTCOME` ledger state; release only on proven non-events; hard call deadline; stale and orphaned
+  `IN_FLIGHT` parked, never released; different-card, concurrent, cross-route (chat/REST) and recovery attempts refused while unresolved; safe same-key retry; evidence-based
+  reconciliation (optional adapter lookup; Northfield has one, Kettle none); operator list/reconcile/resolve routes. The isolated HTTP harness went from two platform
+  purchases for one basket (S2-S4) to one in every scenario; 105 new model-free checks fail on the old behaviour.
+- Open before any real-money use: a platform that actually charges has not been tested (the demo stubs are in-memory); real platforms' idempotency-key and lookup semantics
+  are unverified; Kettle cannot be reconciled by lookup (same-key retry or an operator); the storefront still offers card buttons on a held basket; nothing notifies the
+  merchant of an unresolved payment (the operator list does); a reconciled order sends no confirmation mail; unresolved count is not in `ops_stats`; the absence verdict is
+  only as good as `PAYMENT_SETTLE_WINDOW_SECONDS` against a platform that can hold a request longer; no real provider was contacted.
 
 ### Shopper V2 — the only shopper routing — ~90% complete
 - `/api/v2/chat` (`engine/shopper_v2/`, routed via `engine/api/chat_v2.py`)

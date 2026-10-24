@@ -1,131 +1,95 @@
-# Payment-safety investigation: ambiguous outcomes recorded as definite
+# Payment safety: ambiguous payment outcomes
 
-Status: **OPEN - RELEASE BLOCKER. REPRODUCED on an isolated local sample merchant (2026-10-23). NOT FIXED.**
-Opened 2026-09-30 from a code read; reproduced 2026-10-23. **No payment code has been changed** (ledger, execution, pay routes,
-adapters, merchants). This is deliberately separate from the Operations work and from Shopper V2; the fix needs its own spec, tests
-and `invariant-guard` review (invariants 2, 3, 5 and 7) before any change is made. **Checkout and payment are not production-ready.**
+Status: **FIX IMPLEMENTED AND VERIFIED LOCALLY (model-free, isolated sample merchants). NOT production-ready: the release gate below is still open.**
+Opened 2026-09-30 from a code read; reproduced 2026-10-23 and again on 2026-10-24 before the fix; fixed and re-run on 2026-10-24.
+Spec: `D:\CV3\feature_specs\payment_unknown_outcome_SPEC.md` (v1, v2 and v2.1 after two independent `invariant-guard` reviews).
+Evidence and harness (outside the repo): `D:\CV3\payment_repro\` - `FINDINGS.md`, `payrepro.py` (original), `payrepro_fix.py` (post-fix copy with
+two added scenarios), `charge_proxy.py`, `engine_wrapper.py`, and the run directories `runs/pay-20261024-104807` (before) and `runs/pay-20261024-114035` (after, final code).
 
 ## The question
 
-When a money-touching call ends in a timeout or transport/5xx failure, the platform may or may not have acted. Does the engine ever
-record that as a definite "nothing happened", and can that let the same basket be charged twice?
+When a money-touching call ends in a timeout or 5xx, the platform may or may not have acted. Did the engine record that as a definite
+"nothing happened", and could the same basket then be charged twice?
 
-**Answer (reproduced locally): yes.** After a timeout, a 5xx, or an abandoned request, the pay routes release the cart-level ledger
-row and tell the shopper "Nothing has been charged" although the platform had recorded the charge. Paying again with a DIFFERENT card
-then produced a second confirmed purchase for the same basket.
+**Before the fix: yes (reproduced twice on the local sample merchant).** The pay routes called `release_payment` on EVERY `CommerceError`
+and told the shopper "Nothing has been charged", deleting the only per-basket guard; the platform key is per card, so a different card was
+a new key and bought the same basket again. Any exception that was not a `CommerceError`, a cancelled handler or a crash left the ledger
+row `IN_FLIGHT` forever.
 
-## Reproduction (what was run, and what it proves)
+## What was implemented
 
-Harness and evidence are kept OUTSIDE this repository, on the investigator's machine, under `D:\CV3\payment_repro\`:
-`SPEC.md` (the reviewed plan), `FINDINGS.md` (the write-up), `charge_proxy.py`, `engine_wrapper.py`, `payrepro.py`, and the evidence run
-`runs/pay-20261023-133641/` (`report.json`, `proxy.jsonl`, engine/merchant logs). They are not committed; whether to bring the harness
-into the repo as a regression test is a decision for the owner.
+One shared code path, `engine/execution/payment_guard.py`, used by `/api/chat/pay`, the REST checkout and the payment-recovery money path:
 
-**Isolation (verified before the first purchase request and again after):** a disposable byte copy of `cv3_v2verify.db` under the
-harness directory, bound by a fail-closed engine wrapper that asserts the bound database before serving; the local Northfield sample
-merchant only, reached through a loopback fault-injecting proxy (it FORWARDS the purchase so the platform really records it, then
-withholds the response or returns 503); Kettle unreachable; fake cards only; provider keys, SMTP and proxy variables blank; a continuous
-egress monitor found no non-loopback connection; the protected databases (`cv3.db`, `cv3_v2verify.db`, the dated backup) were identical
-by hash, size and mtime before and after. No real payment provider, credential or customer data was involved.
+- **`UNKNOWN_OUTCOME` ledger state** (`engine/db/idempotency.py`, same `execution_attempts` row, JSON in `result`, no migration). Every transition
+  is a compare-and-set bound to a per-attempt claim token. A timeout, a 5xx, any unexpected exception, a cancelled handler, a failed ledger write
+  after the platform answered, a call that outlives the hard deadline (`PAYMENT_CALL_DEADLINE_SECONDS`, default 60) or a stale `IN_FLIGHT` row
+  (older than twice the deadline, or found at engine startup) parks the basket as `UNKNOWN_OUTCOME`, shielded from cancellation. It is never released.
+- **Release only on proof.** The row is released only for `CART_INVALID`, `CART_NOT_FOUND`, `VALIDATION_ERROR`, `CAPABILITY_UNSUPPORTED`, `AUTH_FAILED`, and only when no
+  earlier attempt inside the same call was ambiguous (`shared.models.errors.WriteAmbiguity`, set by `adapters/framework/http.py` on any timeout, transport error,
+  retryable status or unreadable body). `RATE_LIMITED`, stock errors and everything else are held, not released.
+- **Refusals.** While a basket is `UNKNOWN_OUTCOME` or `IN_FLIGHT`, a different card, a concurrent tap, the other route (chat vs REST) and a payment recovery are
+  refused without a platform call, and cart changes are refused (`CART_PAYMENT_PENDING`). The shopper is told, in fixed engine wording, that the outcome could not
+  be confirmed and not to pay again; "Nothing has been charged" is said only for a proven non-event. No platform text reaches a shopper or the ledger.
+- **Safe same-key retry.** The SAME card is retried (same platform key, so the platform replays the original purchase) only when the platform declares
+  `honours_idempotency_keys` AND the settle window (`PAYMENT_SETTLE_WINDOW_SECONDS`, default 120 s, measured from when the row became unknown) has passed.
+  A retry that ends in any error returns the basket to `UNKNOWN_OUTCOME`; it is never released.
+- **Evidence-based reconciliation** (`engine/execution/payment_reconcile.py`). An optional adapter lookup (`SupportsCheckoutLookup.lookup_checkout`; Northfield implements it,
+  Kettle has none) is asked on a blocked tap, by the periodic sweep and by an operator. A PAID order makes the basket paid with the platform's order id (ownership is
+  recorded for the cart's owner only; sales lines are written). A COMPLETE answer showing no order, or only unpaid ones, after the settle window makes the basket
+  buyable again. A failed, partial, early or unavailable lookup keeps it blocked and flags it for a person.
+- **Operator surface** (operator key only): `GET /api/ops/payments/unresolved`, `POST /api/ops/payments/{connection}/{cart}/reconcile`, `POST .../resolve`
+  (`paid` or `not_charged`). The platform's evidence outranks the operator: `not_charged` is refused while the platform shows a paid order, `paid` is refused when
+  the platform answers completely and shows none; with no lookup the call stands and is recorded `operator-asserted`. Resolution is compare-and-set protected and audited.
+- Also: both sample merchant stubs now serialise their scan-then-insert (the claim "same key twice is one purchase" holds under concurrent requests); the sample
+  merchant's purchase list can be filtered by basket; `forget_payment` no longer deletes an unresolved row; `purge_old` skips them.
 
-**Results (platform truth = the merchant's own purchase records; idempotency keys from the proxy log):**
+## Reproduction before and after (isolated HTTP harness, same scenarios)
 
-| Scenario | What the engine told the shopper | Platform purchases for ONE basket | Verdict |
+Isolation was verified before the first purchase request and after each run: disposable byte copy of `cv3_v2verify.db` bound by a fail-closed wrapper, local Northfield
+only behind a loopback fault-injecting proxy that forwards the purchase and then withholds the response or returns 503, Kettle unreachable, fake cards, provider keys,
+SMTP and proxies blank, continuous egress monitor with no non-loopback peer, protected databases identical by hash, size and mtime, all processes stopped, ports free.
+
+| Scenario | Before: platform purchases for ONE basket | After: platform purchases | What the shopper is told after the fix |
 |---|---|---|---|
-| S1 timeout, then the SAME card | "Nothing has been charged" (false: it had been charged) | 1 (`ORD00001`; the same key replayed 3x; the second tap settled as `ORD00001`) | no double charge, but a false statement |
-| S2 timeout, then a DIFFERENT card (chat `/pay`) | "Nothing has been charged" | **2 confirmed** (`ORD00002` key `pay-BSK00003-1111`, `ORD00003` key `pay-BSK00003-2222`) | **double purchase** |
-| S3 5xx, then a different card (REST checkout) | `UPSTREAM_ERROR`, retryable | **2 confirmed** (`ORD00004`, `ORD00005`) | **double purchase** |
-| S4 client abandons mid-request, then a different card | (client gone) | **2 confirmed** (`ORD00006`, `ORD00007`) | **double purchase** |
+| S1 timeout, then the same card at once | 1 (but "Nothing has been charged") | 1 | first tap: could not confirm / hold; next tap: reconciled, "already paid ... order ORD00001" |
+| S2 timeout, then a different card | **2** | **1** | the second card is never sent; reconciled to "already paid" |
+| S3 REST 5xx, then a different card | **2** | **1** | first tap `409 PAYMENT_OUTCOME_UNKNOWN`; the second card is never sent |
+| S4 client abandons, then a different card | **2** | **1** | the handler parks the basket as unknown; the second card is never sent |
+| S5 same card after the settle window (new) | n/a | 1 | settles to the original order |
+| S6 chat timeout, then REST with another card (new) | n/a | 1 | refused; reconciled to the original order |
 
-Other observations: in S4 closing the client connection does NOT cancel the handler; the ledger row was `IN_FLIGHT` right after the
-abandon and was released about 30 s later when the handler finished (while `IN_FLIGHT`, `begin_payment` would have refused a second tap,
-so that window is protected). The injected 503 body text did not reach the response; the REST error shows the engine-translated
-`{"code":"UPSTREAM_ERROR","message":"platform returned 503","retryable":true}` (it exposes the status number, not platform detail).
+On the sample merchant a reconciliation finds the paid order at once, so these runs end "already paid". The branch where the lookup cannot answer (Kettle, a failing
+lookup, a platform that must be waited out) is covered by the model-free tests below, not by this harness.
 
-## What is confirmed, and what is NOT
+## Tests (all model-free; fail on the old code, mutation-checked)
 
-**Confirmed by the reproduction (local, sample merchant):**
-- the engine-side behaviour: `release_payment` on a timeout or 5xx, the "Nothing has been charged" reply, and a fresh platform
-  key per card;
-- that with a platform that does not guard a basket against a second purchase under a different key, this yields two purchases.
+`tests/shopper_v2/test_payment_unknown_outcome.py` (42 checks: timeout/different card, 5xx, ambiguity, definitive release, decline, unexpected exception, deadline,
+client disconnect, ledger-write failure, concurrency, same-key retry gating, crashed and stale `IN_FLIGHT`, ledger guards, cart locks), `test_payment_reconcile.py` (32:
+reconciliation, absence rules, throttle, duplicates, ownership, operator resolution, recovery claim, sweep), `test_payment_tenant_isolation.py` (11),
+`test_write_ambiguity_signal.py` (12, real HTTP client over a mock transport, survives `wait_for`/tasks), `test_payment_platform_adapters.py` (8, the two real sample
+platforms: Northfield lookup, Kettle none, same key twice at once is one purchase). Deliberately breaking the guard (release on every error; ignore the ambiguity signal;
+ignore `UNKNOWN_OUTCOME` in `begin_payment`) makes the suite fail. The existing `test_phase5_checkout.py` and `test_phase5_payment_recovery.py` still pass.
 
-**NOT established (do not claim either way):**
-- Production behaviour. The sample merchants are in-memory and keyed only by the idempotency key; they have no per-basket guard. Real
-  platforms (Magento, Shopware, custom builds) may guard a basket, may hold keys differently, and may or may not honour the header.
-  The engine's behaviour is platform-independent; whether it causes a double charge on a given real platform is unverified.
-- How often a charge-then-timeout happens on a real client. Not measured.
-- A permanently stuck `IN_FLIGHT` row (a crash or a cancelled handler). Not reproduced; the handler continued after a client disconnect.
-- The `RETRY_PAYMENT` / `OFFER_ALTERNATE_PAYMENT` path through `execute_case` (Kettle). Not reproduced.
+## NOT established - do not claim
 
-## What the code does today (confirmed by reading; the pay-route behaviour above was also reproduced)
+- Production behaviour. The sample merchants are in-memory and keyed only by the idempotency key. Whether a real platform honours the key, can answer a lookup, or
+  guards a basket is unverified; `honours_idempotency_keys` is a claim about the two demo stubs only. Kettle has no lookup, so its unknown outcomes end with the same-key
+  retry or a person.
+- That the absence verdict is safe on a platform that can hold a request longer than the settle window; "confirmed not charged" is only as good as that bound.
+- How often a charge-then-timeout happens on a real client.
+- Anything involving a real payment provider: none was contacted.
 
-**1. Transport layer.** `adapters/framework/http.py` `PlatformClient.request` retries on timeout / transport error / 429 / 5xx, sending
-the same `Idempotency-Key` header, and after the last attempt raises the final `CommerceError` with code `TIMEOUT`, `UPSTREAM_ERROR`
-or `RATE_LIMITED`. A `TIMEOUT` or 5xx does not tell the caller whether the platform processed the request.
+## Remaining limitations
 
-**2. Both pay routes treat every `CommerceError` as "nothing was attempted".** `engine/api/chat.py` (`/pay`) and `engine/api/shop.py`
-(checkout) catch `CommerceError` from `adapter.checkout_with_card(...)` and call `db.idempotency.release_payment(...)`, whose docstring
-says "Give the basket back after a charge that never happened". `release_payment` deletes the `paid_*` ledger row if it is `IN_FLIGHT`.
-The chat route then tells the shopper "Nothing has been charged - try again in a moment." That is true for `CART_INVALID`; it is not
-true for `TIMEOUT` / `UPSTREAM_ERROR` (reproduced).
-
-**3. The platform key is per card, the ledger key is per cart.** The platform key is `pay-{cart_id}-{card_last4}`. After
-`release_payment` deletes the cart-level row: the same card again is protected only if the platform honours the key (both demo
-platforms do); a *different* card is a different platform key, and the cart-level ledger row that would have refused it is gone. That is
-the double-charge shape `db/idempotency.py` was written to prevent (see its "A basket is paid for once" section).
-
-**4. Money actions routed through `execute_case`.** `_run` catches `CommerceError` and returns `Executed(succeeded=False,
-error_code=str(exc.code), final_state=FAILED)` (`engine/execution/service.py`). `execute_case` then calls
-`db.idempotency.complete(key, succeeded=False, ...)`, so a timed-out `RETRY_PAYMENT` / `OFFER_ALTERNATE_PAYMENT` / `SPLIT_PAYMENT` ends
-`DONE`, `succeeded=False`. A rerun returns "Already done: ..." and never retries, which is conservative - but the ledger now says
-*failed*, not *unknown*. `complete()` does not store the error code, so the attempt row cannot distinguish a decline from a timeout.
-(Not reproduced.)
-
-**5. Process death.** Between `begin_payment` and `payment_settled` / `release_payment` there is no `finally`. A non-`CommerceError`
-exception or a crash leaves the `paid_*` row `IN_FLIGHT`. `begin_payment` then answers "going through now" for that basket
-indefinitely (no stale takeover). `purge_old()` would delete it after 7 days but is never scheduled. (Not reproduced.)
-
-**6. Related, not payment-ledger:** `execute_case` has no case/approval state guard, and `ISSUE_REFUND` (approvable) has no `_dispatch`
-case, so an approved refund ends `UNSUPPORTED` ("no execution path yet").
-
-## Ledger facts that constrain any fix
-
-There is no cart -> order or idempotency-key -> order lookup in `StandardCommerceInterface` (only `get_order(order_id)` and `get_cart`),
-so an `IN_FLIGHT` or ambiguous row cannot be reconciled from the platform side today. No existing ledger function is a safe transition
-out of an unknown-outcome row: `release_payment` assumes nothing was attempted, `payment_settled` needs platform-confirmed order data,
-`complete` records a definite result.
-
-## Proposed fix (NOT implemented; needs its own spec and `invariant-guard` review)
-
-1. Add an explicit `UNKNOWN_OUTCOME` ledger state. Release the cart-level row ONLY on errors that prove nothing happened (`CART_INVALID`,
-   a validation 4xx before processing, a clean decline). On `TIMEOUT`, `UPSTREAM_ERROR` (5xx after retries) and unexpected exceptions,
-   keep the row as `UNKNOWN_OUTCOME`.
-2. `begin_payment` refuses new attempts on an `UNKNOWN_OUTCOME` basket and tells the shopper "we couldn't confirm your payment, please
-   don't pay again, we're checking" instead of "Nothing has been charged".
-3. Reconcile with evidence, never a guess: add an optional platform lookup (order by idempotency key or by cart); if the platform cannot
-   answer, hold the basket and surface an Operations incident for a human to resolve. Only a confirmed order moves the row to
-   DONE/succeeded; only a confirmed absence makes the basket buyable again.
-4. Wrap the pay routes in `try/finally` so a cancelled or crashing handler never leaves an unexplained `IN_FLIGHT` row; schedule
-   `purge_old` / an `IN_FLIGHT` staleness check.
-5. `execute_case` money actions: store the error code so a timeout is `UNKNOWN`, not `failed`.
-
-It touches `engine/db/idempotency.py`, `engine/api/chat.py`, `engine/api/shop.py`, `engine/execution/service.py` and the adapter
-interface (the lookup). No new action type. `chat.py` is shared with Shopper V2 work, so coordinate before changing it.
-
-## Regression tests required with the fix (they must FAIL on today's code)
-
-Reuse the reproduction harness as an HTTP-level test plus unit tests on the ledger:
-- T1 timeout then a different card: the platform must hold exactly ONE purchase; the second tap is refused with the "could not confirm"
-  message; the ledger row is `UNKNOWN_OUTCOME`.
-- T2 5xx on the REST route: same assertions; the response carries no platform detail.
-- T3 same card after a timeout: the second tap settles with the ORIGINAL order id (true today; keep as a guard).
-- T4 a definitive failure (`CART_INVALID`, a decline): the row is released and the basket stays buyable (recovery must not regress).
-- T5 an abandoned request: no row is left `IN_FLIGHT` after the handler ends.
-- T6 reconciliation: a confirmed order moves `UNKNOWN_OUTCOME` to DONE; a confirmed absence makes the basket buyable.
+- The storefront still shows the card buttons for a basket that is on hold (every tap is refused server-side). No storefront change was made.
+- Nothing notifies the merchant when a basket becomes unknown; operators see `GET /api/ops/payments/unresolved`, and the sweep runs every 60 s inside the engine process.
+- A reconciled order sends no confirmation mail and records no purchase event (no shopper address or session is in scope).
+- A cart id the platform recycles after a restart keeps a stale unresolved row (Northfield clears it by reconciliation; Kettle needs an operator).
+- A timed-out recovery is held on the basket, but a later retry of the same recovery case still returns the stored "already done" result (conservative).
+- Unresolved payments are not in `ops_stats`; the operator list carries the count.
 
 ## Release status
 
-Real-money checkout must not ship, and this must not be described as resolved, until the fix is implemented AND T1-T6 pass AND a
-platform that actually charges has been checked for the same sequence. Operations relevance: stuck `IN_FLIGHT` attempts are detected
-and surfaced by the Operations slice as evidence-only incidents that cannot be resolved by Operations; this investigation owns the
-ledger side.
+**Real-money checkout must not ship on this evidence alone.** The gate stays open until a platform that actually charges has been checked for these sequences (timeout and
+5xx after a charge, abandoned request, a different card, a same-key retry, a lookup), the real platforms' key and lookup semantics are confirmed, the storefront and operations
+handling of a held basket is decided, and the owner signs off.

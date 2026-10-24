@@ -226,6 +226,17 @@ knows a payment failed without claiming it discussed it.
 
 ---
 
+### Payment safety: ambiguous outcomes
+
+A payment call that ends in a timeout, a 5xx, a crash, a disconnect or anything unexpected may or may not have charged. The engine does not guess: the basket's ledger
+row (`execution_attempts`, one per basket) becomes `UNKNOWN_OUTCOME` and stays closed. The row moves only by compare-and-set; it is released only for errors that prove
+nothing happened, and only when no earlier attempt of the same call was ambiguous. While it is unresolved a different card, a concurrent tap, the other pay route and a
+payment recovery are refused with fixed wording ("we couldn't confirm ... please don't pay again"); the same card is retried with the same platform key only after the
+settle window and only on a platform that declares `honours_idempotency_keys`. An adapter may implement `SupportsCheckoutLookup.lookup_checkout`; the engine then
+reconciles with evidence (a paid order settles the basket, a complete absence after the settle window frees it, anything inconclusive stays blocked for a person).
+Operators see `GET /api/ops/payments/unresolved` and can `reconcile` or `resolve` (the platform's records outrank their decision). The whole sequence lives in
+`engine/execution/payment_guard.py` and `payment_reconcile.py`. This is verified locally only; see `PAYMENT_SAFETY_INVESTIGATION.md` for what is not established.
+
 ## Adding a platform
 
 This is the main extension point. A new platform is one folder and no engine
@@ -392,6 +403,8 @@ safe actions run. Populating it narrows that; it can never widen it.
 | `SAMPLE_MERCHANT_URL` | `http://127.0.0.1:8001` | Demo store one. |
 | `KETTLE_MERCHANT_URL` | `http://127.0.0.1:8002` | Demo store two. |
 | `KETTLE_WEBHOOK_SECRET` | `demo-kettle-webhook-secret` | HMAC secret Kettle's webhook signature is checked against. The default is a demo convenience, not a real merchant's secret - set your own before this leaves a laptop. |
+| `PAYMENT_CALL_DEADLINE_SECONDS` | `60` | Hard ceiling on one platform payment call; expiry parks the basket as `UNKNOWN_OUTCOME`. A stale `IN_FLIGHT` row is one older than twice this. |
+| `PAYMENT_SETTLE_WINDOW_SECONDS` | `120` | After a basket becomes `UNKNOWN_OUTCOME`: how long before a platform's absence of an order counts as conclusive and a same-key retry is allowed. |
 
 On rate limits: Groq's free tier allows roughly 8,000 tokens a minute, and a turn
 costs around 2,000. Past that the engine falls back to rules and says so. If the
@@ -463,6 +476,16 @@ GET   /api/stats/{connection}
 
 Approving an approval executes the action and returns what happened.
 
+**Unresolved payments (operator key only):**
+
+```
+GET   /api/ops/payments/unresolved
+POST  /api/ops/payments/{connection}/{cart_id}/reconcile
+POST  /api/ops/payments/{connection}/{cart_id}/resolve
+```
+
+The REST checkout returns `409 PAYMENT_OUTCOME_UNKNOWN` for a held basket.
+
 ---
 
 ## Data model
@@ -483,8 +506,9 @@ actually moved.
 is what makes memory shared between the chat and the friction detector.
 
 `execution_attempts` is the idempotency ledger. A row is written before the platform
-is called, not after, so a crash mid-call leaves a recoverable `IN_FLIGHT` record
-rather than losing the fact that anything happened.
+is called, not after, so a crash mid-call leaves an `IN_FLIGHT` record rather than
+losing the fact that anything happened; an attempt whose outcome cannot be confirmed
+becomes `UNKNOWN_OUTCOME` and is never released without evidence.
 
 `merchant_policies` persists automation settings.
 
