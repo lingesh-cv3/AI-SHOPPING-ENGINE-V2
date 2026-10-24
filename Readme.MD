@@ -242,6 +242,41 @@ when a payment request dies without a clean answer (the server's guards stay aut
 episode raises one deduplicated merchant task (`PAYMENT_UNRESOLVED`, in Merchant Tasks, closing itself when the payment is resolved) and counts in `GET /api/ops/stats`
 (`unresolved_payments`). A cart id the platform reissues while its old payment is unresolved is never used for a new basket: `create_cart` reconciles first and mints another.
 
+### Streamed replies (SSE)
+
+`POST /api/v2/chat/stream` runs exactly the turn `POST /api/v2/chat` runs (one shared `authorize_turn` / `execute_turn`: same auth, owner check, Decision Engine -> Risk Gate ->
+Execution -> Adapter, same transcript write) and reports it as Server-Sent Events. The body is `/api/v2/chat`'s plus an optional `request_id` (8-64 of `[A-Za-z0-9_-]`; the
+client sends the same one on every re-attach). Same bearer key and visitor cookie; it is read over `fetch` because `EventSource` cannot POST or send `Authorization`.
+
+| Event | Data | Meaning |
+|---|---|---|
+| `start` | `run_id` | Turn accepted. |
+| `status` | `stage`, `label` | Whitelisted progress only (understanding, searching, comparing, writing...). No reasoning, tool arguments or tool output. |
+| `tool` | `name`, `state` | Whitelisted tool activity (cart/checkout/order lookups). |
+| `delta` | `segment`, `text` | A piece of **provisional** model text, whole words only. |
+| `reset` | `segment`, `reason` | Discard that segment's draft (held back, ungrounded, model failed). |
+| `message` | the `ChatReplyV2` fields + `draft_replaced`, `streamed_chars` | The authoritative final reply. The only thing the transcript stores. |
+| `error` | `code`, `message`, `retryable` | The turn failed; fixed wording, no platform error. |
+| `done` | - | Terminal. Always the last event. |
+
+Every event carries a per-run increasing `id`; `: ping` comments are heartbeats (15 s). Clients ignore ids at or below the last one handled, malformed JSON and unknown types.
+**Reconnect:** a dropped or idle-closed connection is resumed by re-POSTing the same body and `request_id` with `Last-Event-ID`. The run lives in the engine process
+(`RunRegistry`: atomic acquire, owner match, request body hash -> `REQUEST_ID_REUSED` on a mismatch, one turn per session -> `TURN_IN_PROGRESS`, 500 runs / 30 per owner -> `STREAM_BUSY`,
+events kept 300 s, 2000 events; afterwards a 24 h in-memory tombstone makes a late retry of the same `request_id` a `409 TURN_ALREADY_HANDLED`, never a second run), so a re-attach replays events and never re-executes the turn; a client disconnect or Stop never cancels the turn (it may be mid-mutation), its reply is still stored.
+
+What streams: model tokens from the provider's real streaming API (the forced `write_synthesis` tool call; only its `reply` field is forwarded - never hidden reasoning, other tools,
+or `cited_reason`), for comparison, recommendation and compatibility replies. Before any draft reaches the shopper the engine applies the same checks it applies to the final reply
+(cited preference must be in the evidence; no cart-change claim), withholding the text and sending one `reset` if they fail. Discovery and deterministic turns (cart, checkout, payment,
+orders, clarifications) send status + the final `message` only; they are never chunked after the fact. Payment is not reachable from this route: `/api/chat/pay` is the shopper's own tap,
+and cart changes still need a proposal accept or an unambiguous typed add, exactly as on `/api/v2/chat`. Set `CHAT_STREAM_DRAFT_TEXT=off` to send status + final only.
+
+The widget falls back to `/api/v2/chat` only when the stream endpoint is plainly absent (404/405/501), or when a tab sets `sessionStorage.cv3_chat_stream = "off"`. It shows a typing
+indicator until the first draft text, a draft bubble that the final reply replaces, and a Stop button; the transcript poll is suspended while a stream is open.
+
+Limits: the draft may differ from the final reply; runs and tombstones live in one engine process's memory (a restart loses replay AND the duplicate guard - a retry of a pre-restart `request_id` would run again, and a turn that hangs holds its session until the engine restarts: there is no turn timeout); the single-flight guard covers stream
+against stream only (not `/api/v2/chat`, taps or `mission/advance`); `first_text_ms` is not persisted; when the model writes `reply` before the grounding fields the draft is held until
+they arrive; behaviour against a live provider is not verified.
+
 ## Adding a platform
 
 This is the main extension point. A new platform is one folder and no engine
@@ -410,6 +445,7 @@ safe actions run. Populating it narrows that; it can never widen it.
 | `KETTLE_WEBHOOK_SECRET` | `demo-kettle-webhook-secret` | HMAC secret Kettle's webhook signature is checked against. The default is a demo convenience, not a real merchant's secret - set your own before this leaves a laptop. |
 | `PAYMENT_CALL_DEADLINE_SECONDS` | `60` | Hard ceiling on one platform payment call; expiry parks the basket as `UNKNOWN_OUTCOME`. A stale `IN_FLIGHT` row is one older than twice this. |
 | `PAYMENT_SETTLE_WINDOW_SECONDS` | `120` | After a basket becomes `UNKNOWN_OUTCOME`: how long before a platform's absence of an order counts as conclusive and a same-key retry is allowed. |
+| `CHAT_STREAM_DRAFT_TEXT` | `on` | `off` stops model text being streamed as drafts; `/api/v2/chat/stream` then sends status and the final message only. |
 
 On rate limits: Groq's free tier allows roughly 8,000 tokens a minute, and a turn
 costs around 2,000. Past that the engine falls back to rules and says so. If the
@@ -439,6 +475,8 @@ GET   /api/shop/{connection}/order/{order_id}
 
 ```
 POST  /api/chat
+POST  /api/v2/chat
+POST  /api/v2/chat/stream     (SSE, see "Streamed replies")
 GET   /api/chat/{connection}/{session_id}
 POST  /api/simulate
 ```

@@ -32,7 +32,7 @@ partial, unverified, or unbuilt.
 
 - **Shopper V2 is the only shopper routing the real storefront calls.**
   `/api/v2/chat` (`engine/shopper_v2/`) is the sole path
-  `storefront/src/ChatWidget.tsx` invokes (`api.chatV2`, unconditional) -
+  `storefront/src/ChatWidget.tsx` invokes (as `/api/v2/chat/stream`, falling back to the plain route; see the streaming entry below) -
   there is no `assistantMode` state, build flag, or per-session control in
   the storefront that reaches V1 instead. V1's `/api/chat`
   (`engine/api/chat.py`) remains mounted at the API level only, exercised
@@ -147,6 +147,17 @@ partial, unverified, or unbuilt.
   one fetch whose promise actually resolved. Fixed with a same-tab custom
   event plus a corrected ref-check at resolve time; reproduced live before
   the fix and re-verified live after.
+
+- **Streamed replies over SSE (`POST /api/v2/chat/stream`)** - the same turn as `/api/v2/chat`
+  (shared `authorize_turn`/`execute_turn`: same auth, owner check, Decision -> Risk Gate -> Execution -> Adapter, one transcript write),
+  reported as ordered, id'd events with heartbeats. Comparison, recommendation and compatibility replies stream REAL provider tokens
+  (OpenAI-compatible `stream=True`; only the `reply` field of the forced `write_synthesis` call is forwarded; the engine's own grounding/cart-claim
+  check runs before any draft is shown, with a `reset` if it fails); every other turn sends whitelisted status + the final message. A run registry
+  makes reconnect (`Last-Event-ID` + `request_id`) replay without re-executing (a late retry is refused, in-process memory only), one turn per session, owner-matched, capped; disconnect/Stop never
+  cancels the turn. The widget shows a typing indicator, a provisional draft bubble replaced by the final reply, and Stop; the plain route is
+  the fallback. Verified model-free: ~200 backend checks (parser, LLM stream client, sink gate, endpoint over real HTTP incl. replay-once cart change,
+  cross-merchant/cross-owner refusal) and 17 Playwright tests, including one against the real engine and a local slow fake provider showing the
+  first visible text arrives while the provider is still writing. The live-provider behaviour is not verified (see PROGRESS.md).
 
 ## Product Discovery & Recommendations
 

@@ -36,6 +36,13 @@ counted as unfinished implementation work.
   reconciled by lookup (same-key retry or an operator); alerts reach the merchant only as a Merchant Task within one 60 s sweep (no email/push); a reconciled order sends no confirmation mail; the absence
   verdict is only as good as `PAYMENT_SETTLE_WINDOW_SECONDS` against a platform that can hold a request longer; no real provider was contacted.
 
+### SSE streamed replies (`/api/v2/chat/stream`) — implemented, verified model-free; NOT verified against a live provider
+- Protocol, client behaviour and compatibility: Readme.MD "Streamed replies (SSE)"; verified items: Completed.md. Verification used a fake model only (httpx MockTransport and a local OpenAI-compatible
+  fake provider); no real provider was contacted. Tests needing a live model were not run, and no live-provider reliability or time-to-first-text figure is claimed.
+- Open: the draft is provisional and may differ from the final reply; which key order a real model writes (`reply` before the grounding fields delays the first draft) is unmeasured; deterministic turns and
+  discovery never stream text (status + final only); runs and the 24 h duplicate-request tombstones live in one process's memory (a restart loses replay and the guard: a retry of a pre-restart request id would run the turn again; a hung turn blocks its session - no turn timeout); the single-flight guard covers stream-vs-stream only (not `/api/v2/chat`,
+  taps or `mission/advance`); `first_text_ms` is not persisted so no merchant/ops figure moves yet; no CI gate runs the new tests; the first browser run after a cold Vite start can reload the page mid-test.
+
 ### Shopper V2 — the only shopper routing — ~90% complete
 - `/api/v2/chat` (`engine/shopper_v2/`, routed via `engine/api/chat_v2.py`)
   is the ONLY shopper path the real storefront calls today —
