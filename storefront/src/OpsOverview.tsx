@@ -127,6 +127,23 @@ function Attention() {
             )
           }
         />
+        <Row
+          label="Payments whose outcome could not be confirmed"
+          note="A shopper may or may not have been charged. Each basket is on hold; reconcile or resolve it through the operator payment routes."
+          panel={stats}
+          render={(d) =>
+            (d.unresolved_payments ?? 0) === 0 ? (
+              <strong className="num">0</strong>
+            ) : (
+              <>
+                <strong className="num">{d.unresolved_payments}</strong>
+                <span className="ops-sub">
+                  oldest held {d.oldest_unresolved_payment_minutes ?? 0}m
+                </span>
+              </>
+            )
+          }
+        />
         <div className="ops-row">
           <div>
             <div className="ops-row-label">Incidents</div>

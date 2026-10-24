@@ -18,6 +18,7 @@ import {
 
 import { OpsConsole } from "./OpsConsole";
 import { CartPanel } from "./CartPanel";
+import { HOLD_RECHECK_MS, afterPaymentFailure, applyCart, recheck, useHold } from "./paymentHold";
 import { ProposalsPanel } from "./ProposalsPanel";
 import { ChatWidget, mapV2Reply } from "./ChatWidget";
 import { Gates } from "./Gates";
@@ -499,6 +500,22 @@ export default function App() {
       setResult(null);
     });
 
+  // The browser's view of "may this basket be paid" follows the server: every cart this page reads carries the engine's
+  // payment_state, so a stale page learns a basket is held (or free again) the moment it reads the cart.
+  useEffect(() => {
+    // Raise only: the cart object in state may be older than a hold learned since. Lifting a hold is `recheck`'s job.
+    applyCart(cart, true);
+  }, [cart]);
+
+  // While a basket is held, keep asking the server whether it has been resolved. Only the server's answer lifts the hold.
+  const heldCartId = cart?.cart_id;
+  const cartHold = useHold(heldCartId);
+  useEffect(() => {
+    if (!cartHold || !heldCartId) return;
+    const id = window.setInterval(() => void recheck(heldCartId), HOLD_RECHECK_MS);
+    return () => window.clearInterval(id);
+  }, [cartHold, heldCartId]);
+
   const refreshCart = () => {
     if (!cart) return;
     api.getCart(cart.cart_id).then(setCart).catch(() => {});
@@ -522,7 +539,14 @@ export default function App() {
   const checkout = (cardLast4: string) =>
     guard(async () => {
       if (!cart) return;
-      const r = await api.checkout(cart.cart_id, cardLast4, sessionId);
+      let r: CheckoutResult;
+      try {
+        r = await api.checkout(cart.cart_id, cardLast4, sessionId);
+      } catch (e) {
+        // No clean answer may still mean the payment was processed: hold the basket and ask the server before anything else.
+        await afterPaymentFailure(cart.cart_id, e);
+        throw e;
+      }
       setResult(r);
 
       if (r.succeeded) {

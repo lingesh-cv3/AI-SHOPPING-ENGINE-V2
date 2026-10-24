@@ -8,6 +8,16 @@ import {
   type ReturnRiskFinding,
 } from "./api";
 import { type Account } from "./account";
+import {
+  HOLD_COPY,
+  afterPaymentFailure,
+  holdFromPayment,
+  holdKey,
+  holdOf,
+  markHeld,
+  recheck,
+  useHolds,
+} from "./paymentHold";
 
 /** Maps a real `ChatReplyV2` (`/api/v2/chat`, `engine/shopper_v2/`) onto
  *  this widget's existing `ChatTurn` shape - the same shape V1's `/api/chat`
@@ -211,6 +221,10 @@ export function ChatWidget({
   // The card a shopper has selected but not yet confirmed. Every other tap
   // in this widget is reversible; this one is not, so it asks twice.
   const [confirming, setConfirming] = useState<string | null>(null);
+  // Baskets whose payment is held (outcome unknown / going through / being checked). A payment picker that is still on
+  // screen for one of them - an old turn, a stale tab - shows why it is off instead of offering a second payment.
+  const holds = useHolds();
+  const heldCart = (id?: string | null) => (id ? holds[holdKey(id)] : undefined);
   // Which message has its reasoning open. One at a time: a shopper checking
   // why is checking one thing, and leaving several expanded turns the
   // conversation into a log.
@@ -569,6 +583,8 @@ export function ChatWidget({
    */
   async function payNow(cartId: string, cardLast4: string) {
     if (busy) return;
+    // Not just a disabled button: a stale handler must not pay a held basket either.
+    if (holdOf(cartId)) return;
     setConfirming(null);
     setBusy("paying");
 
@@ -578,6 +594,8 @@ export function ChatWidget({
 
     try {
       const r = await api.pay(sessionId, cartId, cardLast4);
+      const held = holdFromPayment(r.payment);
+      if (held) markHeld(cartId, held);
       onReply?.(r);
       if (r.payment?.cart_retired) {
         onCartRetired?.();
@@ -590,6 +608,8 @@ export function ChatWidget({
         { speaker: "assistant", text: r.reply, payment: r.payment },
       ]);
     } catch (e) {
+      // The request may have been processed even though no clean answer came back: fail closed and ask the server.
+      void afterPaymentFailure(cartId, e);
       onTurns([...withShopper, { speaker: "assistant", text: shopperMessage(e) }]);
     } finally {
       setBusy(null);
@@ -878,7 +898,25 @@ export function ChatWidget({
                   </div>
                 ))}
 
-                {confirming ? (
+                {heldCart(turn.payment.cart_id) && (
+                  <div className="payhold" role="status" data-testid="chat-payment-hold">
+                    <p className="paynote">
+                      <strong>{HOLD_COPY[heldCart(turn.payment.cart_id)!].label}.</strong>{" "}
+                      {HOLD_COPY[heldCart(turn.payment.cart_id)!].note}
+                    </p>
+                    {heldCart(turn.payment.cart_id) !== "checking" && (
+                      <button
+                        className="navlink"
+                        data-testid="chat-payment-hold-recheck"
+                        onClick={() => void recheck(turn.payment!.cart_id!)}
+                      >
+                        Check again
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {confirming && !heldCart(turn.payment.cart_id) ? (
                   <div className="payconfirm">
                     <p className="paynote">
                       Charge {turn.payment.grand_total} to the card ending{" "}
@@ -887,7 +925,7 @@ export function ChatWidget({
                     <div className="payactions">
                       <button
                         className="add"
-                        disabled={busy !== null}
+                        disabled={busy !== null || !!heldCart(turn.payment.cart_id)}
                         onClick={() =>
                           payNow(turn.payment!.cart_id!, confirming)
                         }
@@ -908,7 +946,11 @@ export function ChatWidget({
                       <button
                         key={card.last4}
                         className="paycard"
-                        disabled={busy !== null || i !== turns.length - 1}
+                        disabled={
+                          busy !== null ||
+                          i !== turns.length - 1 ||
+                          !!heldCart(turn.payment!.cart_id)
+                        }
                         onClick={() => setConfirming(card.last4)}
                       >
                         {card.label}

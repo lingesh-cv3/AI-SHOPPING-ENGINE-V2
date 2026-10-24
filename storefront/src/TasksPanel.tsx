@@ -6,6 +6,7 @@ const KIND_LABEL: Record<string, string> = {
   OUT_OF_STOCK: "Out of stock",
   LOW_STOCK: "Low stock",
   UNMET_DEMAND: "Unmet demand",
+  PAYMENT_UNRESOLVED: "Payment unconfirmed",
 };
 
 /** A merchant's real, persisted work items - flagged deterministically
@@ -115,7 +116,14 @@ export function TasksPanel({
                     </span>
                   </div>
                   <div className="task-card-label">{t.label}</div>
-                  {t.state === "OPEN" && (
+                  {t.kind === "PAYMENT_UNRESOLVED" && (
+                    <p className="note" data-testid="payment-task-detail">
+                      Reference {String(t.detail.payment_ref ?? "").replace(/^paid_/, "").slice(0, 12)} &middot; basket{" "}
+                      {String(t.detail.cart_id ?? "")}. {String(t.detail.what_to_do ?? "")} This closes by itself once the
+                      payment is confirmed or resolved - dismissing it does not change the basket.
+                    </p>
+                  )}
+                  {t.state === "OPEN" && t.kind !== "PAYMENT_UNRESOLVED" && (
                     <div className="task-card-actions">
                       <button
                         className="add"

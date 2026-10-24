@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import type { Account } from "./account";
 import type { Cart, CheckoutResult } from "./api";
 import { getConnection, pathFor } from "./api";
+import { HOLD_COPY, recheck, useHold } from "./paymentHold";
 
 /**
  * The cart, coupon field, and checkout.
@@ -106,6 +107,9 @@ export function CartPanel({
   const [email, setEmail] = useState("");
   const [savingEmail, setSavingEmail] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
+  // Set when the engine says this basket's payment is held (outcome unknown / going through), or when a payment failed
+  // without a clean answer and the server is being asked. Payment is off for the whole time.
+  const hold = useHold(cart?.cart_id);
 
   return (
     <aside className="panel">
@@ -197,9 +201,25 @@ export function CartPanel({
 
             {account && account.email ? (
               <>
+                {hold && cart && (
+                  <div className="checkout-gate" role="status" data-testid="payment-hold">
+                    <div className="gate-label">{HOLD_COPY[hold].label}</div>
+                    <p className="note">{HOLD_COPY[hold].note}</p>
+                    {hold !== "checking" && (
+                      <button
+                        className="navlink"
+                        data-testid="payment-hold-recheck"
+                        onClick={() => void recheck(cart.cart_id)}
+                      >
+                        Check again
+                      </button>
+                    )}
+                  </div>
+                )}
                 <select
                   className="card-picker"
                   value={card}
+                  disabled={hold !== null}
                   onChange={(e) => setCard(e.target.value)}
                   aria-label="Card"
                 >
@@ -215,10 +235,15 @@ export function CartPanel({
                 <button
                   className="add"
                   style={{ width: "100%", marginTop: 10 }}
-                  disabled={busy}
-                  onClick={() => onCheckout(card)}
+                  data-testid="pay-now"
+                  disabled={busy || hold !== null}
+                  onClick={() => {
+                    // The disabled attribute is a convenience, not the guard: a stale click handler must not pay a held basket.
+                    if (hold !== null) return;
+                    onCheckout(card);
+                  }}
                 >
-                  {busy ? "Working…" : "Pay now"}
+                  {hold ? HOLD_COPY[hold].label : busy ? "Working…" : "Pay now"}
                 </button>
               </>
             ) : account ? (

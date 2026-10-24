@@ -198,6 +198,9 @@ export interface CartLine {
 
 export interface Cart {
   cart_id: string;
+  /** The engine's own answer to "may this basket be paid right now": "unknown" (a payment's outcome could not be
+   *  confirmed), "in_flight" (one is going through), "paid", or null (free). Anything but null/"paid" disables payment. */
+  payment_state?: "paid" | "in_flight" | "unknown" | null;
   item_count: number;
   is_empty: boolean;
   subtotal: Money;
@@ -319,6 +322,12 @@ export interface PaymentOffer {
   paid?: boolean;
   /** The cart has been bought and should be replaced. */
   cart_retired?: boolean;
+  /** The payment's outcome could not be confirmed: the basket is on hold, do not offer to pay it again. */
+  unknown?: boolean;
+  /** Same hold, from the shopper's side of the screen. */
+  hold?: boolean;
+  /** Another payment on this basket is still going through. */
+  in_flight?: boolean;
   order_id?: string | null;
 }
 
@@ -950,6 +959,14 @@ export function shopperMessage(err: unknown): string {
       return "That order's already placed. Start a new cart to buy something else.";
     case "PAYMENT_DECLINED":
       return "Your payment didn't go through.";
+    case "PAYMENT_OUTCOME_UNKNOWN":
+      return "We couldn't confirm whether your payment went through, so your basket is on hold. Please don't pay again.";
+    case "CHECKOUT_IN_PROGRESS":
+      return "That payment is already going through. Give it a moment rather than paying again.";
+    case "CART_PAYMENT_PENDING":
+      return "A payment on this basket is being processed or needs checking, so it can't be changed right now.";
+    case "CART_UNAVAILABLE":
+      return "We couldn't start a new basket just now. Try again in a moment.";
     case "CAPABILITY_UNSUPPORTED":
       return "We can't do that here. Someone will pick this up.";
     case "TIMEOUT":
@@ -1513,6 +1530,9 @@ export interface OpsStats {
   oldest_wait_minutes: number;
   by_merchant: Record<string, number>;
   today: number;
+  /** Baskets held because a payment's outcome could not be confirmed (a shopper maybe charged, maybe not). */
+  unresolved_payments?: number;
+  oldest_unresolved_payment_minutes?: number;
 }
 
 /** CV3's own view, across every merchant.
