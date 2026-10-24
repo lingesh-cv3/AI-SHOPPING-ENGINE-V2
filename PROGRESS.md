@@ -25,15 +25,16 @@ counted as unfinished implementation work.
 
 ## Current Focus
 
-### Payment safety — fix implemented and verified locally; RELEASE GATE STILL OPEN (checkout and payment are NOT production-ready)
-- Done (see `PAYMENT_SAFETY_INVESTIGATION.md`): durable `UNKNOWN_OUTCOME` ledger state; release only on proven non-events; hard call deadline; stale and orphaned
-  `IN_FLIGHT` parked, never released; different-card, concurrent, cross-route (chat/REST) and recovery attempts refused while unresolved; safe same-key retry; evidence-based
-  reconciliation (optional adapter lookup; Northfield has one, Kettle none); operator list/reconcile/resolve routes. The isolated HTTP harness went from two platform
-  purchases for one basket (S2-S4) to one in every scenario; 105 new model-free checks fail on the old behaviour.
-- Open before any real-money use: a platform that actually charges has not been tested (the demo stubs are in-memory); real platforms' idempotency-key and lookup semantics
-  are unverified; Kettle cannot be reconciled by lookup (same-key retry or an operator); the storefront still offers card buttons on a held basket; nothing notifies the
-  merchant of an unresolved payment (the operator list does); a reconciled order sends no confirmation mail; unresolved count is not in `ops_stats`; the absence verdict is
-  only as good as `PAYMENT_SETTLE_WINDOW_SECONDS` against a platform that can hold a request longer; no real provider was contacted.
+### Payment safety — fix and second hardening pass implemented and verified locally; RELEASE GATE STILL OPEN (NOT production-ready)
+- Done and verified (see `PAYMENT_SAFETY_INVESTIGATION.md`): durable `UNKNOWN_OUTCOME` ledger state; release only on proven non-events; hard call deadline; stale/orphaned `IN_FLIGHT` parked, never released;
+  different-card, concurrent, cross-route and recovery attempts refused while unresolved; safe same-key retry; evidence-based reconciliation (Northfield has a lookup, Kettle none); operator list/reconcile/resolve
+  routes. Isolated HTTP harness: one platform purchase per basket in every scenario (two before the fix in S2-S4). Second pass, backend verified: cart `payment_state`, no checkout offer for a held/paid basket,
+  one deduplicated merchant task per unknown episode (retried on failure, self-closing, tenant-scoped, no payment-sensitive content), `unresolved_payments` in ops stats, and recycled cart ids that never discard
+  an unresolved row without evidence. 169 payment checks in model-free tests (the final chain: 95 scripts, 1,724 checks; fuzz and route/tenant audit clean).
+- Browser verification of the storefront hold ran on the final frontend code (isolated stack, model-free): `payment-hold.spec.ts` 10/10 plus 50 existing browser tests, including the real signup-and-pay checkout leg. Not run: two live-model tests, two service-stopping platform-down tests, checkout Leg B (its helper targets the default database) and checkout Issue #5 (a stale assertion that fails the same on the unmodified frontend) — see `PAYMENT_SAFETY_INVESTIGATION.md`.
+- Open before any real-money use: a platform that actually charges has not been tested (the demo stubs are in-memory); real platforms' idempotency-key and lookup semantics are unverified; Kettle cannot be
+  reconciled by lookup (same-key retry or an operator); alerts reach the merchant only as a Merchant Task within one 60 s sweep (no email/push); a reconciled order sends no confirmation mail; the absence
+  verdict is only as good as `PAYMENT_SETTLE_WINDOW_SECONDS` against a platform that can hold a request longer; no real provider was contacted.
 
 ### Shopper V2 — the only shopper routing — ~90% complete
 - `/api/v2/chat` (`engine/shopper_v2/`, routed via `engine/api/chat_v2.py`)

@@ -237,6 +237,11 @@ reconciles with evidence (a paid order settles the basket, a complete absence af
 Operators see `GET /api/ops/payments/unresolved` and can `reconcile` or `resolve` (the platform's records outrank their decision). The whole sequence lives in
 `engine/execution/payment_guard.py` and `payment_reconcile.py`. This is verified locally only; see `PAYMENT_SAFETY_INVESTIGATION.md` for what is not established.
 
+The cart a shopper reads carries `payment_state` (`paid`, `in_flight`, `unknown`, or null); the storefront disables payment for a held basket and shows why, and fails closed
+when a payment request dies without a clean answer (the server's guards stay authoritative). The checkout offer is not made for a held or paid basket. Each unknown-outcome
+episode raises one deduplicated merchant task (`PAYMENT_UNRESOLVED`, in Merchant Tasks, closing itself when the payment is resolved) and counts in `GET /api/ops/stats`
+(`unresolved_payments`). A cart id the platform reissues while its old payment is unresolved is never used for a new basket: `create_cart` reconciles first and mints another.
+
 ## Adding a platform
 
 This is the main extension point. A new platform is one folder and no engine

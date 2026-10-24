@@ -176,9 +176,16 @@ partial, unverified, or unbuilt.
   different-card, concurrent, cross-route and recovery attempts are refused
   until a platform lookup or a named operator resolves it. In the isolated
   harness one basket now yields one platform purchase in every scenario
-  (previously two). Verified by 105 payment checks across 5 test files plus
-  the existing recovery/checkout tests, the model-free chain, fuzz and the
-  route/tenant audit.
+  (previously two). The cart read carries the basket's `payment_state`, no
+  checkout offer is made for a held or paid basket, an unresolved payment
+  raises one deduplicated, self-closing merchant task (no payment-sensitive
+  content) and an operator figure, and a recycled cart id never discards an
+  unresolved ledger row without evidence. Verified by 169 payment checks
+  across 9 test files plus the existing recovery/checkout tests, the
+  model-free chain, fuzz and the route/tenant audit. The storefront disables
+  payment for a held basket, says why, fails closed on an ambiguous payment
+  failure and is lifted only by the server's own answer: 10 browser tests plus
+  the existing suites passed on the final code (isolated stack, model-free).
 - **A tap beats the model's guess**: `chosen_variant` from a shopper's own
   button press always overrides any `variant_id` the model proposed.
 
