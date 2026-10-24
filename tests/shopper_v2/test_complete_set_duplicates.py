@@ -91,6 +91,19 @@ async def checks():
     check("the stage-fill item is not repeated as an extra, and appears once in the text", "E-2" not in tr.get("extras_offered_ids", []) and r4[0].count("Energy Chew Bar") == 1,
           (tr.get("extras_offered_ids"), r4[0].count("Energy Chew Bar")))
 
+    print("\n5. Re-running the mission hook never repeats an announcement (after an add, or after the summary)")
+    shop5 = FakeShop(cs_catalogue())
+    sid5, _s5, _t5 = await start_mission(shop5, MSG)
+    first = await advance(shop5, sid5, "S-A")
+    check("precondition: the slide is announced once after the shoe", ids(first[1]).count("X-SLIDE") == 1 and first[0].count("Optional extra") == 1, ids(first[1]))
+    check("the hook on an UNCHANGED cart produces nothing (no second announcement)",
+          await g.advance_from_cart(adapter=shop5, session_id=sid5, connection_id="conn_demo", cart_id="C1") is None)
+    await advance(shop5, sid5, "K-1")
+    last = await advance(shop5, sid5, "E-1")
+    check("the summary repeats it exactly once", ids(last[1]) == ["X-SLIDE"] and last[0].count("Optional extra") == 1, (ids(last[1]), last[0][-200:]))
+    check("the hook after the summary produces nothing (no third announcement)",
+          await g.advance_from_cart(adapter=shop5, session_id=sid5, connection_id="conn_demo", cart_id="C1") is None)
+
 
 async def main():
     from engine.db import create_schema, dispose

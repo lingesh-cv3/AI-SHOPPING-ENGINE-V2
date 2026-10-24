@@ -126,8 +126,8 @@ counted as unfinished implementation work.
   yet). Evidence: 11 new test scripts (133 checks), each shown failing on the pre-change code, including real Northfield and Kettle through
   the graph and a 40,000-product structural check; a 5-test Playwright spec of the complete journey with zero payment requests; an
   independent invariant review (SAFE). Open or limited: `compatible_with` is one list for "works with" and "goes with", so the wording is
-  "the merchant lists X as going with Y", never a technical-fit guarantee, and how real clients populate it is unverified; an add-on's
-  sentence uses the product-level price (the real add re-checks the chosen variant); a platform that declares nothing gets one honest
+  "the merchant lists X as going with Y", never a technical-fit guarantee, and how real clients populate it is unverified; an add-on with
+  variants is quoted "from" its lowest buyable option (budget effect as a bound; no price anywhere = not offered under a budget); a platform that declares nothing gets one honest
   sentence and no extras; a stage option the stage retrieval did not return becomes an extra, not a stage item; ~40k SKUs is structural only;
   no live-model path exists here. Checkout and payment are untouched and remain blocked by the payment-safety release blocker above.
 - Remaining: no ops-console consumer of V2's event types; real-volume

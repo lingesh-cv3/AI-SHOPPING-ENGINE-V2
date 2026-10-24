@@ -55,6 +55,31 @@ def _price(product) -> tuple[Decimal | None, str | None]:
     return Decimal(str(price.amount)), str(price.currency)
 
 
+def _offer_price(product) -> tuple[Decimal | None, str | None, bool]:
+    """The price an add-on can honestly be quoted at: (amount, currency, varies).
+
+    The shopper picks the option AFTER the add-on is announced, so with variants the quote comes from the buyable options, never from the
+    product-level price: uniform -> that price; differing -> the lowest ("from", varies=True); a buyable option with no usable price (its own or the product's) or a
+    mixed currency -> unknown (None). No variants -> the product's own price.
+    """
+    buyable = [v for v in (getattr(product, "variants", None) or []) if str(v.availability) != "OUT_OF_STOCK"]
+    if not buyable:
+        price, cur = _price(product)
+        return price, cur, False
+    quotes = []
+    for v in buyable:
+        vp = getattr(v, "price", None)
+        if vp is None or getattr(vp, "amount", None) is None:
+            vp = getattr(product, "price", None)  # a variant with no price of its own inherits the product's (the adapter contract)
+        if vp is None or getattr(vp, "amount", None) is None:
+            return None, None, False
+        quotes.append((Decimal(str(vp.amount)), str(vp.currency)))
+    if len({c for _a, c in quotes}) != 1:
+        return None, None, False
+    low = min(a for a, _c in quotes)
+    return low, quotes[0][1], any(a != low for a, _c in quotes)
+
+
 def _money(amount: Decimal | None, currency: str | None) -> str:
     if amount is None:
         return "no listed price"
@@ -233,14 +258,18 @@ async def build_complement_view(
                 product = await get(pid)
                 if product is None or not _buyable(product):
                     continue
-                price, cur = _price(product)
+                price, cur, varies = _offer_price(product)
                 if est is not None and est.budget is not None and (price is None or cur != est.currency):
                     continue  # with a budget in play, an extra we cannot price in that currency is not offered
                 cite = " and ".join(f"your {t}" for t in cites[:2])
-                text = f"Optional extra, not on your list - the merchant lists {product.title} ({_money(price, cur)}) as going with {cite}."
+                shown = f"from {_money(price, cur)}, price depends on the option" if varies else _money(price, cur)
+                text = f"Optional extra, not on your list - the merchant lists {product.title} ({shown}) as going with {cite}."
                 if est is not None and est.budget is not None and est.committed is not None and price is not None and est.remaining is not None:
                     after = est.remaining - price
-                    text += f" It adds {_money(price, cur)}; your remaining budget would go from {_money(est.remaining, est.currency)} to {_money(after, est.currency)}."
+                    if varies:
+                        text += f" It adds at least {_money(price, cur)}; your remaining budget would go from {_money(est.remaining, est.currency)} to at most {_money(after, est.currency)}."
+                    else:
+                        text += f" It adds {_money(price, cur)}; your remaining budget would go from {_money(est.remaining, est.currency)} to {_money(after, est.currency)}."
                     sum_lows = est.sum_lows if est.sum_lows is not None else Decimal(0)
                     if after - sum_lows < 0:
                         text += (f" That would leave too little for the rest of your list (the cheapest options I found still need "
