@@ -295,6 +295,7 @@ async def run_compare_turn(
             synthesis = await reasoning.synthesize(
                 kind="comparison", message=message, items=items,
                 shopping_state=state.as_prompt_dict(),
+                stream_policy="cited_reason_check",
             )
             if synthesis.text and not _claims_a_cart_action(synthesis.text):
                 # Production architecture (2026-09), Phase 5: shared
@@ -442,6 +443,7 @@ async def run_compare_turn(
         message=message,
         items=items,
         shopping_state=state.as_prompt_dict(),
+        stream_policy="cited_reason_check",
     )
     # A recommendation request must be ANSWERED even when no grounded model
     # text is available - a side-by-side listing does not answer "which one

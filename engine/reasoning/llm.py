@@ -24,13 +24,17 @@ response headers rather than assumed, because published limits go stale quickly.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from openai import APIStatusError, AsyncOpenAI, RateLimitError
+
+from .stream_parse import ReplyExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +195,11 @@ class LLMClient:
         messages: list[dict[str, str]],
         tools: list[dict[str, Any]] | None = None,
         force_tool: bool = False,
+        on_reply_delta: Callable[[str], Awaitable[None] | None] | None = None,
+        reply_tool: str = "write_synthesis",
+        reply_field: str = "reply",
+        on_field: Callable[[str, str | None], Awaitable[None] | None] | None = None,
+        field_names: tuple[str, ...] = ("cited_reason",),
     ) -> LLMResult:
         """Send a completion request.
 
@@ -198,6 +207,18 @@ class LLMClient:
         turns, because Groq caches repeated prefixes at half the input rate and
         cached tokens do not count toward rate limits. Variable context belongs in
         the user messages, after the cached prefix.
+
+        `on_reply_delta` turns on REAL provider streaming (`stream=True`) for this call and is invoked with each new piece of the
+        shopper-visible text AS THE MODEL WRITES IT: the decoded characters of the `reply_field` string inside the `reply_tool`
+        tool call's arguments (or, for a call that is not forced to use a tool, plain `delta.content`). Nothing else is ever
+        forwarded - not hidden reasoning tokens, not other tool names or arguments (a `cited_reason` stays inside the engine),
+        not provider errors. The returned `LLMResult` is assembled exactly as the non-streaming path assembles it, so every
+        caller's downstream checks are unchanged. Left at None (the default) the request, the payload and the result are
+        byte-identical to what they were before streaming existed.
+
+        `on_field` lets the engine's own gate learn an INTERNAL field of the same tool call (default `cited_reason`) the moment it
+        is complete - its text, or None when the model wrote null or a non-string - so it can decide whether the reply may be
+        shown BEFORE releasing any of it. The field's value is never forwarded to `on_reply_delta`; it goes only to this callback.
         """
         payload: dict[str, Any] = {
             "model": self.config.model,
@@ -243,6 +264,11 @@ class LLMClient:
             # "required" makes the model call a tool rather than replying in
             # prose. Used when we need structured proposals and nothing else.
             payload["tool_choice"] = "required" if force_tool else "auto"
+        streaming = on_reply_delta is not None
+        if streaming:
+            payload["stream"] = True
+            if "api.openai.com" in (self.config.base_url or ""):
+                payload["stream_options"] = {"include_usage": True}
 
         # Opt-in, bounded Retry-After wait. A provider 429 states when it will
         # accept the request again; on a tokens-per-minute tier that is often
@@ -257,6 +283,19 @@ class LLMClient:
         while True:
             try:
                 response = await self._client.chat.completions.create(**payload)
+                if streaming:
+                    try:
+                        return await self._read_stream(
+                            response, on_reply_delta=on_reply_delta, reply_tool=reply_tool,
+                            reply_field=reply_field, forward_prose=not force_tool,
+                            on_field=on_field, field_names=field_names,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except LLMUnavailable:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - a stream that dies mid-way is the provider failing
+                        raise LLMUnavailable(f"the model stream was interrupted: {type(exc).__name__}") from exc
                 break
             except RateLimitError as exc:
                 retry_after = _retry_after(exc)
@@ -305,11 +344,30 @@ class LLMClient:
                 raise LLMUnavailable(f"could not reach the model provider: {exc}") from exc
 
         choice = response.choices[0].message
+        usage = getattr(response, "usage", None)
+        return self._assemble(
+            text=choice.content,
+            raw_calls=[(c.function.name, c.function.arguments or "{}") for c in (choice.tool_calls or [])],
+            prompt_tokens=getattr(usage, "prompt_tokens", None),
+            completion_tokens=getattr(usage, "completion_tokens", None),
+            model=response.model,
+        )
+
+    @staticmethod
+    def _assemble(
+        *,
+        text: str | None,
+        raw_calls: list[tuple[str, str]],
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        model: str | None,
+    ) -> LLMResult:
+        """Build the `LLMResult`. Shared by the streaming and non-streaming paths so they cannot drift apart."""
         calls: list[dict[str, Any]] = []
 
-        for call in choice.tool_calls or []:
+        for call_name, call_args in raw_calls:
             try:
-                arguments = json.loads(call.function.arguments or "{}")
+                arguments = json.loads(call_args or "{}")
             except json.JSONDecodeError:
                 # Open models do occasionally emit malformed JSON. Skip the call
                 # rather than crashing the turn - a proposal we cannot parse is
@@ -324,19 +382,137 @@ class LLMClient:
                 # information without the collision.
                 logger.warning(
                     "discarded unparseable tool call",
-                    extra={"tool_call_name": call.function.name},
+                    extra={"tool_call_name": call_name},
                 )
                 continue
-            calls.append({"name": call.function.name, "arguments": arguments})
+            calls.append({"name": call_name, "arguments": arguments})
 
-        usage = getattr(response, "usage", None)
         return LLMResult(
-            text=choice.content,
+            text=text,
             tool_calls=calls,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            model=model,
+        )
+
+    async def _read_stream(
+        self,
+        stream: Any,
+        *,
+        on_reply_delta: Callable[[str], Awaitable[None] | None] | None,
+        reply_tool: str,
+        reply_field: str,
+        forward_prose: bool,
+        on_field: Callable[[str, str | None], Awaitable[None] | None] | None = None,
+        field_names: tuple[str, ...] = (),
+    ) -> LLMResult:
+        """Consume a provider stream, forwarding ONLY the reply text, and return the same result a non-streaming call would.
+
+        Hidden reasoning (`reasoning` / `reasoning_content` deltas) is never read. Tool-call argument fragments are accumulated for
+        the result, and the `reply_field` of the `reply_tool` call is decoded incrementally and forwarded; any other tool, and any
+        other field of that tool, stays inside the engine. A chunk that does not have the expected shape is skipped (counted in
+        the log), never forwarded.
+        """
+        text_parts: list[str] = []
+        calls: dict[int, dict[str, Any]] = {}
+        extractors: dict[int, ReplyExtractor] = {}
+        field_extractors: dict[tuple[int, str], ReplyExtractor] = {}
+        reported: set[tuple[int, str]] = set()
+        usage = None
+        model = None
+        malformed = 0
+        try:
+            async for chunk in stream:
+                try:
+                    model = getattr(chunk, "model", None) or model
+                    chunk_usage = getattr(chunk, "usage", None)
+                    if chunk_usage is not None:
+                        usage = chunk_usage
+                    choices = getattr(chunk, "choices", None) or []
+                    if not choices:
+                        continue
+                    delta = choices[0].delta
+                except Exception:  # noqa: BLE001 - an odd chunk is skipped, not fatal
+                    malformed += 1
+                    continue
+                content = getattr(delta, "content", None)
+                if isinstance(content, str) and content:
+                    text_parts.append(content)
+                    if forward_prose:
+                        await self._forward(on_reply_delta, content)
+                for tool_delta in getattr(delta, "tool_calls", None) or []:
+                    index = getattr(tool_delta, "index", 0) or 0
+                    slot = calls.setdefault(index, {"name": "", "args": []})
+                    function = getattr(tool_delta, "function", None)
+                    if function is None:
+                        continue
+                    name = getattr(function, "name", None)
+                    if name and not slot["name"]:
+                        slot["name"] = name
+                    fragment = getattr(function, "arguments", None)
+                    if isinstance(fragment, str) and fragment:
+                        slot["args"].append(fragment)
+                        if slot["name"] == reply_tool:
+                            # internal fields first: the gate must know about a citation before any reply text in the same fragment
+                            if on_field is not None:
+                                for field_name in field_names:
+                                    key = (index, field_name)
+                                    probe = field_extractors.setdefault(key, ReplyExtractor(field_name))
+                                    probe.feed(fragment)
+                                    if probe.resolved and key not in reported:
+                                        reported.add(key)
+                                        value = probe.text.strip() if probe.value_kind == "string" else None
+                                        if value is not None and len(value) > 2000:
+                                            value = value[:2000] + "(truncated)"  # can never be found in a product's text: the gate withholds
+                                        await self._forward_field(on_field, field_name, value or None)
+                            extractor = extractors.setdefault(index, ReplyExtractor(reply_field))
+                            piece = extractor.feed(fragment)
+                            if piece:
+                                await self._forward(on_reply_delta, piece)
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                try:
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:  # noqa: BLE001
+                    pass
+        if malformed:
+            logger.warning("skipped %d malformed stream chunk(s)", malformed)
+        return self._assemble(
+            text="".join(text_parts) or None,
+            raw_calls=[(slot["name"], "".join(slot["args"])) for _i, slot in sorted(calls.items()) if slot["name"]],
             prompt_tokens=getattr(usage, "prompt_tokens", None),
             completion_tokens=getattr(usage, "completion_tokens", None),
-            model=response.model,
+            model=model,
         )
+
+    @staticmethod
+    async def _forward_field(callback: Callable[[str, str | None], Awaitable[None] | None], name: str, value: str | None) -> None:
+        """Tell the engine's gate about a completed internal field. A gate that raises must never break the model call."""
+        try:
+            result = callback(name, value)
+            if inspect.isawaitable(result):
+                await result
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning("stream field consumer failed", exc_info=True)
+
+    @staticmethod
+    async def _forward(callback: Callable[[str], Awaitable[None] | None] | None, text: str) -> None:
+        """Call the consumer of streamed text. A consumer that raises must never break the model call."""
+        if callback is None or not text:
+            return
+        try:
+            result = callback(text)
+            if inspect.isawaitable(result):
+                await result
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning("stream consumer failed", exc_info=True)
 
 
 _OPENAI_REASONING_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")

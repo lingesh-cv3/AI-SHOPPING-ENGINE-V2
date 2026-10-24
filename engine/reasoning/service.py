@@ -39,6 +39,7 @@ from shared.models import (
 
 from .context import build_context
 from .llm import LLMClient, LLMConfig, LLMUnavailable
+from .stream_sink import REPLY_SINK
 from .prompts import (
     PROPOSABLE,
     SYSTEM_PROMPT,
@@ -647,6 +648,7 @@ class ReasoningService:
         message: str | None,
         items: list[dict],
         shopping_state: dict | None = None,
+        stream_policy: str | None = None,
     ) -> Synthesis:
         """Write the shopper-facing sentence *after* the authoritative result
         already exists, so it can actually reference real fetched values
@@ -669,16 +671,40 @@ class ReasoningService:
             return Synthesis(text=None, used_model=False)
 
         prompt = _synthesis_prompt(kind, message, items, shopping_state)
+        # A streaming turn (engine/api/chat_stream.py) sets REPLY_SINK; only then is the client asked to stream, and only for a call whose
+        # CALLER declares `stream_policy` - i.e. a call site where the engine itself shows the model's text after its own check
+        # (comparison / recommendation / compatibility). Discovery text is never shown directly, so it never streams. Every other
+        # call - non-streaming turns, V1, tests that fake the client - is exactly the call it was before.
+        sink = REPLY_SINK.get()
+        stream_kwargs: dict = {}
+        segment: int | None = None
+        tool = synthesis_tool()
+        if sink is not None and stream_policy is not None:
+            segment = sink.begin(stream_policy, items)
+            tool = synthesis_tool(reply_last=True)
+
+            async def _forward(text: str, _sink=sink, _segment=segment) -> None:
+                await _sink.delta(_segment, text)
+
+            async def _field(name: str, value: str | None, _sink=sink, _segment=segment) -> None:
+                await _sink.field(_segment, name, value)
+
+            stream_kwargs = {"on_reply_delta": _forward, "on_field": _field}
         try:
             result = await self._client.complete(
                 system=_SYNTHESIS_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
-                tools=[synthesis_tool()],
+                tools=[tool],
                 force_tool=True,
+                **stream_kwargs,
             )
         except LLMUnavailable as exc:
             logger.info("synthesis pass unavailable, falling back: %s", exc)
+            if sink is not None and segment is not None:
+                await sink.end(segment, False)
             return Synthesis(text=None, used_model=False)
+        if sink is not None and segment is not None:
+            await sink.end(segment, True)
 
         call = next(
             (c for c in result.tool_calls if c["name"] == "write_synthesis"), None

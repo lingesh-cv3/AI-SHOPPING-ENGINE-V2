@@ -207,15 +207,10 @@ async def mission_advance(
     )
 
 
-@router.post("", response_model=ChatReplyV2)
-async def chat_v2(
-    req: ChatRequestV2,
-    key=Depends(any_key),
-    who: Visitor = Depends(visitor),
-) -> ChatReplyV2:
-    """One shopper turn. Discovery/compare are read-only, exactly as
-    before; a cart-proposal turn only ever creates a proposal, never a
-    direct mutation - see module docstring."""
+async def authorize_turn(req: ChatRequestV2, key, who: Visitor):
+    """Everything that must be true BEFORE a turn runs: the key speaks for this merchant, the caller owns the conversation (claiming a
+    brand-new one) and the cart named, and the merchant is known. Returns the merchant's adapter. Raises the same HTTP errors the route
+    always raised. Shared by `/api/v2/chat` and `/api/v2/chat/stream` (engine/api/chat_stream.py) so the stream can never be looser."""
     belongs_to(key, req.connection_id)
     await require_owner(
         who,
@@ -239,7 +234,25 @@ async def chat_v2(
     adapter = engine.registry.adapter_for(req.connection_id)
     if adapter is None:
         raise HTTPException(404, f"unknown connection '{req.connection_id}'")
+    return adapter
 
+
+@router.post("", response_model=ChatReplyV2)
+async def chat_v2(
+    req: ChatRequestV2,
+    key=Depends(any_key),
+    who: Visitor = Depends(visitor),
+) -> ChatReplyV2:
+    """One shopper turn. Discovery/compare are read-only, exactly as
+    before; a cart-proposal turn only ever creates a proposal, never a
+    direct mutation - see module docstring."""
+    adapter = await authorize_turn(req, key, who)
+    return await execute_turn(req, adapter, who)
+
+
+async def execute_turn(req: ChatRequestV2, adapter, who: Visitor) -> ChatReplyV2:
+    """Run one already-authorised turn and build its reply. The ONE implementation of a V2 turn: the non-streaming route and the streaming
+    run both call this, so Decision -> Risk Gate -> Execution -> Adapter, the typed-add rules and every payment guard are the same code."""
     shopper_id = await who.shopper_id_for(req.connection_id)
 
     # Durable, signed-in-shopper-only facts from a previous visit - the same

@@ -9,6 +9,7 @@ at it.
 
 from .chat import router as chat_router
 from .chat_v2 import router as chat_v2_router
+from .chat_stream import router as chat_stream_router
 from .routes import app
 from .shop import router as shop_router
 from .accounts import router as account_router
@@ -21,5 +22,6 @@ app.include_router(webhook_router)
 # Shopper V2, Stage 1 - discovery-only, read-only. Additive; does not
 # replace or affect chat_router. See engine/shopper_v2/__init__.py.
 app.include_router(chat_v2_router)
+app.include_router(chat_stream_router)
 
 __all__ = ["app"]

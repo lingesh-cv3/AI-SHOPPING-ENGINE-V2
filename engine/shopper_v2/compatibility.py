@@ -145,6 +145,8 @@ async def run_complementary_turn(
         message=message,
         items=items,
         shopping_state=state.as_prompt_dict(),
+        # this reply is shown as written after only the cart-claim screen (below), so a draft gets exactly that screen
+        stream_policy="cart_claim_screen_only",
     )
     if synthesis.text and not _claims_a_cart_action(synthesis.text):
         return (synthesis.text, evidence, all_products, synthesis.used_model)

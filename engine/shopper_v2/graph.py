@@ -74,6 +74,7 @@ from .context import build_turn_context
 from .cart_status import run_cart_status_turn
 from .cart_intelligence_v2 import run_cart_intelligence_turn
 from . import friction_recovery
+from . import streaming
 from . import fulfillment
 from .friction_recovery import run_friction_recovery_turn
 from .conversational import run_conversational_turn
@@ -1429,6 +1430,7 @@ async def _execute_secondary_operation(
         synthesis = await reasoning.synthesize(
             kind="comparison", message=message, items=items,
             shopping_state=new_state.as_prompt_dict(),
+            stream_policy="cited_reason_check",
         )
         if synthesis.text and not _claims_a_cart_action(synthesis.text):
             text, _used_model = grounded_reply_or_fallback(
@@ -4705,35 +4707,35 @@ async def node_finalize(state: ShopperTurnState) -> dict:
 def _build_graph():
     g = StateGraph(ShopperTurnState)
 
-    g.add_node("load_context", node_load_context)
-    g.add_node("understand", node_understand)
-    g.add_node("apply_delta", node_apply_delta)
-    g.add_node("topic_transition", node_topic_transition)
-    g.add_node("fulfillment_continue", node_fulfillment_continue)
-    g.add_node("guided_turn", node_guided_turn)
-    g.add_node("typed_confirm", node_typed_confirm)
-    g.add_node("cart_proposal_continue", node_cart_proposal_continue)
-    g.add_node("mission", node_mission)
-    g.add_node("tradeoff", node_tradeoff)
-    g.add_node("route_capability", node_route_capability)
-    g.add_node("reference_resolution", node_reference_resolution)
+    g.add_node("load_context", streaming.announce("load_context", node_load_context))
+    g.add_node("understand", streaming.announce("understand", node_understand))
+    g.add_node("apply_delta", streaming.announce("apply_delta", node_apply_delta))
+    g.add_node("topic_transition", streaming.announce("topic_transition", node_topic_transition))
+    g.add_node("fulfillment_continue", streaming.announce("fulfillment_continue", node_fulfillment_continue))
+    g.add_node("guided_turn", streaming.announce("guided_turn", node_guided_turn))
+    g.add_node("typed_confirm", streaming.announce("typed_confirm", node_typed_confirm))
+    g.add_node("cart_proposal_continue", streaming.announce("cart_proposal_continue", node_cart_proposal_continue))
+    g.add_node("mission", streaming.announce("mission", node_mission))
+    g.add_node("tradeoff", streaming.announce("tradeoff", node_tradeoff))
+    g.add_node("route_capability", streaming.announce("route_capability", node_route_capability))
+    g.add_node("reference_resolution", streaming.announce("reference_resolution", node_reference_resolution))
 
-    g.add_node("compare", node_compare)
-    g.add_node("compatibility", node_compatibility)
-    g.add_node("complementary", node_complementary)
-    g.add_node("cart_action", node_cart_action)
-    g.add_node("checkout", node_checkout)
-    g.add_node("payment_recovery", node_payment_recovery)
-    g.add_node("order_status", node_order_status)
-    g.add_node("cart_status", node_cart_status)
-    g.add_node("cart_intelligence", node_cart_intelligence)
-    g.add_node("friction_recovery", node_friction_recovery)
-    g.add_node("conversational", node_conversational)
-    g.add_node("unimplemented", node_unimplemented)
-    g.add_node("discovery", node_discovery)
-    g.add_node("answer_question", node_answer_question)
-    g.add_node("respond", node_respond)
-    g.add_node("finalize", node_finalize)
+    g.add_node("compare", streaming.announce("compare", node_compare))
+    g.add_node("compatibility", streaming.announce("compatibility", node_compatibility))
+    g.add_node("complementary", streaming.announce("complementary", node_complementary))
+    g.add_node("cart_action", streaming.announce("cart_action", node_cart_action))
+    g.add_node("checkout", streaming.announce("checkout", node_checkout))
+    g.add_node("payment_recovery", streaming.announce("payment_recovery", node_payment_recovery))
+    g.add_node("order_status", streaming.announce("order_status", node_order_status))
+    g.add_node("cart_status", streaming.announce("cart_status", node_cart_status))
+    g.add_node("cart_intelligence", streaming.announce("cart_intelligence", node_cart_intelligence))
+    g.add_node("friction_recovery", streaming.announce("friction_recovery", node_friction_recovery))
+    g.add_node("conversational", streaming.announce("conversational", node_conversational))
+    g.add_node("unimplemented", streaming.announce("unimplemented", node_unimplemented))
+    g.add_node("discovery", streaming.announce("discovery", node_discovery))
+    g.add_node("answer_question", streaming.announce("answer_question", node_answer_question))
+    g.add_node("respond", streaming.announce("respond", node_respond))
+    g.add_node("finalize", streaming.announce("finalize", node_finalize))
 
     g.set_entry_point("load_context")
     g.add_edge("load_context", "understand")

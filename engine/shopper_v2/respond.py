@@ -215,6 +215,23 @@ def _honest_discovery_reply(
     return (fallback, False)
 
 
+def products_haystack(products) -> str:
+    """The lower-cased title + description text of the products a reply is ABOUT (accepts `Product`s or the item dicts handed to synthesize)."""
+    parts = []
+    for p in products:
+        title = p.get("title") if isinstance(p, dict) else getattr(p, "title", "")
+        description = p.get("description") if isinstance(p, dict) else getattr(p, "description", None)
+        parts.append(f"{title} {description or ''}".lower())
+    return " ".join(parts)
+
+
+def cited_reason_supported(cited_reason: str, haystack: str) -> bool:
+    """Whether a cited reason is real, checkable text in the products' own wording. The single definition: the final check
+    (`grounded_reply_or_fallback`) and the streaming draft gate (`engine/shopper_v2/streaming.py`) both call this, so a draft is never
+    released on a rule the final reply would not also accept."""
+    return cited_reason.strip().lower() in haystack
+
+
 def grounded_reply_or_fallback(
     *, cited_reason: str | None, text: str | None, products: list[Product],
     fallback: str, used_model: bool,
@@ -244,10 +261,7 @@ def grounded_reply_or_fallback(
     if not text:
         return (fallback, False)
     if cited_reason:
-        haystack = " ".join(
-            f"{p.title} {p.description or ''}".lower() for p in products
-        )
-        if cited_reason.strip().lower() not in haystack:
+        if not cited_reason_supported(cited_reason, products_haystack(products)):
             return (fallback, False)
     # No cited_reason at all: the model made no structured claim to check,
     # matching `_honest_discovery_reply`'s own "no citation -> never

@@ -879,7 +879,7 @@ def _synthesis_prompt(
     return "\n\n".join(parts)
 
 
-def synthesis_tool() -> dict[str, Any]:
+def synthesis_tool(*, reply_last: bool = False) -> dict[str, Any]:
     """The synthesis pass's own tool schema - a third, deliberately narrow
     structural fix after two rounds of regex-based attempts at the same
     problem were each defeated by adversarial rephrasing (see
@@ -942,22 +942,23 @@ def synthesis_tool() -> dict[str, Any]:
     both this schema and `relevance_tool()`'s the same way `propose_tool()`
     already is.
     """
-    return {
-        "type": "function",
-        "function": {
-        "name": "write_synthesis",
-        "description": (
-            "Give the final shopper-facing reply and, if it personalizes the "
-            "recommendation to something the shopper stated, the exact stated "
-            "reason it is based on."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "reply": {
-                    "type": "string",
-                    "description": "The two-to-three sentence reply, grounded only in the given facts.",
-                },
+    reply_property = {
+        "type": "string",
+        "description": "The two-to-three sentence reply, grounded only in the given facts.",
+    }
+    # `reply_last=True` is for a STREAMING turn only: the same three properties, with the grounding fields listed first so a model
+    # that follows the schema order writes them before the reply - which lets the engine run its own cited_reason check BEFORE any
+    # reply text is shown (engine/shopper_v2/streaming.py). Property order is only a hint to the model; if it writes the reply first,
+    # the engine simply withholds the draft. Non-streaming calls never pass it and get the schema exactly as it always was.
+    description = (
+        "Give the final shopper-facing reply and, if it personalizes the "
+        "recommendation to something the shopper stated, the exact stated "
+        "reason it is based on."
+    )
+    if reply_last:
+        description += " Fill in personalizes and cited_reason BEFORE writing reply."
+    properties = {
+                "reply": reply_property,
                 "personalizes": {
                     "type": "boolean",
                     "description": (
@@ -978,7 +979,17 @@ def synthesis_tool() -> dict[str, Any]:
                         "is actually based on. Must be null when personalizes is false."
                     ),
                 },
-            },
+    }
+    if reply_last:
+        properties = {k: properties[k] for k in ("personalizes", "cited_reason", "reply")}
+    return {
+        "type": "function",
+        "function": {
+        "name": "write_synthesis",
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": properties,
             "required": ["reply", "personalizes"],
         },
         },

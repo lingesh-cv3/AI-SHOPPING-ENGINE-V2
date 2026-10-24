@@ -240,6 +240,7 @@ async def _try_grounded_use_case_reply(
     synthesis = await reasoning.synthesize(
         kind="comparison", message=message, items=items,
         shopping_state=(state.as_prompt_dict() if state is not None else None),
+        stream_policy="cited_reason_check",
     )
     if not synthesis.text or _claims_a_cart_action(synthesis.text):
         return None
