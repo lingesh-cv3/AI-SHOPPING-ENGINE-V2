@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
   api,
+  chatV2Stream,
+  isAbortError,
   shopperMessage,
+  StreamInterrupted,
+  StreamUnsupported,
   type ChatReply,
   type ChatReplyV2,
   type ChatTurn,
@@ -225,6 +229,14 @@ export function ChatWidget({
   // screen for one of them - an old turn, a stale tab - shows why it is off instead of offering a second payment.
   const holds = useHolds();
   const heldCart = (id?: string | null) => (id ? holds[holdKey(id)] : undefined);
+
+  // A streamed turn: what stage the engine says it is in, the PROVISIONAL draft of model text that has arrived so far (replaced by the final
+  // reply, never saved to the transcript), whether a stream is open, and the handle to stop reading it.
+  const [stage, setStage] = useState<string | null>(null);
+  const [draftText, setDraftText] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const streamingRef = useRef(false);
   // Which message has its reasoning open. One at a time: a shopper checking
   // why is checking one thing, and leaving several expanded turns the
   // conversation into a log.
@@ -351,6 +363,8 @@ export function ChatWidget({
   // money was recovered and never learn it happened.
   useEffect(() => {
     async function poll() {
+      // While a streamed turn is open the reply is arriving on the stream. Polling now would append the stored reply as a second bubble.
+      if (streamingRef.current) return;
       try {
         const { turns: stored } = await api.transcript(sessionId);
         // This poll was set up for `sessionId` (this effect's own closed-over
@@ -429,7 +443,7 @@ export function ChatWidget({
       // this widget already goes through `tap()`/`api.act` below instead,
       // never through here, so this is never actually needed for a real
       // shopper action - see the `known`-carrying callers' own comments.
-      const r: ChatReplyV2 = await api.chatV2(sessionId, said, cartId);
+      const r: ChatReplyV2 = await askAssistant(said);
       const mapped = mapV2Reply(r);
 
       // A V2 chat turn never mutates the cart on its own authority - it creates
@@ -453,10 +467,59 @@ export function ChatWidget({
         },
       ]);
     } catch (e) {
-      onTurns([...withShopper, { speaker: "assistant", text: shopperMessage(e) }]);
+      onTurns([...withShopper, { speaker: "assistant", text: streamFailureMessage(e) }]);
+      // A turn that was stopped or lost may still have changed the cart on the engine: look again.
+      if (isAbortError(e) || e instanceof StreamInterrupted) onCartChanged?.();
     } finally {
       setBusy(null);
     }
+  }
+
+  /** One assistant turn. Streams (`POST /api/v2/chat/stream`) unless streaming is switched off for this tab or the engine has no stream
+   *  endpoint, in which case it is the plain `POST /api/v2/chat` it always was. Drafts and progress only drive the typing indicator and the
+   *  draft bubble: the transcript only ever receives the final reply the caller adds. */
+  async function askAssistant(said: string, selectedVariantId?: string): Promise<ChatReplyV2> {
+    if (!streamingEnabled()) return api.chatV2(sessionId, said, cartId, undefined, selectedVariantId);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    streamingRef.current = true;
+    setStreaming(true);
+    setStage(null);
+    setDraftText("");
+    const segments = new Map<number, string>();
+    const show = () => setDraftText([...segments.entries()].sort((a, b) => a[0] - b[0]).map(([, text]) => text).join(" ").trim());
+    try {
+      return await chatV2Stream(
+        { sessionId, message: said, cartId, selectedVariantId },
+        {
+          onStatus: (s) => setStage(s.label),
+          onDelta: (d) => {
+            segments.set(d.segment, (segments.get(d.segment) ?? "") + d.text);
+            show();
+          },
+          onReset: (r) => {
+            segments.delete(r.segment);
+            show();
+          },
+        },
+        controller.signal,
+      );
+    } catch (e) {
+      // The engine has no stream endpoint (an older build): nothing was processed, so the plain route is safe.
+      if (e instanceof StreamUnsupported) return api.chatV2(sessionId, said, cartId, undefined, selectedVariantId);
+      throw e;
+    } finally {
+      streamingRef.current = false;
+      abortRef.current = null;
+      setStreaming(false);
+      setDraftText("");
+      setStage(null);
+    }
+  }
+
+  /** Stop reading the reply. The turn itself still finishes on the engine and its reply is stored (it may already have changed the cart). */
+  function stopStreaming() {
+    abortRef.current?.abort();
   }
 
   /** Answers a pending `engine/shopper_v2/fulfillment.py` question - "what
@@ -483,7 +546,7 @@ export function ChatWidget({
     setBusy("tapping");
 
     try {
-      const r = await api.chatV2(sessionId, said, cartId, undefined, c.variant_id);
+      const r = await askAssistant(said, c.variant_id);
       const mapped = mapV2Reply(r);
       onTurns([
         ...withShopper,
@@ -1010,7 +1073,30 @@ export function ChatWidget({
           </div>
         ))}
 
-        {busy && <div className="bubble assistant thinking">Thinking…</div>}
+        {busy && !draftText && (
+          <div className="bubble assistant thinking typing" data-testid="typing-indicator" role="status" aria-live="polite">
+            <span className="typing-dots" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </span>
+            <span className="typing-label">{stage ?? "Thinking…"}</span>
+          </div>
+        )}
+        {busy && draftText && (
+          <div className="bubble assistant drafting" data-testid="draft-bubble" aria-live="polite">
+            {draftText}
+            <span className="draft-caret" aria-hidden="true">
+              {" "}
+              ▍
+            </span>
+          </div>
+        )}
+        {streaming && (
+          <button type="button" className="chatstop" data-testid="stop-button" onClick={stopStreaming}>
+            Stop
+          </button>
+        )}
         <div ref={endRef} />
       </div>
 
@@ -1034,6 +1120,26 @@ export function ChatWidget({
       </form>
     </div>
   );
+}
+
+/** Streaming is on unless this tab opted out (sessionStorage `cv3_chat_stream` = "off"), which is how the plain route stays testable. */
+function streamingEnabled(): boolean {
+  try {
+    return sessionStorage.getItem("cv3_chat_stream") !== "off";
+  } catch {
+    return true;
+  }
+}
+
+/** What to tell the shopper when a streamed turn did not complete. Fixed sentences: nothing from the engine's error is shown beyond its code. */
+function streamFailureMessage(e: unknown): string {
+  if (isAbortError(e)) {
+    return "Stopped. If there is a reply it will still appear here, and your cart may already have changed.";
+  }
+  if (e instanceof StreamInterrupted) {
+    return "I lost the connection while the reply was coming. It may still appear here in a moment.";
+  }
+  return shopperMessage(e);
 }
 
 /** Renders engine/execution/return_risk.py's findings for one product - a

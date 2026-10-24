@@ -10,6 +10,8 @@
  * use this identical file.
  */
 
+import { createSseParser } from "./sse";
+
 // Relative, so requests go to the origin serving the page and Vite proxies them to
 // the engine. Absolute would make every request cross-origin and the session cookie
 // would not be sent.
@@ -669,6 +671,235 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/* ---- streamed chat turn (SSE over fetch) ---- */
+
+export interface StreamStatus {
+  stage: string;
+  label: string;
+}
+
+/** What a streamed turn reports while it runs. Every handler is optional and one that throws never breaks the stream. */
+export interface StreamHandlers {
+  onStart?: () => void;
+  onStatus?: (s: StreamStatus) => void;
+  onTool?: (t: { name: string; state: string }) => void;
+  /** A piece of PROVISIONAL model text. The final `message` is what the shopper's transcript keeps. */
+  onDelta?: (d: { segment: number; text: string }) => void;
+  /** Discard that segment's draft. */
+  onReset?: (r: { segment: number; reason: string }) => void;
+}
+
+export type ChatReplyV2Streamed = ChatReplyV2 & { draft_replaced?: boolean; streamed_chars?: number };
+
+/** The stream endpoint is not there (an older engine). Nothing was processed, so the caller may use the non-streaming route. */
+export class StreamUnsupported extends Error {}
+
+/** The connection ended before the turn's final event and could not be re-attached. The turn may still finish: its reply lands in the transcript. */
+export class StreamInterrupted extends Error {}
+
+export const STREAM_MAX_RECONNECTS = 3;
+
+export function isAbortError(e: unknown): boolean {
+  return e instanceof DOMException ? e.name === "AbortError" : e instanceof Error && e.name === "AbortError";
+}
+
+/** A fresh id for one turn (8-64 chars of [A-Za-z0-9_-]). Re-sent unchanged on every reconnect so the engine runs the turn once. */
+export function newRequestId(): string {
+  const c = (globalThis as { crypto?: Crypto }).crypto;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID().replace(/-/g, "");
+  return `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("aborted", "AbortError"));
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new DOMException("aborted", "AbortError"));
+      },
+      { once: true },
+    );
+  });
+}
+
+/**
+ * One chat turn as a Server-Sent Events stream (`POST /api/v2/chat/stream`).
+ *
+ * Resolves with the turn's FINAL message - the same object `/api/v2/chat` returns - after streaming progress and draft text to `handlers`. Rules:
+ *  - events carry increasing ids; anything with an id at or below the last seen is ignored (duplicates, replays, out-of-order), and an event whose
+ *    data is not valid JSON, or whose type is unknown, is skipped without breaking the stream;
+ *  - if the connection ends before `done` (a drop, or the server's idle close) it re-attaches up to STREAM_MAX_RECONNECTS times with the SAME request id
+ *    and `Last-Event-ID`, so the engine never runs the turn twice and nothing is delivered twice;
+ *  - an HTTP error before the stream is an `EngineError`; only a stream endpoint that is plainly absent (404/405/501 without an engine error body) is
+ *    `StreamUnsupported`, the one case where the caller may fall back to the non-streaming route (nothing was processed);
+ *  - an aborted `signal` rejects with an AbortError and stops reading; the turn itself still finishes on the engine and its reply is stored.
+ */
+export async function chatV2Stream(
+  params: {
+    sessionId: string;
+    message: string;
+    cartId?: string;
+    friction?: string;
+    selectedVariantId?: string;
+    frictionQuery?: string;
+    requestId?: string;
+  },
+  handlers: StreamHandlers = {},
+  signal?: AbortSignal,
+): Promise<ChatReplyV2Streamed> {
+  const requestId = params.requestId ?? newRequestId();
+  const body = JSON.stringify({
+    connection_id: getConnection(),
+    session_id: params.sessionId,
+    message: params.message,
+    cart_id: params.cartId ?? null,
+    friction: params.friction ?? null,
+    selected_variant_id: params.selectedVariantId ?? null,
+    friction_query: params.frictionQuery ?? null,
+    request_id: requestId,
+  });
+
+  let lastId = 0;
+  let final: ChatReplyV2Streamed | null = null;
+  let failure: { code: string; message: string; retryable: boolean } | null = null;
+  let finished = false;
+
+  const safely = (fn: (() => void) | undefined) => {
+    try {
+      fn?.();
+    } catch {
+      // a consumer bug must never break the stream
+    }
+  };
+
+  function onEvent(ev: { id: string | undefined; event: string; data: string }) {
+    let data: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(ev.data);
+      if (parsed === null || typeof parsed !== "object") return;
+      data = parsed as Record<string, unknown>;
+    } catch {
+      return; // malformed event: skipped
+    }
+    if (ev.id !== undefined) {
+      const id = Number(ev.id);
+      if (!Number.isFinite(id)) return;
+      if (id <= lastId) return; // a duplicate or a replay of something already handled
+      lastId = id;
+    }
+    switch (ev.event) {
+      case "start":
+        safely(() => handlers.onStart?.());
+        break;
+      case "status":
+        if (typeof data.stage === "string" && typeof data.label === "string") safely(() => handlers.onStatus?.({ stage: data.stage as string, label: data.label as string }));
+        break;
+      case "tool":
+        if (typeof data.name === "string" && typeof data.state === "string") safely(() => handlers.onTool?.({ name: data.name as string, state: data.state as string }));
+        break;
+      case "delta":
+        if (typeof data.text === "string") safely(() => handlers.onDelta?.({ segment: Number(data.segment ?? 0), text: data.text as string }));
+        break;
+      case "reset":
+        safely(() => handlers.onReset?.({ segment: Number(data.segment ?? 0), reason: String(data.reason ?? "") }));
+        break;
+      case "message":
+        if (typeof data.reply === "string") final = data as unknown as ChatReplyV2Streamed;
+        break;
+      case "error":
+        failure = {
+          code: typeof data.code === "string" ? data.code : "TURN_FAILED",
+          message: typeof data.message === "string" ? data.message : "Something went wrong with that message. Please try again.",
+          retryable: data.retryable !== false,
+        };
+        break;
+      case "done":
+        finished = true;
+        break;
+      default:
+        break; // an event type this client does not know: ignored
+    }
+  }
+
+  for (let attempt = 0; attempt <= STREAM_MAX_RECONNECTS; attempt++) {
+    if (attempt > 0) await sleep(400 * attempt, signal);
+
+    let res: Response;
+    try {
+      res = await fetch(`${ENGINE}/api/v2/chat/stream`, {
+        method: "POST",
+        credentials: "same-origin",
+        signal,
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+          Authorization: `Bearer ${publishableKey(getConnection())}`,
+          // Custom on a POST (EventSource would send it by itself): resume after the last event handled.
+          ...(lastId > 0 ? { "Last-Event-ID": String(lastId) } : {}),
+        },
+        body,
+      });
+    } catch (e) {
+      if (isAbortError(e) || signal?.aborted) throw e;
+      if (attempt === STREAM_MAX_RECONNECTS) throw new StreamInterrupted("could not reach the engine");
+      continue;
+    }
+
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => "");
+      const detail: unknown = (() => {
+        try {
+          return JSON.parse(text)?.detail;
+        } catch {
+          return null;
+        }
+      })();
+      if (detail && typeof detail === "object") {
+        const d = detail as { code?: string; message?: string; retryable?: boolean };
+        throw new EngineError(d.code ?? "UNKNOWN", d.message ?? "", d.retryable ?? false);
+      }
+      if ((res.status === 404 || res.status === 405 || res.status === 501) && lastId === 0) throw new StreamUnsupported(`no stream endpoint (${res.status})`);
+      if (res.status >= 500 && attempt < STREAM_MAX_RECONNECTS) continue; // a proxy hiccup: the same request id makes a retry safe
+      throw new EngineError("UNKNOWN", `request failed (${res.status})`, false);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const parser = createSseParser(onEvent);
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        parser.feed(decoder.decode(value, { stream: true }));
+        if (finished) break;
+      }
+    } catch (e) {
+      if (isAbortError(e) || signal?.aborted) throw e;
+      // a dropped connection: fall through and re-attach
+    } finally {
+      parser.end();
+      try {
+        await reader.cancel();
+      } catch {
+        // already closed
+      }
+    }
+
+    if (finished) {
+      if (final) return final;
+      if (failure) {
+        const f = failure as { code: string; message: string; retryable: boolean };
+        throw new EngineError(f.code, f.message, f.retryable);
+      }
+      throw new StreamInterrupted("the stream ended without a reply");
+    }
+  }
+  throw new StreamInterrupted("the connection kept dropping");
+}
+
 const shop = (p: string) => `/api/shop/${CONNECTION}${p}`;
 
 export const api = {
@@ -959,6 +1190,16 @@ export function shopperMessage(err: unknown): string {
       return "That order's already placed. Start a new cart to buy something else.";
     case "PAYMENT_DECLINED":
       return "Your payment didn't go through.";
+    case "TURN_FAILED":
+      return "Something went wrong with that message. Please try again.";
+    case "TURN_IN_PROGRESS":
+      return "I'm still answering your last message - give me a moment.";
+    case "STREAM_BUSY":
+      return "I'm busy with a lot of conversations right now. Try again in a moment.";
+    case "TURN_ALREADY_HANDLED":
+      return "That message was already handled - its reply is in this conversation.";
+    case "REQUEST_ID_REUSED":
+      return "Something went wrong with that message. Please try again.";
     case "PAYMENT_OUTCOME_UNKNOWN":
       return "We couldn't confirm whether your payment went through, so your basket is on hold. Please don't pay again.";
     case "CHECKOUT_IN_PROGRESS":

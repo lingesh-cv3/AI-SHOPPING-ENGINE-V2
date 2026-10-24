@@ -238,6 +238,10 @@ test('a clean decline does NOT hold the basket: the shopper can try another card
 /** The assistant's payment picker for the stored basket, built from a mocked checkout turn (the engine's real checkout offer
  *  is covered by test_payment_hold_checkout_offer.py; this needs the picker on screen deterministically). */
 async function mockCheckoutOffer(page: Page, cartId: string) {
+  // These tests mock the plain `/api/v2/chat` reply; the picker, not the transport, is under test, so this tab uses the plain route
+  // (the widget streams by default - see chat-streaming.spec.ts).
+  await page.addInitScript(() => sessionStorage.setItem('cv3_chat_stream', 'off'));
+  await page.evaluate(() => sessionStorage.setItem('cv3_chat_stream', 'off')).catch(() => {});
   await page.route(CHAT_V2, (route) =>
     route.fulfill({
       status: 200,
