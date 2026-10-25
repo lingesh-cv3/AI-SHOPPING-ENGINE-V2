@@ -179,6 +179,34 @@ async def may_touch(
     return held in keys
 
 
+async def latest_owned(
+    connection_id: str, kind: str, owner_keys: Iterable[str]
+) -> str | None:
+    """The most recently claimed thing of this kind held by ANY of these keys, or None.
+
+    This is how "my last order" is answered for somebody who paid from the cart panel
+    (which claims the order but records no conversation turn), came back on another
+    device, or returned as a guest in a new conversation: ownership is the one record
+    that follows the shopper, and it is already tenant-scoped and key-scoped. A caller
+    with no keys owns nothing.
+    """
+    keys = [k for k in owner_keys if k]
+    if not keys:
+        return None
+    async with session_scope() as db:
+        result = await db.execute(
+            select(ResourceOwner.resource_id)
+            .where(
+                ResourceOwner.connection_id == connection_id,
+                ResourceOwner.kind == kind,
+                ResourceOwner.owner_key.in_(keys),
+            )
+            .order_by(ResourceOwner.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
 async def adopt(
     connection_id: str,
     kind: str,

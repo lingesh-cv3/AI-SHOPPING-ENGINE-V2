@@ -61,9 +61,10 @@ async def main() -> None:
         no_order_reply, no_order_payload = await run_order_status_turn(
             decision=engine.decision, gate=engine.gate, execution=engine.execution,
             connection_id=connection_id, session_id="sess_with_no_history",
-            message="did my order go through?", hinted_order_id=None, owner_keys=[owner_key],
+            message="did my order go through?", hinted_order_id=None, owner_keys=["pk_nobody_with_orders"],
         )
         check("no known order -> honest decline, not a fabricated status", no_order_payload is None)
+        # (the OWNER asking with no id now resolves their own newest order: see test_order_recovery_by_owner.py)
 
         # 2. An explicit order id, owned by the caller -> real status +
         #    real line items disclosed.

@@ -46,7 +46,13 @@ async def run_order_status_turn(
     """Returns (reply, payload_or_None). Never infers purchase success from
     anything but the real, authoritative order the adapter returns - never
     from an attempted payment, never from conversation memory."""
-    order_id = hinted_order_id or await session_store.latest_order(session_id, connection_id)
+    # An id the shopper named wins. Otherwise "my order" is the newest order THIS caller holds (their account, else their browser) - that covers a
+    # purchase made from the cart panel, a new device and a new conversation - and only then the newest order this conversation itself recorded.
+    order_id = hinted_order_id
+    if not order_id and owner_keys:
+        order_id = await db.owners.latest_owned(connection_id, db.owners.ORDER, owner_keys)
+    if not order_id:
+        order_id = await session_store.latest_order(session_id, connection_id)
     if not order_id:
         return (_NO_ORDER_REPLY, None)
 
