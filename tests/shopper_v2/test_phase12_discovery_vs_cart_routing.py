@@ -222,7 +222,7 @@ async def main() -> None:
     adapter = engine.registry.adapter_for(connection_id)
 
     if engine.reasoning is None or not engine.reasoning.enabled:
-        check("model not configured - live discovery-vs-cart checks honestly skipped", True)
+        print("  SKIP    live discovery-vs-cart routing: needs a configured live model, none is configured here - NOT RUN, nothing was asserted")
         await engine.close()
         await dispose()
         return

@@ -489,7 +489,7 @@ async def run_checks(engine, guided_mission) -> None:
         check("it is skipped and the next stage becomes the open one",
               items[0]["stage"] == "unavailable" and "socks" in r.reply.lower())
     else:
-        check("(sold-out fixture product not present - sold-out stage check skipped)", True)
+        print("  SKIP    sold-out stage: the sold-out-only fixture product is not in this catalogue - NOT RUN, nothing was asserted")
 
     class DownAdapter:
         def __init__(self, real):

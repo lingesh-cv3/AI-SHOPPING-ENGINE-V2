@@ -78,7 +78,7 @@ async def _live_checks() -> None:
     adapter = engine.registry.adapter_for(connection_id)
 
     if engine.reasoning is None or not engine.reasoning.enabled:
-        check("model not configured - live cart-status check honestly skipped", True)
+        print("  SKIP    live cart-status: needs a configured live model, none is configured here - NOT RUN, nothing was asserted")
         await engine.close()
         await dispose()
         return

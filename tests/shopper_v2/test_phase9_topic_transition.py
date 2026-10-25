@@ -144,8 +144,8 @@ def main() -> bool:
     try:
         apply_transition(focus_stack=[], decision=TransitionResult("ambiguous_mission_check", "m1", True))
         check("apply_transition rejects ambiguous_mission_check (caller must resolve first)", False)
-    except ValueError:
-        check("apply_transition rejects ambiguous_mission_check (caller must resolve first)", True)
+    except ValueError as exc:
+        check("apply_transition rejects ambiguous_mission_check (caller must resolve first), saying why", "ambiguous" in str(exc).lower())
 
     return all(ok for _, ok in _checks)
 
