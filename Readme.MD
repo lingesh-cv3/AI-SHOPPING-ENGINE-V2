@@ -237,6 +237,8 @@ reconciles with evidence (a paid order settles the basket, a complete absence af
 Operators see `GET /api/ops/payments/unresolved` and can `reconcile` or `resolve` (the platform's records outrank their decision). The whole sequence lives in
 `engine/execution/payment_guard.py` and `payment_reconcile.py`. This is verified locally only; see `PAYMENT_SAFETY_INVESTIGATION.md` for what is not established.
 
+**Order lookup without a number.** "Did my order go through?" resolves, in order, to an order id the shopper named, the newest order their own keys hold (`db.owners.latest_owned`: their account, else their browser - so a cart-panel purchase, another device and a new conversation all work), then the newest order this conversation recorded. A different shopper, a different merchant or a caller with no keys resolves nothing and the assistant asks for the number.
+
 The cart a shopper reads carries `payment_state` (`paid`, `in_flight`, `unknown`, or null); the storefront disables payment for a held basket and shows why, and fails closed
 when a payment request dies without a clean answer (the server's guards stay authoritative). The checkout offer is not made for a held or paid basket. Each unknown-outcome
 episode raises one deduplicated merchant task (`PAYMENT_UNRESOLVED`, in Merchant Tasks, closing itself when the payment is resolved) and counts in `GET /api/ops/stats`
@@ -273,7 +275,7 @@ and cart changes still need a proposal accept or an unambiguous typed add, exact
 The widget falls back to `/api/v2/chat` only when the stream endpoint is plainly absent (404/405/501), or when a tab sets `sessionStorage.cv3_chat_stream = "off"`. It shows a typing
 indicator until the first draft text, a draft bubble that the final reply replaces, and a Stop button; the transcript poll is suspended while a stream is open.
 
-Limits: the draft may differ from the final reply; runs and tombstones live in one engine process's memory (a restart loses replay AND the duplicate guard - a retry of a pre-restart `request_id` would run again, and a turn that hangs holds its session until the engine restarts: there is no turn timeout); the single-flight guard covers stream
+Limits: the draft may differ from the final reply; runs and tombstones live in one engine process's memory (a restart loses replay AND the duplicate guard - a retry of a pre-restart `request_id` would run again); a turn still running after `TURN_TIMEOUT_SECONDS` (150) makes the stream send `TURN_TIMEOUT` and frees the session, while the turn itself is never cancelled and records its reply if it finishes; the single-flight guard covers stream
 against stream only (not `/api/v2/chat`, taps or `mission/advance`); `first_text_ms` is not persisted; when the model writes `reply` before the grounding fields the draft is held until
 they arrive; behaviour against a live provider is not verified.
 
@@ -479,6 +481,8 @@ POST  /api/v2/chat
 POST  /api/v2/chat/stream     (SSE, see "Streamed replies")
 GET   /api/chat/{connection}/{session_id}
 POST  /api/simulate
+GET   /api/account/memory?connection_id=     (a signed-in shopper's remembered facts)
+DELETE /api/account/memory?connection_id=&fact_key=   (forget one fact, or all when fact_key is omitted)
 ```
 
 `/api/chat` takes a message and optionally a friction type, and returns the reply,

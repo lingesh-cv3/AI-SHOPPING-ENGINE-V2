@@ -40,8 +40,16 @@ counted as unfinished implementation work.
 - Protocol, client behaviour and compatibility: Readme.MD "Streamed replies (SSE)"; verified items: Completed.md. Verification used a fake model only (httpx MockTransport and a local OpenAI-compatible
   fake provider); no real provider was contacted. Tests needing a live model were not run, and no live-provider reliability or time-to-first-text figure is claimed.
 - Open: the draft is provisional and may differ from the final reply; which key order a real model writes (`reply` before the grounding fields delays the first draft) is unmeasured; deterministic turns and
-  discovery never stream text (status + final only); runs and the 24 h duplicate-request tombstones live in one process's memory (a restart loses replay and the guard: a retry of a pre-restart request id would run the turn again; a hung turn blocks its session - no turn timeout); the single-flight guard covers stream-vs-stream only (not `/api/v2/chat`,
+  discovery never stream text (status + final only); runs and the 24 h duplicate-request tombstones live in one process's memory (a restart loses replay and the guard: a retry of a pre-restart request id would run the turn again); a turn running past 150 s stops blocking its session (`TURN_TIMEOUT`) but is never cancelled, so a second message can then run beside it (cart changes stay behind the atomic proposal claim; transcript order may interleave); the single-flight guard covers stream-vs-stream only (not `/api/v2/chat`,
   taps or `mission/advance`); `first_text_ms` is not persisted so no merchant/ops figure moves yet; no CI gate runs the new tests; the first browser run after a cold Vite start can reload the page mid-test.
+
+### Core shopper audit (2026-10-25) — remaining verified gaps, none a code blocker for starting Operations work
+- Closed in this pass (see Completed.md): order lookup by ownership, superlative honesty (currency, stock), shopper memory view/forget, stream turn timeout, comparison facts + model-free ratings.
+- Open, measured or documented: discovery is the adapter's own search + word overlap with spell correction (no synonym/meaning step; `eval/results/baseline_latest.json` covers retrieval only, no comparison
+  category, one kettle case drives `false_decline_rate` 1.0); comparison attributes are price/rating/description only (no spec-field comparison, a model-free comparison states no pick unless asked to recommend);
+  returning-shopper personalization reads only stated facts - `ShopperEvent` purchase/keep/return history is still write-only; the order lookup resolves the NEWEST order only (no "my earlier order", no list);
+  durable stream dedupe across an engine restart needs a persisted request id (not built). Technology choices (embeddings, rerank) stay evidence-gated per CLAUDE.md.
+- Release blockers unchanged: payment safety against a real platform and real idempotency/lookup semantics, no live-model verification of the new paths, ~40k-SKU volume checked structurally only, no CI gate.
 
 ### Shopper V2 — the only shopper routing — ~90% complete
 - `/api/v2/chat` (`engine/shopper_v2/`, routed via `engine/api/chat_v2.py`)

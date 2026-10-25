@@ -159,6 +159,13 @@ partial, unverified, or unbuilt.
   cross-merchant/cross-owner refusal) and 17 Playwright tests, including one against the real engine and a local slow fake provider showing the
   first visible text arrives while the provider is still writing. The live-provider behaviour is not verified (see PROGRESS.md).
 
+- **Order lookup without an order number follows ownership.** `run_order_status_turn` resolves a named id, else the newest order the caller's own keys hold
+  (`db.owners.latest_owned`: account first, else browser), else the conversation's own newest. Before, only orders recorded in the conversation were found, so a cart-panel purchase,
+  a new device or a new conversation got "I don't have an order number". Verified model-free with a real Northfield checkout (`test_order_recovery_by_owner.py`, shown failing on the old code),
+  incl. other-shopper, no-keys and other-merchant refusals. A real platform's order semantics are not verified.
+- **Superlatives stay honest.** "Cheapest/most expensive" is never ranked across currencies (no honest answer, no exchange rate), a sold-out pick is labelled out of stock, the model-free
+  comparison shows ratings when the platform has them, and the comparison facts the model sees now include rating and categories (`test_superlative_honesty.py`, failing before).
+
 ## Product Discovery & Recommendations
 
 - **Live-fetch product comparison**: both compared products are always
@@ -222,6 +229,9 @@ partial, unverified, or unbuilt.
   mission-item turns (multi-product tracking) — not just plain discovery.
   `ShopperMemoryFact` upserts with supersession and per-connection/shopper
   isolation.
+- **A signed-in shopper can see and forget what is remembered about them** (`GET/DELETE /api/account/memory`, the account menu's "What I remember about you"): own rows only, per merchant,
+  guest refused; the model never sees a forgotten fact. Verified by `test_shopper_memory_control.py` (listing, single/all delete, other shopper, other merchant, guest) and
+  `shopper-memory.spec.ts` (5 browser tests; the endpoints are mocked there).
 - **Write-only interaction instrumentation** (`ShopperEvent`): impressions,
   comparisons, cart adds/removes, checkout starts, purchases — logged for
   every relevant turn, not yet read back into ranking (tracked in
