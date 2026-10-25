@@ -163,6 +163,42 @@ export function setEmail(
   });
 }
 
+export interface RememberedFact {
+  key: string;
+  value: string;
+  provenance: string;
+}
+
+/** What the assistant remembers about this signed-in shopper here. A failure is an empty list plus `ok: false`, never a made-up one. */
+export async function rememberedFacts(connectionId: string): Promise<{ ok: boolean; facts: RememberedFact[] }> {
+  try {
+    const res = await fetch(`${ENGINE}/api/account/memory?connection_id=${connectionId}`, {
+      credentials: "same-origin",
+      headers: { Authorization: `Bearer ${publishableKey(connectionId)}` },
+    });
+    if (!res.ok) return { ok: false, facts: [] };
+    const data = await res.json();
+    return { ok: true, facts: Array.isArray(data?.facts) ? (data.facts as RememberedFact[]) : [] };
+  } catch {
+    return { ok: false, facts: [] };
+  }
+}
+
+/** Forget one fact, or all of them when `factKey` is omitted. True only when the engine confirmed it. */
+export async function forgetFacts(connectionId: string, factKey?: string): Promise<boolean> {
+  try {
+    const q = `connection_id=${connectionId}${factKey ? `&fact_key=${encodeURIComponent(factKey)}` : ""}`;
+    const res = await fetch(`${ENGINE}/api/account/memory?${q}`, {
+      method: "DELETE",
+      credentials: "same-origin",
+      headers: { Authorization: `Bearer ${publishableKey(connectionId)}` },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function signOut(): Promise<void> {
   await fetch(`${ENGINE}/api/account/signout`, {
     method: "POST",

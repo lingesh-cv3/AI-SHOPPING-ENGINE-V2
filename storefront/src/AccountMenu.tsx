@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { type Account, signOut } from "./account";
+import { type Account, type RememberedFact, forgetFacts, rememberedFacts, signOut } from "./account";
 import { getConnection, pathFor } from "./api";
 /**
  * The shopper's name in the masthead, and the way out.
@@ -18,6 +18,8 @@ export function AccountMenu({
   onAccount: (next: Account | null) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // "What I remember": null = closed, otherwise the list as last read from the engine (never a guess).
+  const [memory, setMemory] = useState<{ ok: boolean; facts: RememberedFact[] } | null>(null);
   const box = useRef<HTMLDivElement>(null);
 
   // Close on a click anywhere else, and on Escape.
@@ -71,6 +73,53 @@ export function AccountMenu({
           <span className="acctmenu-who">
             Signed in as {account.username}
           </span>
+
+          <button
+            className="acctmenu-item"
+            role="menuitem"
+            data-testid="memory-open"
+            onClick={async () => setMemory(await rememberedFacts(getConnection()))}
+          >
+            What I remember about you
+          </button>
+
+          {memory && (
+            <div className="acctmenu-memory" data-testid="memory-panel">
+              {!memory.ok ? (
+                <p>I couldn't load that just now.</p>
+              ) : memory.facts.length === 0 ? (
+                <p>Nothing yet. I only keep what you tell me you prefer.</p>
+              ) : (
+                <>
+                  <ul>
+                    {memory.facts.map((f) => (
+                      <li key={f.key}>
+                        <span>{f.value}</span>
+                        <button
+                          type="button"
+                          data-testid="memory-forget"
+                          onClick={async () => {
+                            if (await forgetFacts(getConnection(), f.key)) setMemory(await rememberedFacts(getConnection()));
+                          }}
+                        >
+                          Forget
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  <button
+                    type="button"
+                    data-testid="memory-forget-all"
+                    onClick={async () => {
+                      if (await forgetFacts(getConnection())) setMemory(await rememberedFacts(getConnection()));
+                    }}
+                  >
+                    Forget everything
+                  </button>
+                </>
+              )}
+            </div>
+          )}
 
           <button
             className="acctmenu-item"

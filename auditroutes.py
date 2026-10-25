@@ -140,6 +140,7 @@ REFUSED_CODES = {401, 403, 404}
 
 # (label, method, path, right key, a wrong key that must be refused, body)
 PROBES = [
+    ("shopper memory read", "GET", "/api/account/memory?connection_id=conn_demo", PK_DEMO, PK_KETTLE, None),
     ("shop search", "GET", "/api/shop/conn_kettle/search?q=coffee", PK_KETTLE, PK_DEMO, None),
     ("shop product", "GET", "/api/shop/conn_kettle/product/KB-ETH-01", PK_KETTLE, PK_DEMO, None),
     ("shop departments", "GET", "/api/shop/conn_demo/departments", PK_DEMO, PK_KETTLE, None),

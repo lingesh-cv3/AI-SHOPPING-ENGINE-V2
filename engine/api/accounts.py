@@ -374,6 +374,37 @@ class SetEmail(BaseModel):
     email: str = Field(min_length=3, max_length=255)
 
 
+@router.get("/memory")
+async def memory(
+    connection_id: str,
+    key=Depends(any_key),
+    cv3_shopper: str | None = Cookie(default=None),
+) -> dict:
+    """What the assistant remembers about this signed-in shopper at this merchant (their own stated preferences, newest first). A guest has nothing stored."""
+    belongs_to(key, connection_id)
+    session = await db.shopper_sessions.resolve(cv3_shopper, connection_id)
+    if session is None:
+        return {"signed_in": False, "facts": []}
+    facts = await db.memory_facts.for_shopper(connection_id, session["shopper_id"], limit=100)
+    return {"signed_in": True, "facts": [{"key": f["key"], "value": f["value"], "provenance": f["provenance"]} for f in facts]}
+
+
+@router.delete("/memory")
+async def forget_memory(
+    connection_id: str,
+    fact_key: str | None = None,
+    key=Depends(any_key),
+    cv3_shopper: str | None = Cookie(default=None),
+) -> dict:
+    """Forget one remembered fact (`fact_key`) or everything remembered here. Only the signed-in shopper's own rows, only at this merchant."""
+    belongs_to(key, connection_id)
+    session = await db.shopper_sessions.resolve(cv3_shopper, connection_id)
+    if session is None:
+        raise HTTPException(401, detail={"code": "SIGN_IN_REQUIRED", "message": "sign in to manage what is remembered", "retryable": False})
+    removed = await db.memory_facts.forget(connection_id, session["shopper_id"], key=fact_key)
+    return {"forgotten": removed}
+
+
 @router.post("/email")
 async def set_email(
     body: SetEmail,

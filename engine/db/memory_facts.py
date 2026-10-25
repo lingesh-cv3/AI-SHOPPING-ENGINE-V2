@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from .models import ShopperMemoryFact
 from .session import session_scope
@@ -77,6 +77,23 @@ async def upsert(
         row.confidence = confidence
         row.source_session_id = source_session_id
         row.updated_at = datetime.now(UTC)
+
+
+async def forget(connection_id: str, shopper_id: str, *, key: str | None = None) -> int:
+    """Delete one remembered fact (`key`) or, with no key, all of this shopper's facts at this merchant. Returns how many rows went.
+
+    Scoped by BOTH connection and shopper in the same statement, so a key that exists for somebody else - or at another merchant - is simply not found.
+    A deleted fact is gone, not expired: "forget" means the model never sees it again and a later statement starts fresh.
+    """
+    async with session_scope() as db:
+        stmt = delete(ShopperMemoryFact).where(
+            ShopperMemoryFact.connection_id == connection_id,
+            ShopperMemoryFact.shopper_id == shopper_id,
+        )
+        if key is not None:
+            stmt = stmt.where(ShopperMemoryFact.key == key)
+        result = await db.execute(stmt)
+        return result.rowcount or 0
 
 
 async def for_shopper(
