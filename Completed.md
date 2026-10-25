@@ -153,7 +153,7 @@ partial, unverified, or unbuilt.
   reported as ordered, id'd events with heartbeats. Comparison, recommendation and compatibility replies stream REAL provider tokens
   (OpenAI-compatible `stream=True`; only the `reply` field of the forced `write_synthesis` call is forwarded; the engine's own grounding/cart-claim
   check runs before any draft is shown, with a `reset` if it fails); every other turn sends whitelisted status + the final message. A run registry
-  makes reconnect (`Last-Event-ID` + `request_id`) replay without re-executing (a late retry is refused, in-process memory only), one turn per session, owner-matched, capped; disconnect/Stop never
+  makes reconnect (`Last-Event-ID` + `request_id`) replay without re-executing (durable: the request id and outcome are stored in `stream_runs` before the turn runs, so after an engine restart a finished turn replays, an interrupted one is refused and never re-run, and an unknown resume is refused; verified by killing a real engine process), one turn per session, owner-matched, capped; disconnect/Stop never
   cancels the turn. The widget shows a typing indicator, a provisional draft bubble replaced by the final reply, and Stop; the plain route is
   the fallback. Verified model-free: ~200 backend checks (parser, LLM stream client, sink gate, endpoint over real HTTP incl. replay-once cart change,
   cross-merchant/cross-owner refusal) and 17 Playwright tests, including one against the real engine and a local slow fake provider showing the

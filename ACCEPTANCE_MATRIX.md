@@ -16,8 +16,8 @@ isolated stack. Every run used a disposable copy of `cv3_v2verify.db`; the prote
 | 5 | Cart management | typed add; ambiguous add asks; sized add asks size; clear; remove | mutation only by accept/typed unambiguous add; one change per command | MF, Browser | `test_explicit_add_executes`, `test_step17_*`, `test_phase6_cart_change_operations`, closeout/proposals specs | Pass |
 | 6 | Checkout / payment safety | pay; ambiguous outcome; second card; recover; recycled cart id | UNKNOWN_OUTCOME holds, no double charge, fixed wording, one alert | MF, Browser | `test_payment_*`, payment-hold spec, fuzz | Pass against the DEMO platforms only; RP not run |
 | 7 | Order lookup | by id; no id as owner; new conversation; other shopper; other merchant | owner finds own newest; strangers and other merchants find nothing | MF | `test_phase6_order_status`, `test_order_recovery_by_owner` | Pass |
-| 8 | SSE stream | events in order; reconnect; replay; timeout; late retry; restart; disconnect | one execution per request id, no duplicate transcript, fixed error text | MF, FP, Browser | `test_chat_stream_endpoint` (7b-7f added), `test_llm_streaming`, `test_turn_stream_sink`, chat-streaming/sse-parser specs | Pass; real-provider streaming is LM, not run |
-| 9 | Restart behaviour | resume (Last-Event-ID>0) after the in-memory runs are gone | refuse, never re-execute | MF | `test_chat_stream_endpoint` 7d | **Defect found and fixed** (see below); process restart is simulated by clearing the registry, not by killing the engine |
+| 8 | SSE stream | events in order; reconnect; replay; timeout; late retry; restart; disconnect | one execution per request id, no duplicate transcript, fixed error text | MF, FP, Browser | `test_chat_stream_endpoint` (7b-7f), `test_stream_durable_store`, `test_stream_restart_process`, `test_llm_streaming`, `test_turn_stream_sink`, chat-streaming/sse-parser specs | Pass; real-provider streaming is LM, not run |
+| 9 | Restart behaviour | kill the engine process after a finished turn and mid-turn; restart on the same database; resend the same request id, another visitor, another message, a resume, two at once | finished: replayed, cart/transcript unchanged; interrupted: 409 `TURN_INTERRUPTED`, provider not asked again; stranger 404; other message 409; one run for simultaneous posts | MF, FP | `test_stream_restart_process` (real process kill), `test_stream_durable_store`, `test_chat_stream_endpoint` 7b/7d | Pass (shown failing against the old in-memory registry: 5 checks). Single SQLite database only |
 | 10 | Concurrent turns | streamed + plain turn on one session at once | both finish, nothing lost or duplicated | MF | `test_chat_stream_endpoint` 7e | Pass; transcript is in COMPLETION order (the slower streamed turn lands last) |
 | 11 | Memory | list; forget one/all; supersede; other shopper/merchant; guest | own rows only; newer value replaces; guest has none | MF, Browser (mocked) | `test_shopper_memory_control`, shopper-memory spec | Pass; a live turn storing a fact and that fact changing a later ranking are LM, not run |
 | 12 | Tenant / shopper isolation | every route family, two cookie jars, cross-merchant keys | refused, 404 for not-yours | MF, Browser | `auditroutes.py`, `fuzz.py`, `test_tenant_isolation_v2`, `*_tenant_isolation`, tenant-isolation spec | Pass |
@@ -33,12 +33,13 @@ isolated stack. Every run used a disposable copy of `cv3_v2verify.db`; the prote
 - NOT RUN: live-model tests (`healthcheck.py` is model-throttled; the tapped-card and real-chat-question specs), real-platform and real-payment tests, service-stopping platform-down specs, checkout Leg B.
 
 ## Defects found by this audit
-1. **Resume after restart re-ran the turn** (confirmed: a resume with `Last-Event-ID > 0` for an unknown run executed the add again and wrote a second transcript entry). Fixed: such a request is refused `STREAM_RUN_LOST`.
+1. **A restart let an already-handled turn run again** (confirmed with a real process kill: the same request id re-ran the turn, transcript 3 -> 5, a second provider request; an interrupted turn also re-ran). Fixed in two steps: a resume of an unknown run is refused `STREAM_RUN_LOST`, and request ids/outcomes are now durable (`stream_runs`; finished turns replay, interrupted ones are refused `TURN_INTERRUPTED`).
 2. A model-free comparison did not label a sold-out product. Fixed.
 
 ## Weak or stale tests found (not all fixed)
-- Vacuous `check(..., True)` "honestly skipped" passes in `test_phase11_measurement`, `test_phase12_*`, `test_phase13_*`, `test_phase9_tradeoff`, `test_query_intent_consolidation`; `test_phase9_topic_transition:148` asserts nothing. They pass with no model and prove nothing.
-  (One in the stream test, `... or True`, was fixed.) `testshopper.py` is a manual script, not a suite.
+- FIXED (2026-10-25): the six vacuous `check(..., True)` passes (`test_phase11_measurement`, `test_phase12_*`, `test_phase13_*`, `test_phase9_tradeoff`, `test_query_intent_consolidation`, `test_step14_*`) are now explicit
+  `SKIP ... NOT RUN` lines that state why (live model needed / fixture absent) and are reported as skips by the suite runner; `test_phase9_topic_transition` now asserts the rejection's reason; the stream test's `... or True` is gone.
+  Still true: a SKIPped file prints its summary line ("all ... checks passed") for the checks that did run, so read the SKIP lines. `testshopper.py` is a manual script, not a suite.
 - Completed.md's "27 files" under `tests/shopper_v2/` was stale (about 100 now).
 
 ## 40k-SKU path (separate assessment)
@@ -49,5 +50,5 @@ isolated stack. Every run used a disposable copy of `cv3_v2verify.db`; the prote
 
 ## Release blockers (unchanged by this audit)
 Payment safety is verified only against demo platforms (real idempotency/lookup semantics unknown); no live-model verification of streaming, grounding gates or memory-driven ranking; 40k-SKU quality/latency/concurrency
-unmeasured; stream replay state and the duplicate-request guard are in one process's memory (a restart loses them; resumes are now refused, first attempts are not deduplicated across a restart);
+unmeasured; stream request ids are now durable on one SQLite database (a second engine process or a different database is untested; ids older than 7 days are not recognised; a turn in flight at a crash is lost, not resumed);
 no CI gate runs any of this.
