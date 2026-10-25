@@ -137,8 +137,8 @@ def _deterministic_superlative(message: str, products: list[Product]) -> str | N
     which = "cheapest" if query_intent.superlative == "min" else "most expensive"
     if query_intent.sort_attribute == "rating":
         which = "best rated" if query_intent.superlative == "max" else "lowest rated"
-        return f"The {which} one I showed you was {pick.title}, rated {pick.rating}."
-    return f"The {which} one I showed you was {pick.title}, at {pick.price}."
+        return f"The {which} one I showed you was {pick.title}, rated {pick.rating}{ranking.availability_note(pick)}."
+    return f"The {which} one I showed you was {pick.title}, at {pick.price}{ranking.availability_note(pick)}."
 
 
 def _named_list(products: list[Product]) -> str:
@@ -289,6 +289,9 @@ async def run_compare_turn(
                     "price": str(p.price) if p.price is not None else None,
                     "availability": str(p.availability),
                     "description": p.description,
+                    "rating": p.rating,
+                    "rating_count": p.rating_count,
+                    "categories": p.categories,
                 }
                 for p in historical_products
             ]
@@ -425,6 +428,9 @@ async def run_compare_turn(
             "price": str(p.price) if p.price is not None else None,
             "availability": str(p.availability),
             "description": p.description,
+            "rating": p.rating,
+            "rating_count": p.rating_count,
+            "categories": p.categories,
         }
         for p in products
     ]
@@ -485,7 +491,13 @@ def _deterministic_comparison(products: list[Product]) -> str:
     """N-ary, production architecture (2026-09) Phase 5 - "which of these
     is the best value" over a real 4-item shown set names all 4, never
     silently narrows to the first two."""
-    parts = [f"{p.title}" + (f" ({p.price})" if p.price else "") for p in products]
+    def _line(p: Product) -> str:
+        bits = [str(p.price)] if p.price else []
+        if p.rating is not None:
+            bits.append(f"rated {p.rating}")
+        return p.title + (f" ({', '.join(bits)})" if bits else "")
+
+    parts = [_line(p) for p in products]
     if len(parts) <= 1:
         return "Here's what I have: " + (parts[0] if parts else "nothing yet") + "."
     return "Here are all " + str(len(parts)) + ", fetched just now: " + " vs. ".join(parts) + "."

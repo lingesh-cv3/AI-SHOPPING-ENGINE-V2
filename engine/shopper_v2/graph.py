@@ -4227,8 +4227,8 @@ def _superlative_reply(product: Product, query_intent) -> str:
     which = "cheapest" if query_intent.superlative == "min" else "most expensive"
     if query_intent.sort_attribute == "rating":
         which = "best rated" if query_intent.superlative == "max" else "lowest rated"
-        return f"The {which} one is {product.title}, rated {product.rating}."
-    return f"The {which} one is {product.title}, at {product.price}."
+        return f"The {which} one is {product.title}, rated {product.rating}{ranking.availability_note(product)}."
+    return f"The {which} one is {product.title}, at {product.price}{ranking.availability_note(product)}."
 
 
 def _apply_query_intent(

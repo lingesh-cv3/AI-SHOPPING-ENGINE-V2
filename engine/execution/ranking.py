@@ -19,7 +19,7 @@ guess. Never a model call, never a fabricated number.
 
 from __future__ import annotations
 
-from shared.models import Product
+from shared.models import Availability, Product
 
 #: The ONLY two real, comparable numeric attributes a `Product` carries.
 #: Adding a new sortable attribute means adding a real getter here - the
@@ -35,6 +35,16 @@ _ATTRIBUTE_GETTERS = {
 KNOWN_ATTRIBUTES = tuple(_ATTRIBUTE_GETTERS)
 
 
+def mixed_currencies(products: list[Product]) -> bool:
+    """True when the priced products here are in more than one currency - their amounts are then different units and must never be ranked against each other."""
+    return len({p.price.currency for p in products if p.price is not None}) > 1
+
+
+def availability_note(product: Product) -> str:
+    """" (currently out of stock)" for a product the platform reports as sold out, else "". A superlative pick must never read as buyable when it is not."""
+    return " (currently out of stock)" if product.availability == Availability.OUT_OF_STOCK else ""
+
+
 def sort_products(products: list[Product], attribute: str, direction: str) -> list[Product]:
     """Real, stable sort by `attribute` ("price"/"rating"), `direction`
     ("asc"/"desc"). A product missing a real value for `attribute` (no
@@ -47,6 +57,8 @@ def sort_products(products: list[Product], attribute: str, direction: str) -> li
     getter = _ATTRIBUTE_GETTERS.get(attribute)
     if getter is None:
         return products
+    if attribute == "price" and mixed_currencies(products):
+        return products  # different currencies are not comparable: leave the order alone rather than rank 900 JPY below 10 USD
     with_value = [(p, getter(p)) for p in products]
     known = [(p, v) for p, v in with_value if v is not None]
     unknown = [p for p, v in with_value if v is None]
@@ -63,6 +75,8 @@ def pick_superlative(products: list[Product], attribute: str, which: str) -> Pro
     getter = _ATTRIBUTE_GETTERS.get(attribute)
     if getter is None:
         return None
+    if attribute == "price" and mixed_currencies(products):
+        return None  # no honest cheapest/dearest across currencies (there is no exchange rate to use)
     scored = [(p, getter(p)) for p in products if getter(p) is not None]
     if not scored:
         return None
