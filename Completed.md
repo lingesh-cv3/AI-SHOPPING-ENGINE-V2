@@ -292,7 +292,7 @@ partial, unverified, or unbuilt.
   run referenced across this project's recent sessions.
 - **`auditroutes.py`**: probes every route's key requirement and shopper
   scoping, including two-cookie-jar cross-shopper checks.
-- **`tests/shopper_v2/`**: 27 files covering typed contracts, state
+- **`tests/shopper_v2/`**: about 100 standalone scripts (see ACCEPTANCE_MATRIX.md for the journey-by-journey run record and its gaps) covering typed contracts, state
   transitions, tenant isolation, zero-data/platform-down honesty, and
   phase-by-phase feature regressions (comparison, compatibility, cart
   proposal, checkout, payment recovery, missions, basket proposal,

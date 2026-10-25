@@ -262,7 +262,7 @@ client sends the same one on every re-attach). Same bearer key and visitor cooki
 | `done` | - | Terminal. Always the last event. |
 
 Every event carries a per-run increasing `id`; `: ping` comments are heartbeats (15 s). Clients ignore ids at or below the last one handled, malformed JSON and unknown types.
-**Reconnect:** a dropped or idle-closed connection is resumed by re-POSTing the same body and `request_id` with `Last-Event-ID`. The run lives in the engine process
+**Reconnect:** a dropped or idle-closed connection is resumed by re-POSTing the same body and `request_id` with `Last-Event-ID`; if the engine no longer knows that run (it restarted) the resume is refused `409 STREAM_RUN_LOST` and never re-executes. The run lives in the engine process
 (`RunRegistry`: atomic acquire, owner match, request body hash -> `REQUEST_ID_REUSED` on a mismatch, one turn per session -> `TURN_IN_PROGRESS`, 500 runs / 30 per owner -> `STREAM_BUSY`,
 events kept 300 s, 2000 events; afterwards a 24 h in-memory tombstone makes a late retry of the same `request_id` a `409 TURN_ALREADY_HANDLED`, never a second run), so a re-attach replays events and never re-executes the turn; a client disconnect or Stop never cancels the turn (it may be mid-mutation), its reply is still stored.
 
