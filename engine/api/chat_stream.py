@@ -53,11 +53,15 @@ MAX_RUNS = 500
 MAX_RUNS_PER_OWNER = 30
 MAX_EVENTS = 2000
 RUN_TTL_SECONDS = 300.0
+# How long a turn may run before the stream stops waiting for it and frees the session. The turn itself is NEVER cancelled (it may be mid-mutation):
+# it keeps running and, if it completes, writes its transcript as usual.
+TURN_TIMEOUT_SECONDS = 150.0
 # After a run's events are dropped, its (owner, body) is remembered this long so a late retry of the same request id is REFUSED rather than run again.
 TOMBSTONE_TTL_SECONDS = 86400.0
 MAX_TOMBSTONES = 50000
 
 TURN_FAILED_MESSAGE = "Something went wrong with that message. Please try again."
+TURN_TIMEOUT_MESSAGE = "That is taking longer than expected. If it finishes, the reply will appear in this conversation."
 
 
 class StreamChatRequest(ChatRequestV2):
@@ -219,7 +223,20 @@ async def _drive(run: TurnRun, req: StreamChatRequest, adapter, who: Visitor) ->
         return {"first_text_ms": first, "total_ms": int((now - run.started_at) * 1000)}
 
     try:
-        reply = await execute_turn(req, adapter, who)
+        inner = asyncio.ensure_future(execute_turn(req, adapter, who))
+        finished, _ = await asyncio.wait({inner}, timeout=TURN_TIMEOUT_SECONDS)
+        if not finished:
+            # Stop WAITING, not working: freeing the session lets the shopper send again, while the turn runs on to its own end.
+            def _log_late(task: asyncio.Task) -> None:
+                if not task.cancelled() and task.exception() is not None:
+                    logger.error("streaming turn failed after the stream gave up on it (%s)", run.key[:2], exc_info=task.exception())
+
+            inner.add_done_callback(_log_late)
+            run.emit("error", {"code": "TURN_TIMEOUT", "message": TURN_TIMEOUT_MESSAGE, "retryable": False})
+            run.emit("done", done_payload())
+            REGISTRY.finish(run)
+            return
+        reply = inner.result()
         data = reply.model_dump(mode="json")
         draft = sink.draft_text()
         data["draft_replaced"] = bool(draft) and draft not in (reply.reply or "")

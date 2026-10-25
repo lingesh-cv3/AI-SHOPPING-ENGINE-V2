@@ -1196,6 +1196,8 @@ export function shopperMessage(err: unknown): string {
       return "I'm still answering your last message - give me a moment.";
     case "STREAM_BUSY":
       return "I'm busy with a lot of conversations right now. Try again in a moment.";
+    case "TURN_TIMEOUT":
+      return "That is taking longer than expected. If it finishes, the reply will appear in this conversation.";
     case "TURN_ALREADY_HANDLED":
       return "That message was already handled - its reply is in this conversation.";
     case "REQUEST_ID_REUSED":

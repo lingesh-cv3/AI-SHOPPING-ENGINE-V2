@@ -408,6 +408,30 @@ async def checks():
         await c.aclose()
         chat_stream.REGISTRY.clear()
 
+        print("\n7c. A turn that outlasts the stream's patience frees the session, and still finishes once")
+        c, ses, crt = await fresh()
+        provider.mode = "normal"
+        await reach_comparison(c, ses, crt)
+        old_timeout, old_delay = chat_stream.TURN_TIMEOUT_SECONDS, provider.delay
+        chat_stream.TURN_TIMEOUT_SECONDS, provider.delay = 0.6, 0.5
+        try:
+            slow_body = body_for(ses, "compare the first two", cart_id=crt)
+            slow = await post_stream(c, base, pk_demo, slow_body)
+            check("the stream ends with a TURN_TIMEOUT error and done (no message)", slow.types()[-2:] == ["error", "done"] and "message" not in slow.types() and slow.of("error")[0]["data"]["code"] == "TURN_TIMEOUT", slow.types())
+            check("the timeout text is the fixed sentence", "taking longer than expected" in slow.of("error")[0]["data"]["message"])
+            provider.claims.append(claim(context_action="push"))
+            nxt = await post_stream(c, base, pk_demo, body_for(ses, "show me running shoes", cart_id=crt))
+            check("the session is free: a new message is not refused as in progress", nxt.status == 200 and nxt.types()[-1] == "done", (nxt.status, nxt.types()))
+        finally:
+            chat_stream.TURN_TIMEOUT_SECONDS = old_timeout
+        await asyncio.sleep(9.0)  # the abandoned turn runs on to its own end
+        provider.delay = old_delay
+        turns = (await c.get(f"{base}/api/chat/{CONN}/{ses}", headers={"Authorization": f"Bearer {pk_demo}"})).json().get("turns", [])
+        cmp_replies = [t for t in turns if t["speaker"] == "shopper" and "compare the first two" in t["text"]]
+        check("the abandoned turn was recorded exactly once", len(cmp_replies) == 1, [t["text"][:30] for t in turns if t["speaker"] == "shopper"])
+        await c.aclose()
+        chat_stream.REGISTRY.clear()
+
         print("\n8. Tenant and visitor isolation")
         victim, vsession, vcart = await fresh()
         provider.mode = "normal"
