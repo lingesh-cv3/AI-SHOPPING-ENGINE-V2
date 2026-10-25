@@ -383,7 +383,7 @@ async def checks():
               len(shoppers) == 2 and len(assistants) == 2, ([t["text"][:30] for t in shoppers], [t["text"][:30] for t in assistants]))
         await c.aclose()
 
-        print("\n7b. A retry of a finished request id AFTER its events were dropped is refused, never run again")
+        print("\n7b. A retry of a finished request id AFTER its in-memory run was dropped replays the stored result, never runs again")
         c, ses, crt = await fresh()
         provider.mode = "normal"
         await reach_comparison(c, ses, crt)
@@ -392,16 +392,19 @@ async def checks():
         first = await post_stream(c, base, pk_demo, late_body)
         check("the original request completed", first.types()[-2:] == ["message", "done"], first.types())
         before = (await c.get(f"{base}/api/chat/{CONN}/{ses}", headers={"Authorization": f"Bearer {pk_demo}"})).json().get("turns", [])
-        # the sweep runs inside this process's engine: expire the replay window by sweeping with a negative TTL
+        # the sweep runs inside this process's engine: expire the in-memory replay window by sweeping with a negative TTL
         old_ttl = chat_stream.RUN_TTL_SECONDS
         chat_stream.RUN_TTL_SECONDS = -1.0
         try:
             chat_stream.REGISTRY._sweep()
         finally:
             chat_stream.RUN_TTL_SECONDS = old_ttl
+        check("the run really left memory", (CONN, ses, rid) not in chat_stream.REGISTRY._runs)
         provider.claims.append(claim(capability="compare", context_action="continue", reference_scope="last_rendered", reference_kind="ordinal", reference_positions=[1, 2]))
         late = await post_stream(c, base, pk_demo, late_body)
-        check("the late retry is refused as already handled (409) with no events", late.status == 409 and not late.events, (late.status, late.types()))
+        check("the late retry is answered from the durable record: the same final reply", late.status == 200 and late.types()[-2:] == ["message", "done"]
+              and late.of("message")[0]["data"]["reply"] == first.of("message")[0]["data"]["reply"], (late.status, late.types()))
+        check("the provider was not asked again (the queued claim was not consumed)", len(provider.claims) == 1, len(provider.claims))
         after = (await c.get(f"{base}/api/chat/{CONN}/{ses}", headers={"Authorization": f"Bearer {pk_demo}"})).json().get("turns", [])
         check("the transcript is unchanged by the late retry", len(after) == len(before), (len(before), len(after)))
         provider.claims.clear()
@@ -432,7 +435,7 @@ async def checks():
         await c.aclose()
         chat_stream.REGISTRY.clear()
 
-        print("\n7d. Restart behaviour: a resume of a run this engine does not know is refused, never re-executed")
+        print("\n7d. Restart behaviour: a finished run replays from the durable record; an unknown run is never started by a resume")
         c, ses, crt = await fresh()
         rid = f"req_{uuid.uuid4().hex[:12]}"
         add = body_for(ses, "add Insulated Water Bottle 750ml", request_id=rid, cart_id=crt)
@@ -441,12 +444,18 @@ async def checks():
         qty = lambda cart: sum(ln.quantity for ln in cart.lines)  # noqa: E731
         check("and changed the cart once", qty(await adapter.get_cart(crt)) == 1)
         n_turns = len((await c.get(f"{base}/api/chat/{CONN}/{ses}", headers={"Authorization": f"Bearer {pk_demo}"})).json().get("turns", []))
-        chat_stream.REGISTRY.clear()  # what an engine restart does to the in-memory runs and tombstones
+        chat_stream.REGISTRY.clear()  # what an engine restart does to the in-memory runs; the durable record stays
         resumed = await post_stream(c, base, pk_demo, add, last_event_id=first.events[1]["id"])
-        check("a resume (Last-Event-ID > 0) after the restart is refused as STREAM_RUN_LOST (409), no events", resumed.status == 409 and not resumed.events, (resumed.status, resumed.types()))
+        check("a resume after the restart continues from the record: later events only, ending in message + done",
+              resumed.status == 200 and resumed.types()[-2:] == ["message", "done"] and all(e["id"] > first.events[1]["id"] for e in resumed.events), (resumed.status, resumed.types()))
+        check("the final reply is the original one", resumed.of("message")[0]["data"]["reply"] == first.of("message")[0]["data"]["reply"])
         check("the cart did not change again", qty(await adapter.get_cart(crt)) == 1)
         n_after = len((await c.get(f"{base}/api/chat/{CONN}/{ses}", headers={"Authorization": f"Bearer {pk_demo}"})).json().get("turns", []))
         check("and no second transcript entry was written", n_after == n_turns, (n_turns, n_after))
+        chat_stream.REGISTRY.clear()
+        stray = await post_stream(c, base, pk_demo, body_for(ses, "add Insulated Water Bottle 750ml", request_id=f"req_{uuid.uuid4().hex[:12]}", cart_id=crt), last_event_id=3)
+        check("a resume of a request id with NO record is refused STREAM_RUN_LOST (409), no events", stray.status == 409 and not stray.events, (stray.status, stray.types()))
+        check("and it ran nothing", qty(await adapter.get_cart(crt)) == 1)
         await c.aclose()
         chat_stream.REGISTRY.clear()
 
@@ -507,8 +516,8 @@ async def checks():
         from fastapi import HTTPException
 
         try:
-            chat_stream.REGISTRY.acquire((CONN, "someone_elses_session", "req_x1234567"), ["owner-a"], "h")
-            chat_stream.REGISTRY.acquire((CONN, "someone_elses_session", "req_x1234567"), ["owner-b"], "h")
+            await chat_stream.REGISTRY.acquire((CONN, "someone_elses_session", "req_x1234567"), ["owner-a"], "h")
+            await chat_stream.REGISTRY.acquire((CONN, "someone_elses_session", "req_x1234567"), ["owner-b"], "h")
             leaked = True
         except HTTPException as exc:
             leaked = not (exc.status_code == 404 and exc.detail["code"] == "SESSION_NOT_FOUND")
@@ -559,9 +568,9 @@ async def checks():
         old = chat_stream.MAX_RUNS_PER_OWNER
         chat_stream.MAX_RUNS_PER_OWNER = 1
         try:
-            chat_stream.REGISTRY.acquire((CONN, "cap_s1", "req_cap00001"), ["cap-owner"], "h")
+            await chat_stream.REGISTRY.acquire((CONN, "cap_s1", "req_cap00001"), ["cap-owner"], "h")
             try:
-                chat_stream.REGISTRY.acquire((CONN, "cap_s2", "req_cap00002"), ["cap-owner"], "h")
+                await chat_stream.REGISTRY.acquire((CONN, "cap_s2", "req_cap00002"), ["cap-owner"], "h")
                 capped = None
             except HTTPException as exc:
                 capped = exc.status_code

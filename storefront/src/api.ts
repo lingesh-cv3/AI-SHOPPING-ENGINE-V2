@@ -1196,6 +1196,10 @@ export function shopperMessage(err: unknown): string {
       return "I'm still answering your last message - give me a moment.";
     case "STREAM_BUSY":
       return "I'm busy with a lot of conversations right now. Try again in a moment.";
+    case "TURN_INTERRUPTED":
+      return "That message was interrupted before it finished. Check this conversation, and send it again if you still want it.";
+    case "STREAM_UNAVAILABLE":
+      return "I can't take messages for a moment. Please try again shortly.";
     case "STREAM_RUN_LOST":
       return "That reply was interrupted and I can't pick it back up. Check this conversation - it may already be there.";
     case "TURN_TIMEOUT":

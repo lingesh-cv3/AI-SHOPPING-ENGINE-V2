@@ -36,6 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import Field
 
+from engine import db
 from engine.reasoning.stream_sink import REPLY_SINK
 from engine.shopper_v2.streaming import TURN_EVENTS, TurnStreamSink
 
@@ -56,9 +57,6 @@ RUN_TTL_SECONDS = 300.0
 # How long a turn may run before the stream stops waiting for it and frees the session. The turn itself is NEVER cancelled (it may be mid-mutation):
 # it keeps running and, if it completes, writes its transcript as usual.
 TURN_TIMEOUT_SECONDS = 150.0
-# After a run's events are dropped, its (owner, body) is remembered this long so a late retry of the same request id is REFUSED rather than run again.
-TOMBSTONE_TTL_SECONDS = 86400.0
-MAX_TOMBSTONES = 50000
 
 TURN_FAILED_MESSAGE = "Something went wrong with that message. Please try again."
 TURN_TIMEOUT_MESSAGE = "That is taking longer than expected. If it finishes, the reply will appear in this conversation."
@@ -122,54 +120,81 @@ class TurnRun:
 
 
 class RunRegistry:
-    """Bounded, in-process registry of streaming runs. `acquire` is synchronous so the check and the insert cannot interleave."""
+    """Bounded registry of streaming runs: an in-process hot path over a DURABLE record (`db.stream_runs`).
+
+    The durable row is committed BEFORE a turn starts, so after any restart the engine can still say whether a request id was ever started, by whom, for which
+    exact message, and what it ended with:
+      - finished ("done"/"error"): replayed from the stored events (provisional drafts are not stored), the turn is never run again;
+      - never finished ("running" with no live run in this process = INTERRUPTED): refused `TURN_INTERRUPTED`, never run again - it may or may not have changed
+        the cart or written the transcript, so the shopper decides whether to send the message again (a new request id);
+      - not found: a first attempt runs, unless the client says it already received events (`resuming`) in which case the run is gone and is refused `STREAM_RUN_LOST`.
+    `acquire` runs under one lock, so two simultaneous posts of the same request id can never both create it. If the durable store cannot be used the request is refused
+    (`STREAM_UNAVAILABLE`): running a turn with no record is how a duplicate happens.
+    """
 
     def __init__(self) -> None:
         self._runs: dict[tuple[str, str, str], TurnRun] = {}
         self._active: dict[tuple[str, str], tuple[str, str, str]] = {}
-        # key -> (owner keys, body hash, when it was swept). In memory only: an engine restart forgets it (documented limit).
-        self._tombstones: dict[tuple[str, str, str], tuple[frozenset, str, float]] = {}
+        self._lock = asyncio.Lock()
+        self._last_purge = 0.0
 
     def clear(self) -> None:
+        """Forget the in-memory runs (what an engine restart does). The durable record is untouched."""
         self._runs.clear()
         self._active.clear()
-        self._tombstones.clear()
 
     def _sweep(self) -> None:
         cutoff = time.monotonic() - RUN_TTL_SECONDS
         for key in [k for k, r in self._runs.items() if r.finished_at is not None and r.finished_at < cutoff]:
-            run = self._runs.pop(key)
-            self._tombstones[key] = (run.owner_keys, run.body_hash, time.monotonic())
-        old = time.monotonic() - TOMBSTONE_TTL_SECONDS
-        for key in [k for k, t in self._tombstones.items() if t[2] < old]:
-            del self._tombstones[key]
-        while len(self._tombstones) > MAX_TOMBSTONES:
-            del self._tombstones[next(iter(self._tombstones))]
+            del self._runs[key]
 
-    def acquire(self, key: tuple[str, str, str], owner_keys: list[str], body_hash: str, *, resuming: bool = False) -> tuple[TurnRun, bool]:
-        """Attach to the run for `key`, or create it. Returns (run, created). Raises HTTPException for the refusals.
+    @staticmethod
+    def _not_found() -> HTTPException:
+        # identical to a conversation that does not exist: no oracle for "that request id is real"
+        return HTTPException(404, detail={"code": "SESSION_NOT_FOUND", "message": "no such conversation", "retryable": False})
 
-        `resuming` is true when the client says it already received events of this run (Last-Event-ID > 0). A run that is then unknown here - the engine
-        restarted, or the run was swept without a tombstone - must NEVER be started again: the first attempt may have finished and written its transcript or
-        changed the cart, and the client cannot tell us which."""
+    @staticmethod
+    def _unavailable() -> HTTPException:
+        return HTTPException(503, detail={"code": "STREAM_UNAVAILABLE", "message": "streaming is unavailable right now; try again in a moment", "retryable": True})
+
+    async def acquire(self, key: tuple[str, str, str], owner_keys: list[str], body_hash: str, *, resuming: bool = False) -> tuple[TurnRun, bool]:
+        """Attach to the run for `key`, rebuild it from the durable record, or create it. Returns (run, created). Raises HTTPException for the refusals."""
+        async with self._lock:
+            return await self._acquire_locked(key, owner_keys, body_hash, resuming)
+
+    async def _acquire_locked(self, key, owner_keys, body_hash, resuming):
         self._sweep()
         owners = frozenset(owner_keys)
         existing = self._runs.get(key)
         if existing is not None:
             if not (owners & existing.owner_keys):
-                # identical to a conversation that does not exist: no oracle for "that request id is real"
-                raise HTTPException(404, detail={"code": "SESSION_NOT_FOUND", "message": "no such conversation", "retryable": False})
+                raise self._not_found()
             if existing.body_hash != body_hash:
                 raise HTTPException(409, detail={"code": "REQUEST_ID_REUSED", "message": "that request id was already used for a different message", "retryable": False})
             return existing, False
-        tomb = self._tombstones.get(key)
-        if tomb is not None:
-            if not (owners & tomb[0]):
-                raise HTTPException(404, detail={"code": "SESSION_NOT_FOUND", "message": "no such conversation", "retryable": False})
-            if tomb[1] != body_hash:
+
+        try:
+            row = await db.stream_runs.get(*key)
+        except Exception:  # noqa: BLE001 - fail closed, details are logged
+            logger.exception("stream run record unreadable (%s)", key[:2])
+            raise self._unavailable() from None
+        if row is not None:
+            if not (owners & set(row["owner_keys"])):
+                raise self._not_found()
+            if row["body_hash"] != body_hash:
                 raise HTTPException(409, detail={"code": "REQUEST_ID_REUSED", "message": "that request id was already used for a different message", "retryable": False})
-            # The turn already ran (and may have changed the cart): never run it again. Its reply is in the stored conversation.
-            raise HTTPException(409, detail={"code": "TURN_ALREADY_HANDLED", "message": "that message was already handled", "retryable": False})
+            if row["status"] in {"done", "error"}:
+                run = TurnRun(key=key, owner_keys=frozenset(row["owner_keys"]), body_hash=row["body_hash"], status="done", finished_at=time.monotonic())
+                run.events = [StreamEvent(e["id"], e["type"], e["data"]) for e in row["events"]]
+                self._runs[key] = run
+                return run, False
+            # "running" with no live run in this process (the live ones were found above), or already marked: an interrupted turn
+            try:
+                await db.stream_runs.mark_interrupted(*key)
+            except Exception:  # noqa: BLE001
+                logger.exception("could not mark stream run interrupted (%s)", key[:2])
+            raise HTTPException(409, detail={"code": "TURN_INTERRUPTED", "message": "that message was interrupted before it finished", "retryable": False})
+
         if resuming:
             raise HTTPException(409, detail={"code": "STREAM_RUN_LOST", "message": "that reply was interrupted and can no longer be resumed", "retryable": False})
         session_key = (key[0], key[1])
@@ -179,17 +204,49 @@ class RunRegistry:
         mine = sum(1 for r in self._runs.values() if r.active and owners & r.owner_keys)
         if len(self._runs) >= MAX_RUNS or mine >= MAX_RUNS_PER_OWNER:
             raise HTTPException(429, detail={"code": "STREAM_BUSY", "message": "too many conversations are streaming right now; try again in a moment", "retryable": True})
+        try:
+            created = await db.stream_runs.begin(key[0], key[1], key[2], owner_keys, body_hash)
+        except Exception:  # noqa: BLE001
+            logger.exception("could not record stream run (%s)", key[:2])
+            raise self._unavailable() from None
+        if not created:  # someone else committed this id between our read and our insert: never ours to run
+            winner = await db.stream_runs.get(*key)
+            if winner is not None and not (owners & set(winner["owner_keys"])):
+                raise self._not_found()  # same answer as a conversation that does not exist
+            raise HTTPException(409, detail={"code": "TURN_IN_PROGRESS", "message": "that conversation is still answering the last message", "retryable": True})
         run = TurnRun(key=key, owner_keys=owners, body_hash=body_hash)
         self._runs[key] = run
         self._active[session_key] = key
+        await self._maybe_purge()
         return run, True
 
-    def finish(self, run: TurnRun) -> None:
+    async def _maybe_purge(self) -> None:
+        if time.monotonic() - self._last_purge < 3600:
+            return
+        self._last_purge = time.monotonic()
+        try:
+            await db.stream_runs.purge()
+        except Exception:  # noqa: BLE001 - housekeeping only
+            logger.exception("could not purge old stream runs")
+
+    async def finish(self, run: TurnRun) -> None:
+        """Mark the run ended and store how it ended. A storage failure is logged and leaves the row "running", which a later request reads as INTERRUPTED -
+        the safe reading (never re-run)."""
+        if run.status == "done":
+            return
         run.status = "done"
         run.finished_at = time.monotonic()
         session_key = (run.key[0], run.key[1])
         if self._active.get(session_key) == run.key:
             del self._active[session_key]
+        outcome = "done" if any(e.type == "message" for e in run.events) else "error"
+        try:
+            await db.stream_runs.complete(
+                run.key[0], run.key[1], run.key[2], outcome,
+                [{"id": e.id, "type": e.type, "data": e.data} for e in run.events],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("could not store the outcome of stream run (%s)", run.key[:2])
 
 
 REGISTRY = RunRegistry()
@@ -240,7 +297,7 @@ async def _drive(run: TurnRun, req: StreamChatRequest, adapter, who: Visitor) ->
             inner.add_done_callback(_log_late)
             run.emit("error", {"code": "TURN_TIMEOUT", "message": TURN_TIMEOUT_MESSAGE, "retryable": False})
             run.emit("done", done_payload())
-            REGISTRY.finish(run)
+            await REGISTRY.finish(run)
             return
         reply = inner.result()
         data = reply.model_dump(mode="json")
@@ -251,13 +308,13 @@ async def _drive(run: TurnRun, req: StreamChatRequest, adapter, who: Visitor) ->
     except asyncio.CancelledError:
         run.emit("error", {"code": "TURN_FAILED", "message": TURN_FAILED_MESSAGE, "retryable": True})
         run.emit("done", done_payload())
-        REGISTRY.finish(run)
+        await REGISTRY.finish(run)
         raise
     except Exception:  # noqa: BLE001 - the exception text is logged, never sent
         logger.exception("streaming turn failed (%s)", run.key[:2])
         run.emit("error", {"code": "TURN_FAILED", "message": TURN_FAILED_MESSAGE, "retryable": True})
     run.emit("done", done_payload())
-    REGISTRY.finish(run)
+    await REGISTRY.finish(run)
 
 
 async def _sse(run: TurnRun, after: int):
@@ -295,7 +352,7 @@ async def chat_v2_stream(
     """One shopper turn as SSE. Authorisation is identical to `/api/v2/chat` and happens BEFORE the stream starts, so a refusal is an ordinary HTTP error."""
     adapter = await authorize_turn(req, key, who)
     owner_keys = await who.keys_for(req.connection_id)
-    run, created = REGISTRY.acquire((req.connection_id, req.session_id, req.request_id), owner_keys, _body_hash(req), resuming=_last_event_id(request) > 0)
+    run, created = await REGISTRY.acquire((req.connection_id, req.session_id, req.request_id), owner_keys, _body_hash(req), resuming=_last_event_id(request) > 0)
     if created:
         run.emit("start", {"request_id": req.request_id})
         # strong reference on the run: the loop only holds tasks weakly

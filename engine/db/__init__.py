@@ -90,6 +90,7 @@ from . import owners
 # Imported after the models/session for the same reason as the modules above.
 from . import shopping_state
 from . import memory_facts
+from . import stream_runs
 
 # The cart-proposal layer: model suggestion -> stored proposal -> shopper
 # approval -> execution. Imported after the models/session for the same
@@ -164,6 +165,7 @@ __all__ = [
     "ShopperEvent",
     "shopping_state",
     "memory_facts",
+    "stream_runs",
     "CartProposal",
     "cart_proposals",
 ]

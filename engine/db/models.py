@@ -649,6 +649,37 @@ class MerchantTask(Base):
     )
 
 
+class StreamRun(Base):
+    """One streamed shopper turn, recorded BEFORE the turn runs and completed after it ends.
+
+    This is the duplicate-turn guard that survives an engine restart. The in-memory run registry is only the hot path: whether a request id was ever
+    started, by whom, for which exact message, and what it ended with, is answered from here. Rules (see `engine/api/chat_stream.py`):
+      - the row is committed before the turn starts, so a crash can never leave an executed turn with no record;
+      - `status` is "running" until the run ends, then "done" (a final message was produced) or "error" (a fixed error was sent);
+      - a "running" row that no live run in this process owns is an INTERRUPTED turn: it may or may not have changed the cart or written the
+        transcript, so it is never run again under the same id - the shopper starts a new message if they still want it;
+      - `events_json` holds the run's events minus the provisional `delta` drafts, with their original ids, so a finished run replays after a restart.
+    A request id is scoped to (connection, session); `owner_keys` are the opaque visitor/account keys that started it and gate every later read.
+    """
+
+    __tablename__ = "stream_runs"
+    __table_args__ = (
+        UniqueConstraint("connection_id", "session_id", "request_id", name="uq_stream_run"),
+        Index("ix_stream_runs_created", "created_at"),
+    )
+
+    run_row_id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(String(64))
+    request_id: Mapped[str] = mapped_column(String(64))
+    owner_keys: Mapped[list] = mapped_column(JSON)
+    body_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    events_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ResourceOwner(Base):
     """Who a cart, a conversation or an order belongs to.
 

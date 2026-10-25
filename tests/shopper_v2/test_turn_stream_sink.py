@@ -12,6 +12,10 @@ from __future__ import annotations
 import os
 import sys
 
+_DB = os.path.join(os.path.dirname(__file__), "..", "..", "_test_turn_stream_sink.db")
+for _suffix in ("", "-journal", "-wal", "-shm"):  # the registry now keeps a durable record: start every run from nothing
+    if os.path.exists(_DB + _suffix):
+        os.remove(_DB + _suffix)
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./_test_turn_stream_sink.db"
 os.environ["OPENAI_API_KEY"] = ""
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -199,31 +203,34 @@ async def checks():
     print("\n11. The run registry")
     from engine.api import chat_stream as cs
 
+    from engine.db import create_schema
+
+    await create_schema()
     reg = cs.RunRegistry()
     key = ("conn_demo", "sess_1", "req_00000001")
-    run, created = reg.acquire(key, ["owner-a"], "hash-1")
+    run, created = await reg.acquire(key, ["owner-a"], "hash-1")
     check("a new request id creates a run", created and run.active)
-    same, created2 = reg.acquire(key, ["owner-a"], "hash-1")
+    same, created2 = await reg.acquire(key, ["owner-a"], "hash-1")
     check("the same request id from the same owner ATTACHES to that run (no second run)", same is run and not created2)
     for owners, h, label, status, code in ((["owner-b"], "hash-1", "another owner", 404, "SESSION_NOT_FOUND"), (["owner-a"], "hash-2", "a different body", 409, "REQUEST_ID_REUSED")):
         try:
-            reg.acquire(key, owners, h)
+            await reg.acquire(key, owners, h)
             got = None
         except HTTPException as exc:
             got = (exc.status_code, exc.detail["code"])
         check(f"{label}: {status} {code}", got == (status, code), got)
     try:
-        reg.acquire(("conn_demo", "sess_1", "req_00000002"), ["owner-a"], "hash-3")
+        await reg.acquire(("conn_demo", "sess_1", "req_00000002"), ["owner-a"], "hash-3")
         got = None
     except HTTPException as exc:
         got = (exc.status_code, exc.detail["code"], exc.detail["retryable"])
     check("a different request id while the session is still answering: 409 TURN_IN_PROGRESS (retryable)", got == (409, "TURN_IN_PROGRESS", True), got)
-    reg.finish(run)
-    r2, c2 = reg.acquire(("conn_demo", "sess_1", "req_00000002"), ["owner-a"], "hash-3")
+    await reg.finish(run)
+    r2, c2 = await reg.acquire(("conn_demo", "sess_1", "req_00000002"), ["owner-a"], "hash-3")
     check("once the run finished a new request id is accepted", c2 and r2 is not run)
-    r3, c3 = reg.acquire(("conn_demo", "sess_2", "req_00000003"), ["owner-a"], "hash-4")
+    r3, c3 = await reg.acquire(("conn_demo", "sess_2", "req_00000003"), ["owner-a"], "hash-4")
     check("another session is independent (single flight is per session)", c3)
-    r_other, c_other = reg.acquire(("conn_kettle", "sess_1", "req_00000001"), ["owner-a"], "hash-1")
+    r_other, c_other = await reg.acquire(("conn_kettle", "sess_1", "req_00000001"), ["owner-a"], "hash-1")
     check("the same session id and request id under another merchant is a different run", c_other and r_other is not run)
 
     print("\n12. Caps never evict a live run; finished runs expire; the event cap keeps what matters")
@@ -231,23 +238,23 @@ async def checks():
     try:
         cs.MAX_RUNS_PER_OWNER = 2
         cap = cs.RunRegistry()
-        cap.acquire(("c", "s1", "req_cap00001"), ["o"], "h")
-        cap.acquire(("c", "s2", "req_cap00002"), ["o"], "h")
+        await cap.acquire(("c", "s1", "req_cap00001"), ["o"], "h")
+        await cap.acquire(("c", "s2", "req_cap00002"), ["o"], "h")
         try:
-            cap.acquire(("c", "s3", "req_cap00003"), ["o"], "h")
+            await cap.acquire(("c", "s3", "req_cap00003"), ["o"], "h")
             got = None
         except HTTPException as exc:
             got = exc.status_code
         check("over the per-owner cap: 429, and the live runs are still there", got == 429 and len(cap._runs) == 2, (got, len(cap._runs)))
-        cap.acquire(("c", "s9", "req_cap00009"), ["other-owner"], "h")
+        await cap.acquire(("c", "s9", "req_cap00009"), ["other-owner"], "h")
         check("one owner at the cap does not block another", len(cap._runs) == 3)
         cs.MAX_RUNS_PER_OWNER = 30
         cs.MAX_RUNS = 2
         glob = cs.RunRegistry()
-        glob.acquire(("c", "a", "req_glob0001"), ["x"], "h")
-        glob.acquire(("c", "b", "req_glob0002"), ["y"], "h")
+        await glob.acquire(("c", "a", "req_glob0001"), ["x"], "h")
+        await glob.acquire(("c", "b", "req_glob0002"), ["y"], "h")
         try:
-            glob.acquire(("c", "c", "req_glob0003"), ["z"], "h")
+            await glob.acquire(("c", "c", "req_glob0003"), ["z"], "h")
             got = None
         except HTTPException as exc:
             got = exc.status_code
@@ -255,14 +262,14 @@ async def checks():
         cs.MAX_RUNS = 500
         cs.RUN_TTL_SECONDS = 0.0
         ttl = cs.RunRegistry()
-        old_run, _ = ttl.acquire(("c", "s", "req_ttl00001"), ["o"], "h")
-        ttl.finish(old_run)
+        old_run, _ = await ttl.acquire(("c", "s", "req_ttl00001"), ["o"], "h")
+        await ttl.finish(old_run)
         await asyncio.sleep(0.01)
-        ttl.acquire(("c", "other", "req_ttl00002"), ["o"], "h")
+        await ttl.acquire(("c", "other", "req_ttl00002"), ["o"], "h")
         check("a finished run past its TTL is dropped on the next acquire", ("c", "s", "req_ttl00001") not in ttl._runs)
-        live, _ = ttl.acquire(("c", "live", "req_ttl00003"), ["o"], "h")
+        live, _ = await ttl.acquire(("c", "live", "req_ttl00003"), ["o"], "h")
         await asyncio.sleep(0.01)
-        ttl.acquire(("c", "x", "req_ttl00004"), ["o"], "h")
+        await ttl.acquire(("c", "x", "req_ttl00004"), ["o"], "h")
         check("a LIVE run is never expired", ("c", "live", "req_ttl00003") in ttl._runs)
         cs.MAX_EVENTS = 5
         run_cap = cs.TurnRun(key=("c", "s", "r"), owner_keys=frozenset({"o"}), body_hash="h")
