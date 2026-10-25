@@ -432,6 +432,65 @@ async def checks():
         await c.aclose()
         chat_stream.REGISTRY.clear()
 
+        print("\n7d. Restart behaviour: a resume of a run this engine does not know is refused, never re-executed")
+        c, ses, crt = await fresh()
+        rid = f"req_{uuid.uuid4().hex[:12]}"
+        add = body_for(ses, "add Insulated Water Bottle 750ml", request_id=rid, cart_id=crt)
+        first = await post_stream(c, base, pk_demo, add)
+        check("the original add completed", first.types()[-2:] == ["message", "done"], first.types())
+        qty = lambda cart: sum(ln.quantity for ln in cart.lines)  # noqa: E731
+        check("and changed the cart once", qty(await adapter.get_cart(crt)) == 1)
+        n_turns = len((await c.get(f"{base}/api/chat/{CONN}/{ses}", headers={"Authorization": f"Bearer {pk_demo}"})).json().get("turns", []))
+        chat_stream.REGISTRY.clear()  # what an engine restart does to the in-memory runs and tombstones
+        resumed = await post_stream(c, base, pk_demo, add, last_event_id=first.events[1]["id"])
+        check("a resume (Last-Event-ID > 0) after the restart is refused as STREAM_RUN_LOST (409), no events", resumed.status == 409 and not resumed.events, (resumed.status, resumed.types()))
+        check("the cart did not change again", qty(await adapter.get_cart(crt)) == 1)
+        n_after = len((await c.get(f"{base}/api/chat/{CONN}/{ses}", headers={"Authorization": f"Bearer {pk_demo}"})).json().get("turns", []))
+        check("and no second transcript entry was written", n_after == n_turns, (n_turns, n_after))
+        await c.aclose()
+        chat_stream.REGISTRY.clear()
+
+        print("\n7e. Two truly parallel turns on one session (one streamed, one plain): both finish, nothing is lost or duplicated")
+        c, ses, crt = await fresh()
+        provider.mode = "normal"
+        await reach_comparison(c, ses, crt)
+        old_delay = provider.delay
+        provider.delay = 0.3
+        streamed = asyncio.create_task(post_stream(c, base, pk_demo, body_for(ses, "compare the first two", cart_id=crt)))
+        await asyncio.sleep(0.8)  # the streamed turn is mid-synthesis
+        plain = await c.post(f"{base}/api/v2/chat", json={"connection_id": CONN, "session_id": ses, "message": "hello there", "cart_id": crt}, headers={"Authorization": f"Bearer {pk_demo}"}, timeout=60)
+        s_done = await streamed
+        provider.delay = old_delay
+        check("the plain turn answered while the stream was open (it is not blocked by it)", plain.status_code == 200, plain.status_code)
+        check("the streamed turn still completed with its message", s_done.types()[-2:] == ["message", "done"], s_done.types())
+        turns = (await c.get(f"{base}/api/chat/{CONN}/{ses}", headers={"Authorization": f"Bearer {pk_demo}"})).json().get("turns", [])
+        speakers = [t["speaker"] for t in turns]
+        check("every message got exactly one reply: 3 shopper and 3 assistant turns in all", speakers.count("shopper") == 3 and speakers.count("assistant") == 3, speakers)
+        check("no shopper message appears twice", len({t["text"] for t in turns if t["speaker"] == "shopper"}) == 3)
+        print("      (observed transcript order: " + ", ".join(f"{t['speaker'][0]}:{t['text'][:18]!r}" for t in turns) + ")")
+        await c.aclose()
+        chat_stream.REGISTRY.clear()
+
+        print("\n7f. The platform fails mid-turn on a typed add: an honest reply, no raw error, no half-written cart")
+        c, ses, crt = await fresh()
+        real_add = adapter.add_to_cart
+
+        async def broken_add(*a, **k):
+            raise RuntimeError("PLATFORM-INTERNAL-TRACE /srv/secret 502 bad gateway")
+
+        adapter.add_to_cart = broken_add
+        try:
+            down = await post_stream(c, base, pk_demo, body_for(ses, "add Insulated Water Bottle 750ml", cart_id=crt))
+        finally:
+            adapter.add_to_cart = real_add
+        check("the turn ends cleanly (done), not with a hang", down.types()[-1] == "done", down.types())
+        wire = json.dumps(down.events)
+        check("no raw platform text on the wire", "PLATFORM-INTERNAL" not in wire and "/srv/secret" not in wire and "bad gateway" not in wire, [m for m in ("PLATFORM-INTERNAL", "/srv/secret", "bad gateway") if m in wire])
+        check("the shopper gets a reply or a fixed error (never nothing)", bool(down.of("message")) or bool(down.of("error")), down.types())
+        check("the cart is untouched", sum(ln.quantity for ln in (await adapter.get_cart(crt)).lines) == 0)
+        await c.aclose()
+        chat_stream.REGISTRY.clear()
+
         print("\n8. Tenant and visitor isolation")
         victim, vsession, vcart = await fresh()
         provider.mode = "normal"
@@ -568,7 +627,7 @@ async def checks():
         source = open(os.path.join(os.path.dirname(__file__), "..", "..", "engine", "api", "chat_stream.py"), encoding="utf-8").read()
         imports = "\n".join(line for line in source.splitlines() if line.startswith(("from ", "import ")))
         check("static: the stream module imports nothing from the payment or idempotency modules", not re.search(r"payment|idempotency|checkout_with_card|/pay", imports), imports)
-        check("static: it never mentions a pay route", "/api/chat/pay" not in source.replace("never calls a pay route", "") or True)
+        check("static: it never mentions a pay route", "/api/chat/pay" not in source and "/pay" not in source)
         await c.aclose()
 
         check("the ContextVar sink did not leak into this task", REPLY_SINK.get() is None)

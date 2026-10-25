@@ -57,6 +57,10 @@ print("3. The model-free comparison shows ratings when the platform has them, an
 line = compare._deterministic_comparison([p("A", 10, rating=4.5), p("B", 12)])
 check("a rated product shows its rating", "Item A" in line and "rated 4.5" in line, line)
 check("an unrated product shows no rating", "Item B" in line and line.count("rated") == 1, line)
+three = compare._deterministic_comparison([p("A", 10), p("B", 900, "JPY"), p("C", 7, availability=Availability.OUT_OF_STOCK)])
+check("three products are all named, in order, with no 'which is cheaper' claim across currencies", three.index("Item A") < three.index("Item B") < three.index("Item C") and "cheaper" not in three.lower(), three)
+check("a sold-out product in a comparison is labelled", "Item C (7 USD) (currently out of stock)" in three or ("Item C" in three and "out of stock" in three), three)
+check("an in-stock product in the same comparison is not", three.count("out of stock") == 1, three)
 
 print(f"\n  {'ALL CHECKS PASSED' if failures == 0 else f'{failures} CHECK(S) FAILED'}")
 sys.exit(1 if failures else 0)

@@ -146,8 +146,12 @@ class RunRegistry:
         while len(self._tombstones) > MAX_TOMBSTONES:
             del self._tombstones[next(iter(self._tombstones))]
 
-    def acquire(self, key: tuple[str, str, str], owner_keys: list[str], body_hash: str) -> tuple[TurnRun, bool]:
-        """Attach to the run for `key`, or create it. Returns (run, created). Raises HTTPException for the refusals."""
+    def acquire(self, key: tuple[str, str, str], owner_keys: list[str], body_hash: str, *, resuming: bool = False) -> tuple[TurnRun, bool]:
+        """Attach to the run for `key`, or create it. Returns (run, created). Raises HTTPException for the refusals.
+
+        `resuming` is true when the client says it already received events of this run (Last-Event-ID > 0). A run that is then unknown here - the engine
+        restarted, or the run was swept without a tombstone - must NEVER be started again: the first attempt may have finished and written its transcript or
+        changed the cart, and the client cannot tell us which."""
         self._sweep()
         owners = frozenset(owner_keys)
         existing = self._runs.get(key)
@@ -166,6 +170,8 @@ class RunRegistry:
                 raise HTTPException(409, detail={"code": "REQUEST_ID_REUSED", "message": "that request id was already used for a different message", "retryable": False})
             # The turn already ran (and may have changed the cart): never run it again. Its reply is in the stored conversation.
             raise HTTPException(409, detail={"code": "TURN_ALREADY_HANDLED", "message": "that message was already handled", "retryable": False})
+        if resuming:
+            raise HTTPException(409, detail={"code": "STREAM_RUN_LOST", "message": "that reply was interrupted and can no longer be resumed", "retryable": False})
         session_key = (key[0], key[1])
         active_key = self._active.get(session_key)
         if active_key is not None and active_key in self._runs and self._runs[active_key].active:
@@ -289,7 +295,7 @@ async def chat_v2_stream(
     """One shopper turn as SSE. Authorisation is identical to `/api/v2/chat` and happens BEFORE the stream starts, so a refusal is an ordinary HTTP error."""
     adapter = await authorize_turn(req, key, who)
     owner_keys = await who.keys_for(req.connection_id)
-    run, created = REGISTRY.acquire((req.connection_id, req.session_id, req.request_id), owner_keys, _body_hash(req))
+    run, created = REGISTRY.acquire((req.connection_id, req.session_id, req.request_id), owner_keys, _body_hash(req), resuming=_last_event_id(request) > 0)
     if created:
         run.emit("start", {"request_id": req.request_id})
         # strong reference on the run: the loop only holds tasks weakly

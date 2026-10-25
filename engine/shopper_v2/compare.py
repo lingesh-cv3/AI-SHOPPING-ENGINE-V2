@@ -495,7 +495,7 @@ def _deterministic_comparison(products: list[Product]) -> str:
         bits = [str(p.price)] if p.price else []
         if p.rating is not None:
             bits.append(f"rated {p.rating}")
-        return p.title + (f" ({', '.join(bits)})" if bits else "")
+        return p.title + (f" ({', '.join(bits)})" if bits else "") + ranking.availability_note(p)
 
     parts = [_line(p) for p in products]
     if len(parts) <= 1:

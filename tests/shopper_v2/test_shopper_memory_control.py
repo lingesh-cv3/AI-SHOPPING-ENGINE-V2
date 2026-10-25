@@ -96,6 +96,14 @@ async def main() -> None:
         check("everything of ann's at Northfield went", out["forgotten"] == 2 and await memory_facts.for_shopper(A, ann) == [], out)
         check("ann's Kettle fact is untouched by a Northfield wipe", len(await memory_facts.for_shopper(K, ann_k)) == 1)
 
+        print("4b. A later statement supersedes the earlier one (one row), and recall does not depend on the conversation")
+        await memory_facts.upsert(A, bob, key="budget_style", value="likes to spend little", source_session_id="sess_monday")
+        await memory_facts.upsert(A, bob, key="budget_style", value="now happy to spend more", source_session_id="sess_friday")
+        rows = [f for f in await memory_facts.for_shopper(A, bob) if f["key"] == "budget_style"]
+        check("exactly one row, holding the newer value", len(rows) == 1 and rows[0]["value"] == "now happy to spend more", rows)
+        check("a different conversation id does not matter: recall is by shopper and merchant", any(f["key"] == "budget_style" for f in await memory_facts.for_shopper(A, bob)))
+        check("a guest id has no facts (guests are never remembered)", await memory_facts.for_shopper(A, "guest_visitor_key") == [])
+
         print("5. After forgetting, a new statement starts fresh")
         await memory_facts.upsert(A, ann, key="prefers_light", value="prefers durable gear")
         again = await memory_facts.for_shopper(A, ann)
